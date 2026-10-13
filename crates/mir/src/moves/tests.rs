@@ -303,6 +303,114 @@ static main = fn() -> () {
 }
 
 #[test]
+fn a_return_mid_call_abandons_an_argument_already_made() {
+    // `make(1)` is evaluated into a temporary before `return` runs, and
+    // the call that would consume it never happens.
+    check_linear(
+        r#"
+static take2 = fn(r: Res, n: usize) -> () { r.drop(); };
+static main = fn() -> () {
+    take2(make(1), return);
+};
+"#,
+        expect![[r#"
+            439..445: this value is not consumed on this path; its type has no `forget` capability, so every path must consume it (this value is born here and must be consumed at 430..437)
+        "#]],
+    );
+}
+
+#[test]
+fn a_break_mid_call_abandons_an_argument_already_made() {
+    check_linear(
+        r#"
+static take2 = fn(r: Res, n: usize) -> () { r.drop(); };
+static main = fn() -> () {
+    loop { take2(make(1), break); };
+};
+"#,
+        expect![[r#"
+            446..451: this value is not consumed on this path; its type has no `forget` capability, so every path must consume it (this value is born here and must be consumed at 437..444)
+        "#]],
+    );
+}
+
+#[test]
+fn a_continue_mid_call_abandons_an_argument_already_made() {
+    check_linear(
+        r#"
+static take2 = fn(r: Res, n: usize) -> () { r.drop(); };
+static main = fn(c: bool) -> () {
+    loop {
+        take2(make(1), if c { continue } else { 1 });
+        break;
+    };
+};
+"#,
+        expect![[r#"
+            468..476: this value is not consumed on this path; its type has no `forget` capability, so every path must consume it (this value is born here and must be consumed at 452..459)
+        "#]],
+    );
+}
+
+#[test]
+fn an_argument_made_on_either_arm_is_abandoned_by_a_later_return() {
+    check_linear(
+        r#"
+static take2 = fn(r: Res, n: usize) -> () { r.drop(); };
+static main = fn(c: bool) -> () {
+    take2(if c { make(1) } else { make(2) }, return);
+};
+"#,
+        expect![[r#"
+            472..478: this value is not consumed on this path; its type has no `forget` capability, so every path must consume it (this value is born here and must be consumed at 459..470)
+        "#]],
+    );
+}
+
+#[test]
+fn a_diverging_argument_abandons_nothing() {
+    // `panic` ends the program: no frame survives to leak from.
+    check_linear(
+        r#"
+static take2 = fn(r: Res, n: usize) -> () { r.drop(); };
+static main = fn() -> () {
+    take2(make(1), panic("no"));
+};
+"#,
+        expect![[""]],
+    );
+}
+
+#[test]
+fn a_return_in_a_later_record_field_abandons_an_earlier_one() {
+    check_linear(
+        r#"
+type Pair = struct { r: Res, n: usize } only move;
+static main = fn() -> () {
+    let Pair(struct { r, n }) = Pair(struct { r = make(1), n = return });
+    r.drop();
+};
+"#,
+        expect![[r#"
+            477..483: this value is not consumed on this path; its type has no `forget` capability, so every path must consume it (this value is born here and must be consumed at 464..471)
+        "#]],
+    );
+}
+
+#[test]
+fn a_temporary_that_reaches_its_consumer_on_every_path_is_quiet() {
+    check_linear(
+        r#"
+static take2 = fn(r: Res, n: usize) -> () { r.drop(); };
+static main = fn(c: bool) -> () {
+    take2(make(1), if c { 1 } else { 2 });
+};
+"#,
+        expect![[""]],
+    );
+}
+
+#[test]
 fn a_static_cannot_hold_a_linear() {
     check_linear(
         r#"

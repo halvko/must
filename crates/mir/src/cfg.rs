@@ -6,7 +6,8 @@ use hir::ExprId;
 use rustc_hash::FxHashSet;
 
 use crate::{
-    BlockId, BodyId, CheckTrap, LocalId, MirBody, Operand, Place, ProjElem, Rvalue, TerminatorKind,
+    BlockId, BodyId, CheckTrap, LocalId, MirBody, Operand, Place, ProjElem, Rvalue, StatementKind,
+    TerminatorKind,
 };
 
 /// A location in one body: before statement `index` of `block`, or before
@@ -162,6 +163,70 @@ pub(crate) fn value_places(value: &Rvalue, f: &mut impl FnMut(&Place)) {
         Rvalue::AddrOf { place, .. } | Rvalue::Borrow { place, .. } => place_places(place, f),
         value => value_operands(value, &mut |op| operand_places(op, f)),
     }
+}
+
+/// Every place the body reads or borrows, index operands included: the
+/// places in each assignment's value expression and the index operands of
+/// its place expression, each switch's discriminant, and each call's
+/// callee and arguments.
+pub(crate) fn for_each_read(body: &MirBody, f: &mut impl FnMut(&Place)) {
+    for (_, data) in body.blocks.iter() {
+        for stmt in &data.statements {
+            let StatementKind::Assign { dest, rvalue } = &stmt.kind else {
+                continue;
+            };
+            value_places(rvalue, f);
+            for elem in &dest.projection {
+                if let ProjElem::Index(op) = elem {
+                    operand_places(op, f);
+                }
+            }
+        }
+        match &data.terminator.kind {
+            TerminatorKind::SwitchBool { discr, .. }
+            | TerminatorKind::SwitchVariant { discr, .. } => operand_places(discr, f),
+            TerminatorKind::Call { callee, args, .. } => {
+                operand_places(callee, f);
+                for arg in args {
+                    operand_places(arg, f);
+                }
+            }
+            TerminatorKind::Return
+            | TerminatorKind::Goto { .. }
+            | TerminatorKind::Trap { .. }
+            | TerminatorKind::ConstTrap { .. }
+            | TerminatorKind::Unreachable => {}
+        }
+    }
+}
+
+/// Every point that defines the whole of `local`, with its origin.
+pub(crate) fn defs_of(body: &MirBody, local: LocalId) -> Vec<(Point, ExprId)> {
+    let mut defs = Vec::new();
+    for (block, data) in body.blocks.iter() {
+        for (index, stmt) in data.statements.iter().enumerate() {
+            let StatementKind::Assign { dest, .. } = &stmt.kind else {
+                continue;
+            };
+            if dest.local == local && dest.projection.is_empty() {
+                defs.push((Point { block, index }, stmt.origin));
+            }
+        }
+        let dest = match &data.terminator.kind {
+            TerminatorKind::Call { dest, .. } | TerminatorKind::Trap { dest, .. } => Some(*dest),
+            _ => None,
+        };
+        if dest == Some(local) {
+            defs.push((
+                Point {
+                    block,
+                    index: data.statements.len(),
+                },
+                data.terminator.origin,
+            ));
+        }
+    }
+    defs
 }
 
 /// Where a checker reports one body's refusals: each diagnostic once per
