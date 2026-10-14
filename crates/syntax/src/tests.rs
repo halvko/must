@@ -6811,8 +6811,8 @@ fn generic_fn_binder_unclosed_angle_recovers() {
                           IDENT@28..33 "usize"
                     ERROR@33..34
                       SEMICOLON@33..34 ";"
-            error 33..34: expected `,`
-            error 34..34: expected `,`
+            error 33..34: expected `,` or `>`
+            error 34..34: expected `{`: function bodies are blocks
         "#]],
     );
 }
@@ -7182,7 +7182,7 @@ fn turbofish_const_additive_arg_no_longer_parses() {
                     R_PAREN@28..29 ")"
                 SEMICOLON@29..30 ";"
             error 21..22: expected `>`
-            error 23..24: expected `,`
+            error 23..24: expected `,` or `>`
         "#]],
     );
 }
@@ -10113,6 +10113,82 @@ fn mut_without_a_name_in_a_match_pattern() {
 }
 
 #[test]
+fn doubled_comma_in_a_variant_pattern_is_one_error() {
+    // The list goes on past the empty slot, so `b` and the arm's body are
+    // not read as further arms.
+    check_errors(
+        "static f = fn(o) { match o { ::Some(a, , b) => 1 } };",
+        expect![[r#"
+            39..40: expected a binding name
+        "#]],
+    );
+}
+
+#[test]
+fn array_literal_missing_a_comma_goes_on() {
+    // One error: `3` is read as the next element.
+    check_errors(
+        "static f = fn { let x = [1, 2 3]; x };",
+        expect![[r#"
+            30..31: expected `,` or `]`
+        "#]],
+    );
+}
+
+#[test]
+fn array_literal_missing_the_comma_after_its_first_element() {
+    check_errors(
+        "static f = [1 2];",
+        expect![[r#"
+            14..15: expected `,` or `]`
+        "#]],
+    );
+}
+
+#[test]
+fn array_literal_missing_its_first_element_is_one_error() {
+    check_errors(
+        "static f = [, a];",
+        expect![[r#"
+            12..13: expected an expression
+        "#]],
+    );
+}
+
+#[test]
+fn array_literal_unclosed_at_end_of_file_demands_the_bracket() {
+    check_errors(
+        "static f = [a, b",
+        expect![[r#"
+            15..16: expected `]`
+        "#]],
+    );
+}
+
+#[test]
+fn repeat_array_unclosed_demands_the_bracket() {
+    check_errors(
+        "static f = [a; 3",
+        expect![[r#"
+            15..16: expected `]`
+        "#]],
+    );
+}
+
+#[test]
+fn variant_pattern_missing_its_close_paren_stops_at_the_arrow() {
+    // The arrow is not taken into the pattern, so the arm's body and the
+    // next arm parse as written; the missing `,` is reported at the arrow.
+    check_errors(
+        "static f = fn(o) { match o { ::Some(a => 1, _ => 2 } };",
+        expect![[r#"
+            36..37: expected `)`
+            38..40: expected `,` or `)`
+        "#]],
+    );
+}
+
+#[test]
 fn let_takes_a_pattern() {
     check(
         "static f = fn { let [a, [mut b, _]] = v; let ::Char(c, _) = s; let 0 = n; };",
@@ -10214,7 +10290,7 @@ fn a_broken_array_pattern_recovers_at_the_let() {
     check_errors(
         "static f = fn { let [a b] = v; let [a, = w; let ok = 1; };",
         expect![[r#"
-            23..24: expected `,`
+            23..24: expected `,` or `]`
             37..38: expected `]`
             39..40: expected a pattern
         "#]],
@@ -10439,8 +10515,8 @@ fn two_retired_lifetimes_on_one_line_pair_up() {
         expect![[r#"
             17..18: borrow types are spelled postfix: `T.&` / `T.&mut`
             18..31: a character literal holds exactly one character; use a string (`"..."`) to hold more
-            31..32: expected `,`
-            33..36: expected `,`
+            31..32: expected `,` or `)`
+            33..36: expected `,` or `)`
         "#]],
     );
 }
@@ -16025,6 +16101,37 @@ trait Gen = requires::<T> { get: fn(Self) -> usize; } with {
             error 71..76: impls in a generic trait's `with`-chain are not supported yet (generic traits are reserved)
         "#]],
     );
+}
+
+#[test]
+fn every_fixed_token_spelling_lexes_back_to_its_kind() {
+    use crate::SyntaxKind::*;
+    // Every token kind has a spelling except the ones whose text varies, so
+    // a new punctuation kind cannot be left out of `spelling`.
+    for raw in 0..=ERROR_TOKEN as u16 {
+        let kind = crate::SyntaxKind::from(rowan::SyntaxKind(raw));
+        let varies = matches!(
+            kind,
+            TOMBSTONE
+                | EOF
+                | WHITESPACE
+                | COMMENT
+                | IDENT
+                | INT_NUMBER
+                | STRING
+                | CHAR
+                | REGION_IDENT
+                | ERROR_TOKEN
+        );
+        let Some(spelling) = kind.spelling() else {
+            assert!(varies, "{kind:?} has no `spelling`");
+            continue;
+        };
+        assert!(!varies, "{kind:?} has a varying text but a `spelling`");
+        let (tokens, _) = crate::tokenize(spelling);
+        let kinds: Vec<_> = tokens.iter().map(|t| t.kind).collect();
+        assert_eq!(kinds, [kind], "`{spelling}` does not lex as {kind:?}");
+    }
 }
 
 // ---- keyword-table drift guards ---------------------------------------

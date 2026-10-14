@@ -183,14 +183,7 @@ impl<'t> Parser<'t> {
     }
 
     pub(crate) fn error_after_prev(&mut self, kind: SyntaxKind) {
-        let insert = match kind {
-            SEMICOLON => ";",
-            R_PAREN => ")",
-            R_BRACE => "}",
-            R_ANGLE => ">",
-            R_BRACKET => "]",
-            _ => unreachable!("{kind:?} is not a closer"),
-        };
+        let insert = kind.spelling().expect("a closer has one spelling");
         self.events.push(Event::Error {
             msg: format!("expected `{insert}`"),
             after_prev: true,
