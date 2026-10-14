@@ -33,6 +33,8 @@ here; they live in `docs/design/`.
 
 - `to_owned()` turns a `&str` into a `String`; `to_string()` is for
   formatting a value as text.
+- Code and comments talk about place expressions and value expressions,
+  not lvalues and rvalues.
 
 ## Tests
 
@@ -40,6 +42,8 @@ here; they live in `docs/design/`.
   own line with the program at column zero and indented by brace depth. No
   `"...\n\` line continuations: they hide every `"` behind a backslash and
   silently flatten the indentation the compiler sees.
+- Any other test string with `\n` escapes (an expected hover, say) is a
+  raw string too. A diff that touches one converts it.
 - The program and its expectation stay together in the test (expect-test).
   A program lives in a `.must` file only when it ships in `examples/` and
   the test includes that file to check the shipped copy.

@@ -12,13 +12,14 @@ about, slower, or harder to abstract than it needs to be.
   enough to see it.
 - Repeated, similarly shaped code: functions, match arms or blocks that
   differ only in a name, a type or a constant, within the diff or between
-  the diff and existing code. Point at the copies.
+  the diff and existing code, or two ways of doing one thing (printing a
+  type, walking a pattern). Point at the copies.
 - Logic in the wrong home: a pass or module doing work that belongs to
   another (and is likely done there too), or a value threaded through
   several layers only to be recomputed at the end.
 - Work the caller does not need: a callee that builds, collects or
   computes more than its callers use (a full structure when one field is
-  read, a sorted list when only the minimum is), or a loop that calls into
+  read, a `Vec` collected for its length), or a loop that calls into
   something which walks a whole collection, tree or table on each
   iteration, often over data the loop does not need (a hidden quadratic, or
   a scan for one field of every item). Look at what the callee touches and
@@ -31,6 +32,12 @@ about, slower, or harder to abstract than it needs to be.
   the mistake out. Likewise a special case for one context when the rule
   holds in all of them, or a fallback that should fall out of the normal
   mechanism.
+- Guards for the impossible: a check, fallback or default for a case that
+  looks unreachable (lengths that cannot differ, an item with no
+  constness). Say how a program reaches it; if none can, it is an internal
+  error, not a quiet fallback.
+- A helper with one caller that names nothing the call site did not
+  already say.
 
 For each finding, name the places involved and say why it matters here:
 harder to reason about, slower, or in the way of a better abstraction.
