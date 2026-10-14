@@ -146,14 +146,7 @@ impl Analysis {
                 },
                 message: d.message,
                 // Syntax-level fixes always edit the file they diagnosed.
-                fix: d.fix.map(|fix| Fix {
-                    label: fix.label,
-                    edits: fix
-                        .edits
-                        .into_iter()
-                        .map(|edit| FileEdit { file, edit })
-                        .collect(),
-                }),
+                fix: d.fix.map(|fix| in_file(file, fix)),
                 related: d.related,
             })
             .collect();
@@ -409,6 +402,17 @@ impl Analysis {
         diagnostics
     }
 
+    /// The code actions at `range` that fix no diagnostic: rewrites the
+    /// user asks for, such as inserting the inferred signature of an item
+    /// whose head `range` is on.
+    pub fn assists(&self, file: SourceFile, range: TextRange) -> Vec<Fix> {
+        hir::file_item_ids(&self.db, file)
+            .iter()
+            .filter_map(|&item| hir::insert_inferred_signature(&self.db, item, Some(range)))
+            .map(|fix| in_file(file, fix))
+            .collect()
+    }
+
     pub fn goto_definition(&self, pos: FilePosition) -> Option<NavigationTarget> {
         goto_definition::goto_definition(&self.db, pos)
     }
@@ -515,6 +519,18 @@ pub fn cancellable<T>(f: impl FnOnce() -> T) -> Option<T> {
 
 #[cfg(test)]
 mod tests;
+
+/// A syntax-level fix, whose edits are all in `file`.
+fn in_file(file: SourceFile, fix: syntax::Fix) -> Fix {
+    Fix {
+        label: fix.label,
+        edits: fix
+            .edits
+            .into_iter()
+            .map(|edit| FileEdit { file, edit })
+            .collect(),
+    }
+}
 
 /// "Prefix with `_`" for an unused binding: renames `x` to `_x`, or, where
 /// one name both selects a record field and binds it (`{ x }`), keeps the

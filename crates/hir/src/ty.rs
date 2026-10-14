@@ -592,19 +592,6 @@ impl GenericArg {
     }
 }
 
-/// Render a generic-argument list as `::<a, b>`; empty for an empty list.
-fn display_args(args: &[GenericArg]) -> String {
-    if args.is_empty() {
-        return String::new();
-    }
-    let list = args
-        .iter()
-        .map(GenericArg::display)
-        .collect::<Vec<_>>()
-        .join(", ");
-    format!("::<{list}>")
-}
-
 /// One variant of an enum mention, as a constructor path or a pattern
 /// resolved it: the enum declaration plus the variant's position in it.
 /// Not a type — a variant's value has its enum's type ([`Self::enum_ty`]).
@@ -946,80 +933,7 @@ impl Ty {
     }
 
     pub fn display(&self) -> String {
-        match self {
-            Ty::Infer(_) => "_".to_owned(),
-            Ty::UnresolvedNumber => "{number}".to_owned(),
-            Ty::Unit => "()".to_owned(),
-            Ty::Never => "!".to_owned(),
-            Ty::Int(kind) => kind.name().to_owned(),
-            Ty::Str => "str".to_owned(),
-            Ty::Bool => "bool".to_owned(),
-            Ty::Char => "char".to_owned(),
-            Ty::Error => "{error}".to_owned(),
-            Ty::Fn(f) => {
-                let params = f
-                    .params
-                    .iter()
-                    .map(Ty::display)
-                    .collect::<Vec<_>>()
-                    .join(", ");
-                // The marker LEADS, exactly where it is written: a mismatch
-                // between the two fn types has to read as the one-token
-                // difference it is.
-                let marker = if f.unsafe_to_call { "unsafe " } else { "" };
-                match &f.ret {
-                    Ty::Unit => format!("{marker}fn({params})"),
-                    ret => format!("{marker}fn({params}) -> {}", ret.display()),
-                }
-            }
-            Ty::RawPtr { mutable, pointee } => {
-                if *mutable {
-                    format!("{}.&raw mut", pointee.display())
-                } else {
-                    format!("{}.&raw", pointee.display())
-                }
-            }
-            Ty::Borrow {
-                mutable,
-                region,
-                referent,
-            } => {
-                let m = if *mutable { "mut" } else { "" };
-                match region {
-                    // Below the checker there IS no region, so no
-                    // turbofish is printed: a MIR snapshot showing one
-                    // would be advertising information that layer does not
-                    // have.
-                    //
-                    // An unsolved VARIABLE prints bare for a different
-                    // reason: `@_` is exactly what a signature may not
-                    // say, so a message rendering one shows the user a
-                    // type they are forbidden to write — and the mismatch
-                    // is never about the region anyway.
-                    Region::Erased | Region::Var(_) => format!("{}.&{m}", referent.display()),
-                    region => format!("{}.&{m}::<{}>", referent.display(), region.display()),
-                }
-            }
-            Ty::Array { elem, len } => {
-                format!("[{}; {}]", elem.display(), len.display())
-            }
-            Ty::Record(rec) => {
-                if rec.fields.is_empty() {
-                    return "struct {}".to_owned();
-                }
-                let fields = rec
-                    .fields
-                    .iter()
-                    .map(|(name, ty)| format!("{name}: {}", ty.display()))
-                    .collect::<Vec<_>>()
-                    .join(", ");
-                format!("struct {{ {fields} }}")
-            }
-            Ty::Named(named) => {
-                format!("{}{}", named.decl.display_name(), display_args(&named.args))
-            }
-            Ty::Param(param) => param.name.to_string(),
-        }
+        spell(self, Spelling::Display)
     }
 }
 
@@ -1143,6 +1057,160 @@ fn lower_type_path(db: &dyn Db, file: SourceFile, name: &str) -> Ty {
         // A value item (invisible here) or nothing: only a builtin type
         // name can save it.
         _ => builtin_type_by_name(name).unwrap_or(Ty::Error),
+    }
+}
+
+/// Whether `ty` can be spelled in front of a postfix `.&raw` or `.&`. An fn
+/// type can't: the postfix would extend its return type instead, and types
+/// have no parentheses to say otherwise.
+pub(crate) fn spells_before_postfix(ty: &Ty) -> bool {
+    !matches!(ty, Ty::Fn(_))
+}
+
+/// `ty` spelled as an annotation that lowers back to it in `file`, for
+/// [`crate::insert_inferred_signature`]. A part with no such spelling is a
+/// `_` hole, so the text never claims more than inference found. Fn types
+/// always spell their return type, since a missing one is itself a hole.
+pub fn annotation_text(db: &dyn Db, file: SourceFile, ty: &Ty) -> String {
+    spell(ty, Spelling::Source(db, file))
+}
+
+/// Who a [`Ty`] is spelled for: a reader ([`Ty::display`]), or the source
+/// of a file ([`annotation_text`]).
+#[derive(Clone, Copy)]
+enum Spelling<'a> {
+    Display,
+    Source(&'a dyn Db, SourceFile),
+}
+
+/// The one printer of types. The source spelling writes a `_` for what
+/// source can't say (`{number}`, `{error}`, a region, a name `file`
+/// resolves elsewhere, a postfix after an fn type) and spells out `-> ()`.
+fn spell(ty: &Ty, how: Spelling<'_>) -> String {
+    const HOLE: &str = "_";
+    let source = match how {
+        Spelling::Source(db, file) => Some((db, file)),
+        Spelling::Display => None,
+    };
+    let display_only = |text: &str| match source {
+        Some(_) => HOLE.to_owned(),
+        None => text.to_owned(),
+    };
+    let by_name = |name: &str| match source {
+        Some((db, file)) if lower_type_path(db, file, name) != *ty => HOLE.to_owned(),
+        _ => name.to_owned(),
+    };
+    match ty {
+        Ty::Infer(_) => HOLE.to_owned(),
+        Ty::UnresolvedNumber => display_only("{number}"),
+        Ty::Error => display_only("{error}"),
+        Ty::Param(param) => display_only(&param.name),
+        Ty::Unit => "()".to_owned(),
+        Ty::Never => "!".to_owned(),
+        Ty::Int(kind) => by_name(kind.name()),
+        Ty::Str => by_name("str"),
+        Ty::Bool => by_name("bool"),
+        Ty::Char => by_name("char"),
+        Ty::Fn(f) => {
+            let params = f
+                .params
+                .iter()
+                .map(|param| spell(param, how))
+                .collect::<Vec<_>>()
+                .join(", ");
+            // The marker LEADS, exactly where it is written: a mismatch
+            // between the two fn types has to read as the one-token
+            // difference it is.
+            let marker = if f.unsafe_to_call { "unsafe " } else { "" };
+            match &f.ret {
+                Ty::Unit if source.is_none() => format!("{marker}fn({params})"),
+                ret => format!("{marker}fn({params}) -> {}", spell(ret, how)),
+            }
+        }
+        Ty::RawPtr { mutable, pointee } => {
+            if source.is_some() && !spells_before_postfix(pointee) {
+                return HOLE.to_owned();
+            }
+            let m = if *mutable { " mut" } else { "" };
+            format!("{}.&raw{m}", spell(pointee, how))
+        }
+        // A non-generic signature can't name a region.
+        Ty::Borrow { .. } if source.is_some() => HOLE.to_owned(),
+        Ty::Borrow {
+            mutable,
+            region,
+            referent,
+        } => {
+            let m = if *mutable { "mut" } else { "" };
+            let referent = spell(referent, how);
+            match region {
+                // Below the checker there IS no region, so no
+                // turbofish is printed: a MIR snapshot showing one
+                // would be advertising information that layer does not
+                // have.
+                //
+                // An unsolved VARIABLE prints bare for a different
+                // reason: `@_` is exactly what a signature may not
+                // say, so a message rendering one shows the user a
+                // type they are forbidden to write — and the mismatch
+                // is never about the region anyway.
+                Region::Erased | Region::Var(_) => format!("{referent}.&{m}"),
+                region => format!("{referent}.&{m}::<{}>", region.display()),
+            }
+        }
+        Ty::Array { elem, len } => match (len, source) {
+            (ConstArgValue::Int(_), _) | (_, None) => {
+                format!("[{}; {}]", spell(elem, how), len.display())
+            }
+            (_, Some(_)) => HOLE.to_owned(),
+        },
+        Ty::Record(rec) => {
+            if rec.fields.is_empty() {
+                return "struct {}".to_owned();
+            }
+            let fields = rec
+                .fields
+                .iter()
+                .map(|(name, ty)| format!("{name}: {}", spell(ty, how)))
+                .collect::<Vec<_>>()
+                .join(", ");
+            format!("struct {{ {fields} }}")
+        }
+        Ty::Named(named) => {
+            if let Some((db, file)) = source
+                && (named.decl.member.is_some()
+                    || type_scope(db, file).resolve(&named.decl.name)
+                        != Some(Resolution::TypeItem(named.decl.clone())))
+            {
+                return HOLE.to_owned();
+            }
+            let Some(args) = named
+                .args
+                .iter()
+                .map(|arg| spell_arg(arg, how))
+                .collect::<Option<Vec<_>>>()
+            else {
+                return HOLE.to_owned();
+            };
+            let name = named.decl.display_name();
+            if args.is_empty() {
+                name.to_owned()
+            } else {
+                format!("{name}::<{}>", args.join(", "))
+            }
+        }
+    }
+}
+
+/// A generic argument as [`spell`] writes it; `None` when source can't say
+/// it. Only a type argument has a `_` hole: a const or region argument
+/// without a spelling leaves the whole mention unwritten.
+fn spell_arg(arg: &GenericArg, how: Spelling<'_>) -> Option<String> {
+    match (arg, how) {
+        (GenericArg::Ty(ty), _) => Some(spell(ty, how)),
+        (GenericArg::Const(ConstArgValue::Int(_) | ConstArgValue::Bool(_)), _)
+        | (_, Spelling::Display) => Some(arg.display()),
+        _ => None,
     }
 }
 
