@@ -5850,9 +5850,9 @@ fn fn_typed_const_param_smuggled_in_a_record_is_rejected_too() {
         "static f = fn::<const N: { g: fn() -> usize }>() -> usize { 1 };",
         expect![[r#"
             25..26: expected a type
-            27..28: expected `,`
+            27..28: expected `,` or `>`
             30..43: only a trait name can be a bound
-            44..45: expected `,`
+            44..45: expected `,` or `>`
         "#]],
     );
 }

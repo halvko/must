@@ -186,6 +186,44 @@ impl SyntaxKind {
     pub fn is_trivia(self) -> bool {
         matches!(self, WHITESPACE | COMMENT)
     }
+
+    /// How a token kind with one fixed spelling (punctuation, `_`, a
+    /// keyword) is written; `None` for kinds whose text varies and for nodes.
+    pub fn spelling(self) -> Option<&'static str> {
+        let spelling = match self {
+            HOLE => "_",
+            L_PAREN => "(",
+            R_PAREN => ")",
+            L_BRACE => "{",
+            R_BRACE => "}",
+            L_BRACKET => "[",
+            R_BRACKET => "]",
+            COLON => ":",
+            COLON2 => "::",
+            SEMICOLON => ";",
+            COMMA => ",",
+            DOT => ".",
+            DOT2 => "..",
+            DOT3 => "...",
+            EQ => "=",
+            EQ2 => "==",
+            NEQ => "!=",
+            L_ANGLE => "<",
+            R_ANGLE => ">",
+            LTEQ => "<=",
+            GTEQ => ">=",
+            THIN_ARROW => "->",
+            FAT_ARROW => "=>",
+            PLUS => "+",
+            MINUS => "-",
+            STAR => "*",
+            SLASH => "/",
+            AMP => "&",
+            BANG => "!",
+            _ => return self.keyword_text(),
+        };
+        Some(spelling)
+    }
 }
 
 /// Declares the language's keywords ONCE, and derives everything that has to

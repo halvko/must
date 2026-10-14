@@ -532,17 +532,7 @@ fn binding_pattern(p: &mut Parser<'_>, msg: &str) {
 fn array_pat(p: &mut Parser<'_>) {
     let m = p.start();
     p.bump(L_BRACKET);
-    while !p.at(R_BRACKET) && !p.at(EOF) {
-        let before = p.pos();
-        binding_pattern(p, "expected a pattern");
-        if !p.at(R_BRACKET) {
-            p.expect(COMMA, "`,`");
-        }
-        if p.pos() == before {
-            break;
-        }
-    }
-    p.expect_after_prev(R_BRACKET);
+    comma_list(p, R_BRACKET, |p| binding_pattern(p, "expected a pattern"));
     m.complete(p, ARRAY_PAT);
 }
 
@@ -557,8 +547,7 @@ fn record_pat(p: &mut Parser<'_>) -> CompletedMarker {
     let m = p.start();
     p.bump(STRUCT_KW);
     p.bump(L_BRACE);
-    while !p.at(R_BRACE) && !p.at(EOF) {
-        let before = p.pos();
+    comma_list(p, R_BRACE, |p| {
         if p.at(DOT2) {
             let rest = p.start();
             p.bump(DOT2);
@@ -566,14 +555,7 @@ fn record_pat(p: &mut Parser<'_>) -> CompletedMarker {
         } else {
             record_pat_field(p);
         }
-        if !p.at(R_BRACE) {
-            p.expect(COMMA, "`,`");
-        }
-        if p.pos() == before {
-            break;
-        }
-    }
-    p.expect_after_prev(R_BRACE);
+    });
     m.complete(p, RECORD_PAT)
 }
 
@@ -607,6 +589,41 @@ fn name_ref(p: &mut Parser<'_>) -> CompletedMarker {
     let m = p.start();
     p.bump(IDENT);
     m.complete(p, NAME_REF)
+}
+
+/// A name being declared: the `IDENT` wrapped in `NAME`.
+fn name(p: &mut Parser<'_>) -> CompletedMarker {
+    let m = p.start();
+    p.bump(IDENT);
+    m.complete(p, NAME)
+}
+
+/// `elem (, elem)* ,? close`, after the opener. A missing `,` is reported
+/// and the list goes on; a trailing `,` is fine; a round that reads nothing
+/// (no element, no `,`) or reaches the end of the file ends the list and
+/// demands the closer.
+fn comma_list(p: &mut Parser<'_>, close: SyntaxKind, mut elem: impl FnMut(&mut Parser<'_>)) {
+    while !p.at(close) && !p.at(EOF) {
+        let before = p.pos();
+        elem(p);
+        list_separator(p, close);
+        if p.pos() == before {
+            break;
+        }
+    }
+    p.expect_after_prev(close);
+}
+
+/// The `,` after a list element, unless the list ends here (at `close` or
+/// the end of the file). A missing one names both tokens that could follow.
+fn list_separator(p: &mut Parser<'_>, close: SyntaxKind) {
+    if p.at(close) || p.at(EOF) || p.eat(COMMA) {
+        return;
+    }
+    p.error(format!(
+        "expected `,` or `{}`",
+        close.spelling().expect("a closer has one spelling")
+    ));
 }
 
 // ---- expressions ----
@@ -1136,30 +1153,15 @@ fn bind_pat(p: &mut Parser<'_>, msg: &str) {
 /// holes.
 fn pattern_binding_list(p: &mut Parser<'_>) {
     p.bump(L_PAREN);
-    while !p.at(R_PAREN) && !p.at(EOF) {
-        let before = p.pos();
-        match p.current() {
-            MUT_KW | IDENT | HOLE => bind_pat(p, "expected a binding name"),
-            DOT2 => p.err_and_bump(DOT2_OUTSIDE_RECORD_PATTERN),
-            FAT_ARROW => {
-                // The arm's own arrow: the `)` is missing — don't eat it.
-                p.error("expected a binding name");
-                break;
-            }
-            _ if at_expr_recovery(p) => {
-                p.error("expected a binding name");
-                break;
-            }
-            _ => p.err_and_bump("expected a binding name"),
-        }
-        if !p.at(R_PAREN) && !p.at(FAT_ARROW) {
-            p.expect(COMMA, "`,`");
-        }
-        if p.pos() == before {
-            break;
-        }
-    }
-    p.expect_after_prev(R_PAREN);
+    comma_list(p, R_PAREN, |p| match p.current() {
+        MUT_KW | IDENT | HOLE => bind_pat(p, "expected a binding name"),
+        DOT2 => p.err_and_bump(DOT2_OUTSIDE_RECORD_PATTERN),
+        // Left for `comma_list`: at the arm's own arrow (the `)` is
+        // missing) it reports the `,` and the `)` and ends the list; an
+        // empty slot before a `,` is skipped.
+        _ if p.at(FAT_ARROW) || at_expr_recovery(p) => p.error("expected a binding name"),
+        _ => p.err_and_bump("expected a binding name"),
+    });
 }
 
 /// `loop { ... }` — an infinite loop; `break`/`continue` steer it. The body
@@ -1226,20 +1228,14 @@ fn array_expr(p: &mut Parser<'_>) -> CompletedMarker {
     if p.eat(SEMICOLON) {
         // The repeat form: `[e; N]`.
         expr(p);
+        p.expect_after_prev(R_BRACKET);
     } else {
-        while p.at(COMMA) {
-            p.bump(COMMA);
-            if p.at(R_BRACKET) {
-                break; // trailing comma
-            }
-            let before = p.pos();
+        // The first element is read: the rest is an ordinary list.
+        list_separator(p, R_BRACKET);
+        comma_list(p, R_BRACKET, |p| {
             expr(p);
-            if p.pos() == before {
-                break;
-            }
-        }
+        });
     }
-    p.expect_after_prev(R_BRACKET);
     m.complete(p, ARRAY_EXPR)
 }
 
@@ -1341,17 +1337,7 @@ fn branch(p: &mut Parser<'_>, what: &str) {
 fn param_list(p: &mut Parser<'_>) {
     let m = p.start();
     p.bump(L_PAREN);
-    while !p.at(R_PAREN) && !p.at(EOF) {
-        let before = p.pos();
-        param(p);
-        if !p.at(R_PAREN) {
-            p.expect(COMMA, "`,`");
-        }
-        if p.pos() == before {
-            break;
-        }
-    }
-    p.expect_after_prev(R_PAREN);
+    comma_list(p, R_PAREN, param);
     m.complete(p, PARAM_LIST);
 }
 
@@ -1379,17 +1365,7 @@ fn generic_param_list(p: &mut Parser<'_>) {
     let m = p.start();
     p.bump(COLON2);
     p.bump(L_ANGLE);
-    while !p.at(R_ANGLE) && !p.at(EOF) {
-        let before = p.pos();
-        generic_param(p);
-        if !p.at(R_ANGLE) {
-            p.expect(COMMA, "`,`");
-        }
-        if p.pos() == before {
-            break;
-        }
-    }
-    p.expect_after_prev(R_ANGLE);
+    comma_list(p, R_ANGLE, generic_param);
     m.complete(p, GENERIC_PARAM_LIST);
 }
 
@@ -1626,17 +1602,9 @@ fn region_bound(p: &mut Parser<'_>) {
 fn arg_list(p: &mut Parser<'_>) {
     let m = p.start();
     p.bump(L_PAREN);
-    while !p.at(R_PAREN) && !p.at(EOF) {
-        let before = p.pos();
+    comma_list(p, R_PAREN, |p| {
         expr(p);
-        if !p.at(R_PAREN) {
-            p.expect(COMMA, "`,`");
-        }
-        if p.pos() == before {
-            break;
-        }
-    }
-    p.expect_after_prev(R_PAREN);
+    });
     m.complete(p, ARG_LIST);
 }
 
@@ -1647,17 +1615,7 @@ fn arg_list(p: &mut Parser<'_>) {
 fn generic_arg_list(p: &mut Parser<'_>) {
     let m = p.start();
     p.bump(L_ANGLE);
-    while !p.at(R_ANGLE) && !p.at(EOF) {
-        let before = p.pos();
-        generic_arg(p);
-        if !p.at(R_ANGLE) {
-            p.expect(COMMA, "`,`");
-        }
-        if p.pos() == before {
-            break;
-        }
-    }
-    p.expect_after_prev(R_ANGLE);
+    comma_list(p, R_ANGLE, generic_arg);
     m.complete(p, GENERIC_ARG_LIST);
 }
 
@@ -1965,22 +1923,14 @@ fn record_expr(p: &mut Parser<'_>) -> CompletedMarker {
     if !p.expect(L_BRACE, "`{`") {
         return m.complete(p, RECORD_EXPR);
     }
-    while !p.at(R_BRACE) && !p.at(EOF) {
-        let before = p.pos();
+    comma_list(p, R_BRACE, |p| {
         if p.at(DOT3) {
             // Open-record marker: a bare token, validation rejects it later.
             p.bump(DOT3);
         } else {
             record_expr_field(p);
         }
-        if !p.at(R_BRACE) {
-            p.expect(COMMA, "`,`");
-        }
-        if p.pos() == before {
-            break;
-        }
-    }
-    p.expect_after_prev(R_BRACE);
+    });
     m.complete(p, RECORD_EXPR)
 }
 
@@ -1997,17 +1947,7 @@ fn enum_expr(p: &mut Parser<'_>) -> CompletedMarker {
     if !p.expect(L_BRACE, "`{`") {
         return m.complete(p, ENUM_EXPR);
     }
-    while !p.at(R_BRACE) && !p.at(EOF) {
-        let before = p.pos();
-        enum_variant(p);
-        if !p.at(R_BRACE) {
-            p.expect(COMMA, "`,`");
-        }
-        if p.pos() == before {
-            break;
-        }
-    }
-    p.expect_after_prev(R_BRACE);
+    comma_list(p, R_BRACE, enum_variant);
     m.complete(p, ENUM_EXPR)
 }
 
@@ -2017,25 +1957,13 @@ fn enum_expr(p: &mut Parser<'_>) -> CompletedMarker {
 fn enum_variant(p: &mut Parser<'_>) {
     let m = p.start();
     if p.at(IDENT) {
-        let nm = p.start();
-        p.bump(IDENT);
-        nm.complete(p, NAME);
+        name(p);
     } else {
         p.error("expected a variant name");
     }
     if p.at(L_PAREN) {
         p.bump(L_PAREN);
-        while !p.at(R_PAREN) && !p.at(EOF) {
-            let before = p.pos();
-            type_(p);
-            if !p.at(R_PAREN) {
-                p.expect(COMMA, "`,`");
-            }
-            if p.pos() == before {
-                break;
-            }
-        }
-        p.expect_after_prev(R_PAREN);
+        comma_list(p, R_PAREN, type_);
     }
     m.complete(p, ENUM_VARIANT);
 }
@@ -2280,17 +2208,7 @@ fn anon_fn_type(p: &mut Parser<'_>) -> CompletedMarker {
 fn fn_type_param_list(p: &mut Parser<'_>) {
     let m = p.start();
     p.bump(L_PAREN);
-    while !p.at(R_PAREN) && !p.at(EOF) {
-        let before = p.pos();
-        fn_type_param(p);
-        if !p.at(R_PAREN) {
-            p.expect(COMMA, "`,`");
-        }
-        if p.pos() == before {
-            break;
-        }
-    }
-    p.expect_after_prev(R_PAREN);
+    comma_list(p, R_PAREN, fn_type_param);
     m.complete(p, PARAM_LIST);
 }
 
@@ -2505,22 +2423,14 @@ fn record_type(p: &mut Parser<'_>) -> CompletedMarker {
     let m = p.start();
     p.bump(STRUCT_KW);
     if p.expect(L_BRACE, "`{`") {
-        while !p.at(R_BRACE) && !p.at(EOF) {
-            let before = p.pos();
+        comma_list(p, R_BRACE, |p| {
             if p.at(DOT3) {
                 // Open-record marker: a bare token, validation rejects it later.
                 p.bump(DOT3);
             } else {
                 record_type_field(p);
             }
-            if !p.at(R_BRACE) {
-                p.expect(COMMA, "`,`");
-            }
-            if p.pos() == before {
-                break;
-            }
-        }
-        p.expect_after_prev(R_BRACE);
+        });
     }
     m.complete(p, RECORD_TYPE)
 }
@@ -2532,9 +2442,7 @@ fn record_type_field(p: &mut Parser<'_>) {
     let m = p.start();
     p.eat(PUB_KW);
     if p.at(IDENT) {
-        let nm = p.start();
-        p.bump(IDENT);
-        nm.complete(p, NAME);
+        name(p);
     } else {
         p.error("expected a field name");
     }
