@@ -1361,6 +1361,7 @@ pub fn file_diagnostics(db: &dyn Db, file: SourceFile) -> Vec<Diagnostic> {
         });
     }
 
+    diagnostics.extend(groups::big_group_diagnostics(db, file));
     diagnostics.sort_by_key(|d| (d.range.start(), d.range.end()));
     diagnostics
 }

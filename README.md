@@ -99,6 +99,15 @@ mkdir -p ~/.config/helix/runtime/queries
 ln -s "$PWD/editors/tree-sitter-must/queries" ~/.config/helix/runtime/queries/must
 ```
 
+### Server settings
+
+The server reads one option from `initializationOptions`:
+`bigInferenceGroup` (default 10000) is the number of expressions an
+inference group may cover before each body in it warns, at its first use
+of an unannotated item, that inference this large may slow down your
+editor. A count above 4294967295 is read as 4294967295. `false` turns
+the warning off.
+
 ### The tree-sitter grammar
 
 `editors/tree-sitter-must/` holds `grammar.js`, the generated parser in

@@ -93,8 +93,27 @@ pub fn server_capabilities() -> lsp_types::ServerCapabilities {
 pub fn run(connection: Connection) -> ServerResult<()> {
     let init = connection.initialize(serde_json::to_value(server_capabilities())?)?;
     let init: lsp_types::InitializeParams = serde_json::from_value(init)?;
+    let mut state = GlobalState::new(&connection, &init.capabilities);
+    if let Some(expressions) = init
+        .initialization_options
+        .as_ref()
+        .and_then(big_inference_group_option)
+    {
+        state.host.set_big_inference_group(expressions);
+    }
     tracing::info!("initialized");
-    GlobalState::new(&connection, &init.capabilities).main_loop(&connection)
+    state.main_loop(&connection)
+}
+
+/// `initializationOptions.bigInferenceGroup`: the expression count past
+/// which an inference group warns, or `false` to never warn (`Some(None)`).
+/// A count past `u32::MAX` saturates to it. `None` when the option is
+/// missing or neither, which keeps the default.
+fn big_inference_group_option(options: &serde_json::Value) -> Option<Option<u32>> {
+    match options.get("bigInferenceGroup")? {
+        serde_json::Value::Bool(false) => Some(None),
+        value => Some(Some(u32::try_from(value.as_u64()?).unwrap_or(u32::MAX))),
+    }
 }
 
 /// What the server knows about one document, and the only place it says so.
@@ -1006,6 +1025,33 @@ mod tests {
     use super::*;
 
     const BROKEN: &str = "static = true;";
+
+    #[test]
+    fn big_inference_group_option_reads_a_count_or_false() {
+        let read = |options: serde_json::Value| big_inference_group_option(&options);
+        assert_eq!(
+            read(serde_json::json!({ "bigInferenceGroup": 500 })),
+            Some(Some(500))
+        );
+        assert_eq!(
+            read(serde_json::json!({ "bigInferenceGroup": u32::MAX })),
+            Some(Some(u32::MAX))
+        );
+        assert_eq!(
+            read(serde_json::json!({ "bigInferenceGroup": 1_u64 << 40 })),
+            Some(Some(u32::MAX))
+        );
+        assert_eq!(
+            read(serde_json::json!({ "bigInferenceGroup": false })),
+            Some(None)
+        );
+        assert_eq!(read(serde_json::json!({ "bigInferenceGroup": true })), None);
+        assert_eq!(
+            read(serde_json::json!({ "bigInferenceGroup": "500" })),
+            None
+        );
+        assert_eq!(read(serde_json::json!({})), None);
+    }
 
     fn uri(s: &str) -> lsp_types::Uri {
         s.parse().unwrap()
