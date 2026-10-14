@@ -357,6 +357,56 @@ fn code_action_inserts_the_inferred_signature() {
 }
 
 #[test]
+fn inlay_hint_shows_and_inserts_the_inferred_type() {
+    let mut client = TestClient::start();
+    let file = uri("file:///infer-hint.must");
+
+    client.open(
+        &file,
+        r#"static s = "hi";
+static t = true;
+"#,
+    );
+    client.next_diagnostics();
+
+    let hints_in = |client: &mut TestClient, range: lsp_types::Range| {
+        client
+            .request::<lsp_types::request::InlayHintRequest>(lsp_types::InlayHintParams {
+                text_document: lsp_types::TextDocumentIdentifier { uri: file.clone() },
+                range,
+                work_done_progress_params: Default::default(),
+            })
+            .expect("expected inlay hints")
+    };
+    let line = |n: u32| {
+        lsp_types::Range::new(
+            lsp_types::Position::new(n, 0),
+            lsp_types::Position::new(n + 1, 0),
+        )
+    };
+
+    // Only the hints inside the requested range come back.
+    let hints = hints_in(&mut client, line(0));
+    assert_eq!(hints.len(), 1);
+    let hint = &hints[0];
+    assert_eq!(hint.position, lsp_types::Position::new(0, 8));
+    let lsp_types::InlayHintLabel::String(label) = &hint.label else {
+        panic!("expected a plain label, got {:?}", hint.label);
+    };
+    assert_eq!(label, ": str");
+    let edits = hint.text_edits.as_ref().expect("hint carries its edit");
+    assert_eq!(edits.len(), 1);
+    assert_eq!(edits[0].range.start, lsp_types::Position::new(0, 8));
+    assert_eq!(edits[0].new_text, ": str");
+
+    let hints = hints_in(&mut client, line(1));
+    assert_eq!(hints.len(), 1);
+    assert_eq!(hints[0].position, lsp_types::Position::new(1, 8));
+
+    drop(client);
+}
+
+#[test]
 fn quick_fix_inserts_semicolon_from_cursor_on_anchor() {
     let mut client = TestClient::start();
     let file = uri("file:///semicolon.must");

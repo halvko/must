@@ -6730,3 +6730,66 @@ static main = fn { let _y: str = g(1, "a"); };
 "#,
     );
 }
+
+/// Each inferred part is shown where the action would write it.
+#[test]
+fn inlay_hints_show_the_inferred_parts_in_place() {
+    let text = r#"
+static g = fn (f, a) { f(a) };
+static h = fn (_n: usize) -> bool { true };
+static main = fn { g(h, 1); };
+"#;
+    let (analysis, file, _) = fixture(&format!("{text}$0"));
+    let shown: Vec<(String, usize, bool)> = analysis
+        .inlay_hints(file)
+        .into_iter()
+        .map(|hint| (hint.label, usize::from(hint.offset), hint.padding_left))
+        .collect();
+    assert_eq!(
+        shown,
+        [
+            (": fn(usize) -> bool".to_owned(), 17, false),
+            (": usize".to_owned(), 20, false),
+            ("-> bool".to_owned(), 21, true),
+            ("() -> ()".to_owned(), text.find("fn {").unwrap() + 2, true),
+        ]
+    );
+}
+
+/// Accepting any hint of a signature writes all of it.
+#[test]
+fn every_hint_of_a_signature_writes_all_of_it() {
+    let text = r#"
+static g = fn (f, a) { f(a) };
+static h = fn (_n: usize) -> bool { true };
+static main = fn { g(h, 1); };
+"#;
+    let (analysis, file, _) = fixture(&format!("{text}$0"));
+    let hints = analysis.inlay_hints(file);
+    let of_g: Vec<_> = hints
+        .iter()
+        .filter(|hint| usize::from(hint.offset) < text.find("static h").unwrap())
+        .collect();
+    assert_eq!(of_g.len(), 3);
+    for hint in of_g {
+        let fix = crate::Fix {
+            label: hint.fix_label.clone(),
+            edits: hint
+                .edits
+                .iter()
+                .map(|edit| crate::FileEdit {
+                    file,
+                    edit: edit.clone(),
+                })
+                .collect(),
+        };
+        assert_eq!(
+            apply_fix(text, &fix),
+            r#"
+static g = fn (f: fn(usize) -> bool, a: usize) -> bool { f(a) };
+static h = fn (_n: usize) -> bool { true };
+static main = fn { g(h, 1); };
+"#,
+        );
+    }
+}

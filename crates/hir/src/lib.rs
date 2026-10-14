@@ -34,7 +34,9 @@ pub use const_check::ConstCheckDiagnostic;
 pub use constraint::Cause;
 pub use constraint::{RegionConstraint, RegionConstraintReason};
 pub use infer::{InferenceDiagnostic, InferenceResult, TurbofishList};
-pub use inferred_signature::insert_inferred_signature;
+pub use inferred_signature::{
+    InferredSignature, SignaturePart, inferred_signature, insert_inferred_signature,
+};
 pub use item_tree::{
     Constness, ItemKind, ItemTree, MemberHome, TypeDeclData, TypeRef, item_source,
     trait_requirements, type_decl,

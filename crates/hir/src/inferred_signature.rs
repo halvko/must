@@ -9,15 +9,15 @@ use syntax::{SyntaxKind, TextEdit, TextRange, TextSize};
 
 use crate::{ItemId, Ty};
 
-/// The fix writing `item`'s inferred signature, its edits all in `item`'s
-/// own file; `None` when the item's signature is not inference's (see
+/// What inference found for `item`, as the parts to write into its own
+/// file; `None` when the item's signature is not inference's (see
 /// [`inferrable_source`]) or inference found nothing to write. With
 /// `offered_at`, also `None` unless that range is on the item's head.
-pub fn insert_inferred_signature(
+pub fn inferred_signature(
     db: &dyn Db,
     item: ItemId<'_>,
     offered_at: Option<TextRange>,
-) -> Option<syntax::Fix> {
+) -> Option<InferredSignature> {
     let source = inferrable_source(db, item)?;
     if let Some(range) = offered_at {
         let head = head_range(&source);
@@ -31,18 +31,62 @@ pub fn insert_inferred_signature(
     let writer = Writer {
         db,
         file: item.file(db),
-        edits: Vec::new(),
+        parts: Vec::new(),
     };
-    let edits = writer.write(&source, &sig)?;
+    let parts = writer.write(&source, &sig)?;
     let label = if matches!(sig, Ty::Fn(_)) {
         "Insert inferred signature"
     } else {
         "Insert inferred type"
     };
-    Some(syntax::Fix {
-        label: label.to_owned(),
-        edits,
-    })
+    Some(InferredSignature { label, parts })
+}
+
+/// [`inferred_signature`] as the fix that writes it.
+pub fn insert_inferred_signature(
+    db: &dyn Db,
+    item: ItemId<'_>,
+    offered_at: Option<TextRange>,
+) -> Option<syntax::Fix> {
+    inferred_signature(db, item, offered_at).map(|sig| sig.fix())
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InferredSignature {
+    pub label: &'static str,
+    pub parts: Vec<SignaturePart>,
+}
+
+/// One piece of an [`InferredSignature`]: `text` written at `range`, which
+/// is empty for an inserted annotation and the `_` for a filled hole.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SignaturePart {
+    pub range: TextRange,
+    pub text: String,
+    /// Whether a space separates `text` from what precedes it.
+    pub spaced: bool,
+}
+
+impl SignaturePart {
+    pub fn edit(&self) -> TextEdit {
+        TextEdit {
+            range: self.range,
+            insert: if self.spaced {
+                format!(" {}", self.text)
+            } else {
+                self.text.clone()
+            },
+        }
+    }
+}
+
+impl InferredSignature {
+    pub fn fix(&self) -> syntax::Fix {
+        syntax::Fix {
+            label: self.label.to_owned(),
+            edits: self.parts.iter().map(SignaturePart::edit).collect(),
+        }
+    }
 }
 
 /// The item's head, where the action is offered: from its start up to its
@@ -123,12 +167,12 @@ impl FnHead {
 struct Writer<'a> {
     db: &'a dyn Db,
     file: SourceFile,
-    edits: Vec<TextEdit>,
+    parts: Vec<SignaturePart>,
 }
 
 impl Writer<'_> {
-    /// The edits for `source`, `None` when there are none.
-    fn write(mut self, source: &ast::StaticItem, sig: &Ty) -> Option<Vec<TextEdit>> {
+    /// The parts for `source`, `None` when there are none.
+    fn write(mut self, source: &ast::StaticItem, sig: &Ty) -> Option<Vec<SignaturePart>> {
         if let Some(annotation) = source.ty() {
             // The item-level annotation is the contract whenever it is
             // written; the literal's own annotations are not consulted.
@@ -138,25 +182,26 @@ impl Writer<'_> {
             self.fill_fn(FnHead::of_literal(&literal), sig, true);
         } else {
             let at = source.name()?.syntax().text_range().end();
-            self.write_at(TextRange::empty(at), ": ", sig);
+            self.insert(at, false, ": ", sig);
         }
-        (!self.edits.is_empty()).then_some(self.edits)
+        (!self.parts.is_empty()).then_some(self.parts)
     }
 
-    /// Replace `range` with `prefix` and `ty`'s spelling, unless it is a
-    /// bare `_`: that writes nothing inference found.
-    fn write_at(&mut self, range: TextRange, prefix: &str, ty: &Ty) {
+    /// Write `prefix` and `ty`'s spelling at `range`, unless the spelling
+    /// is a bare `_`: that writes nothing inference found.
+    fn write_at(&mut self, range: TextRange, spaced: bool, prefix: &str, ty: &Ty) {
         let text = crate::annotation_text(self.db, self.file, ty);
         if text != "_" {
-            self.edits.push(TextEdit {
+            self.parts.push(SignaturePart {
                 range,
-                insert: format!("{prefix}{text}"),
+                text: format!("{prefix}{text}"),
+                spaced,
             });
         }
     }
 
-    fn insert(&mut self, at: TextSize, prefix: &str, ty: &Ty) {
-        self.write_at(TextRange::empty(at), prefix, ty);
+    fn insert(&mut self, at: TextSize, spaced: bool, prefix: &str, ty: &Ty) {
+        self.write_at(TextRange::empty(at), spaced, prefix, ty);
     }
 
     /// [`Self::fill`] under a written postfix `.&raw` or `.&`, where a `_`
@@ -176,7 +221,9 @@ impl Writer<'_> {
     /// that lowered to an error has nothing to fill.
     fn fill(&mut self, written: &ast::Type, ty: &Ty) {
         match (written, ty) {
-            (ast::Type::HoleType(hole), _) => self.write_at(hole.syntax().text_range(), "", ty),
+            (ast::Type::HoleType(hole), _) => {
+                self.write_at(hole.syntax().text_range(), false, "", ty)
+            }
             (ast::Type::FnType(written), Ty::Fn(sig)) => {
                 self.fill_fn(FnHead::of_type(written), sig, true)
             }
@@ -230,7 +277,7 @@ impl Writer<'_> {
         for (param, ty) in params.zip(&sig.params) {
             match (param.ty(), param.pat()) {
                 (Some(written), _) => self.fill(&written, ty),
-                (None, Some(pat)) => self.insert(pat.syntax().text_range().end(), ": ", ty),
+                (None, Some(pat)) => self.insert(pat.syntax().text_range().end(), false, ": ", ty),
                 (None, None) => {}
             }
         }
@@ -241,9 +288,11 @@ impl Writer<'_> {
                 }
             }
             _ if !with_ret => {}
-            (None, Some(list)) => self.insert(list.syntax().text_range().end(), " -> ", &sig.ret),
+            (None, Some(list)) => {
+                self.insert(list.syntax().text_range().end(), true, "-> ", &sig.ret)
+            }
             // `fn { ... }`: the return type needs the empty list in front.
-            (None, None) => self.insert(head.fn_end, " () -> ", &sig.ret),
+            (None, None) => self.insert(head.fn_end, true, "() -> ", &sig.ret),
         }
     }
 }
