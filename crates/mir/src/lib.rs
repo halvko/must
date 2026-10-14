@@ -11,7 +11,7 @@
 //!   at the trap. A trap for an error diagnostic carries the
 //!   diagnostic's message verbatim.
 //! - **Narrowing-readiness.** Compiler temps are minted fresh per evaluated
-//!   expression and conditions stay materialized as [`Rvalue::BinaryOp`]
+//!   expression and conditions stay materialized as [`ValueExpr::BinaryOp`]
 //!   statements feeding [`TerminatorKind::SwitchBool`], so a future
 //!   value-range analysis can recover the predicate on each CFG edge. (User
 //!   locals are ordinary mutable places — this is not SSA and won't become
@@ -61,8 +61,8 @@ pub struct MirLowered {
     /// compile-time positions wherever their mention sits, exactly like
     /// `const` blocks — the same check-time evaluation surface
     /// (`eval::const_arg_values`), and the operands a
-    /// [`Rvalue::Instantiate`] forces at instantiation time. Keyed by the
-    /// argument's *value expression* (each has its own node, so failures
+    /// [`ValueExpr::Instantiate`] forces at instantiation time. Keyed by the
+    /// argument's own expression (each has its own node, so failures
     /// squiggle the argument, not the whole mention).
     pub const_args: Vec<(ExprId, BodyId)>,
     /// Findings of lowering itself — MIR is a diagnostic *producer* like any
@@ -99,7 +99,7 @@ pub struct LocalData {
     /// The binding this local was created for (debugger provenance).
     pub binding: Option<BindingId>,
     /// Whether the local's address is taken somewhere in the body
-    /// ([`Rvalue::AddrOf`] names it as the base of a place that does NOT
+    /// ([`ValueExpr::AddrOf`] names it as the base of a place that does NOT
     /// lead with a deref — a deref-rooted `p.*.x.&raw mut` only *reads*
     /// its root, so it marks nothing) — the two-tier locals fact: only
     /// addressable locals are ever promoted into the interpreter's
@@ -133,7 +133,7 @@ pub struct Statement {
 /// allocation instead — liveness (and, for writes, writability) is checked
 /// when the place is actually read or written, and a violation there is
 /// detected UB, not a trap. Places appear as assignment destinations, as
-/// [`Operand::Copy`] sources, and as the operand of [`Rvalue::AddrOf`].
+/// [`Operand::Copy`] sources, and as the operand of [`ValueExpr::AddrOf`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Place {
     pub local: LocalId,
@@ -188,7 +188,7 @@ pub enum StatementKind {
     /// `p.*.x = v;`): the machine resolves it against its abstract memory,
     /// with liveness and writability checked at the store — the misuse
     /// cases are detected UB, not silent corruption.
-    Assign { dest: Place, rvalue: Rvalue },
+    Assign { dest: Place, value: ValueExpr },
     /// The end of a scoped local's storage, at every exit of the nested
     /// block or match arm that declared it (its end, each `break`, each
     /// `continue`), so re-entry gets fresh storage. No live marker pairs
@@ -218,8 +218,10 @@ impl Scope {
     }
 }
 
+/// The right-hand side of a [`StatementKind::Assign`]: one operation
+/// computing the value written to the destination place.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum Rvalue {
+pub enum ValueExpr {
     Use(Operand),
     BinaryOp(BinOp, Operand, Operand),
     /// `-x` — unary negation of an integer. The operand's [`IntValue`]
@@ -303,7 +305,7 @@ pub enum Rvalue {
         place: Place,
     },
     /// `place.&` / `place.&mut` — a SAFE borrow of a place. Structurally
-    /// [`Rvalue::AddrOf`]'s twin, and at runtime the identical value: a
+    /// [`ValueExpr::AddrOf`]'s twin, and at runtime the identical value: a
     /// borrow and a raw pointer to the same place are the same machine
     /// word, and the region that told them apart is already erased by the
     /// time MIR exists.
@@ -317,7 +319,7 @@ pub enum Rvalue {
     /// accident (the wasm backend refuses it BY NAME).
     ///
     /// A borrow whose root is a `static` lowers through
-    /// [`Rvalue::AddrOfStatic`] instead: a static's allocation is
+    /// [`ValueExpr::AddrOfStatic`] instead: a static's allocation is
     /// read-only and shared for the whole run, so there is no exclusivity
     /// to track and no node worth minting (`.&mut` of a `static` is
     /// rejected upstream).

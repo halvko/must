@@ -36,7 +36,7 @@
 //!    hir by provenance: a named local's binding type, a temp's defining
 //!    expression, and for the temp that holds a fresh loan the loan's own
 //!    region from [`InferenceResult::loan_regions`].
-//! 3. **Loans in scope**, forward from each [`Rvalue::Borrow`]: a loan is
+//! 3. **Loans in scope**, forward from each [`ValueExpr::Borrow`]: a loan is
 //!    in scope at every point reachable from its mint without passing an
 //!    assignment to the borrowed place or a prefix of it, and without
 //!    passing a point where its region is not live. The second exit is
@@ -166,8 +166,8 @@ use syntax::TextRange;
 
 use crate::cfg::{self, BitSet, Findings, Point};
 use crate::{
-    BlockId, CheckTrap, LocalId, MirBody, Operand, Place, ProjElem, Rvalue, Scope, Statement,
-    StatementKind, TerminatorKind, paths_overlap,
+    BlockId, CheckTrap, LocalId, MirBody, Operand, Place, ProjElem, Scope, Statement,
+    StatementKind, TerminatorKind, ValueExpr, paths_overlap,
 };
 
 /// One finding. Carries the expressions to blame and everything the
@@ -485,7 +485,7 @@ pub fn loan_check<'db>(db: &'db dyn Db, item: ItemId<'db>) -> &'db [LoanDiagnost
     &loan_findings(db, item).diagnostics
 }
 
-/// One loan: what a [`Rvalue::Borrow`] minted, with its place resolved
+/// One loan: what a [`ValueExpr::Borrow`] minted, with its place resolved
 /// through any temp that stands for a place.
 #[derive(Debug, Clone)]
 struct Loan {
@@ -630,7 +630,7 @@ impl<'a> BodyCheck<'a> {
         let stmt = self.body.blocks[point.block].statements.get(point.index)?;
         match &stmt.kind {
             StatementKind::Assign {
-                rvalue: Rvalue::Use(Operand::Copy(place)),
+                value: ValueExpr::Use(Operand::Copy(place)),
                 ..
             } => Some(place),
             _ => None,
@@ -838,7 +838,7 @@ impl<'a> BodyCheck<'a> {
         for (block, data) in self.body.blocks.iter() {
             for (index, stmt) in data.statements.iter().enumerate() {
                 let StatementKind::Assign {
-                    rvalue: Rvalue::Borrow { mutable, place },
+                    value: ValueExpr::Borrow { mutable, place },
                     ..
                 } = &stmt.kind
                 else {
@@ -1016,46 +1016,46 @@ impl<'a> BodyCheck<'a> {
                 shallow: true,
             }),
             Some(Statement {
-                kind: StatementKind::Assign { dest, rvalue },
+                kind: StatementKind::Assign { dest, value },
                 ..
             }) => {
-                match rvalue {
+                match value {
                     // The copy that defines a temp standing for a place is
                     // no access (module doc, "Places"): the
                     // access through the temp is the one the user wrote.
                     // Its index operands still read.
-                    Rvalue::Use(Operand::Copy(place))
+                    ValueExpr::Use(Operand::Copy(place))
                         if dest.projection.is_empty() && self.is_place_temp(dest.local) =>
                     {
                         self.index_accesses(place, &mut out);
                     }
-                    Rvalue::Use(op) | Rvalue::UnaryNeg(op) => {
+                    ValueExpr::Use(op) | ValueExpr::UnaryNeg(op) => {
                         self.operand_access(op, &mut out);
                     }
-                    Rvalue::BinaryOp(_, a, b) => {
+                    ValueExpr::BinaryOp(_, a, b) => {
                         self.operand_access(a, &mut out);
                         self.operand_access(b, &mut out);
                     }
-                    Rvalue::Aggregate { ops, .. } => {
+                    ValueExpr::Aggregate { ops, .. } => {
                         for op in ops {
                             self.operand_access(op, &mut out);
                         }
                     }
-                    Rvalue::Field { base, .. } => self.operand_access(base, &mut out),
-                    Rvalue::Index { base, index } => {
+                    ValueExpr::Field { base, .. } => self.operand_access(base, &mut out),
+                    ValueExpr::Index { base, index } => {
                         self.operand_access(base, &mut out);
                         self.operand_access(index, &mut out);
                     }
-                    Rvalue::Repeat { elem, count } => {
+                    ValueExpr::Repeat { elem, count } => {
                         self.operand_access(elem, &mut out);
                         self.operand_access(count, &mut out);
                     }
-                    Rvalue::Instantiate { const_args, .. } => {
+                    ValueExpr::Instantiate { const_args, .. } => {
                         for op in const_args {
                             self.operand_access(op, &mut out);
                         }
                     }
-                    Rvalue::Borrow { mutable, place } => {
+                    ValueExpr::Borrow { mutable, place } => {
                         self.index_accesses(place, &mut out);
                         out.push(Access {
                             kind: if *mutable {
@@ -1070,8 +1070,8 @@ impl<'a> BodyCheck<'a> {
                     // Minting a raw pointer touches nothing (M08): it is
                     // the deref, under `unsafe`, that accesses. Its index
                     // operands still read.
-                    Rvalue::AddrOf { place, .. } => self.index_accesses(place, &mut out),
-                    Rvalue::AddrOfStatic { .. } => {}
+                    ValueExpr::AddrOf { place, .. } => self.index_accesses(place, &mut out),
+                    ValueExpr::AddrOfStatic { .. } => {}
                 }
                 self.index_accesses(dest, &mut out);
                 // The temp a place is copied into is written as

@@ -13,8 +13,8 @@ use rustc_hash::{FxHashMap, FxHashSet};
 
 use crate::{
     AggregateKind, BlockData, BlockId, BodyId, Const, LocalData, LocalId, MirBody, MirDiagnostic,
-    MirLowered, Operand, Place, Rvalue, Scope, Statement, StatementKind, Terminator,
-    TerminatorKind,
+    MirLowered, Operand, Place, Scope, Statement, StatementKind, Terminator, TerminatorKind,
+    ValueExpr,
 };
 
 pub(crate) fn lower_item(db: &dyn Db, item: ItemId<'_>) -> MirLowered {
@@ -680,7 +680,7 @@ impl LowerCtx<'_> {
         }
         let op = self.lower_expr(&mut b, body_expr);
         let ret = b.ret;
-        b.push_assign(ret, Rvalue::Use(op), body_expr);
+        b.push_assign(ret, ValueExpr::Use(op), body_expr);
         b.terminate(TerminatorKind::Return, body_expr);
         self.bodies.alloc(MirBody {
             locals: b.locals,
@@ -721,7 +721,7 @@ impl LowerCtx<'_> {
         let dest = b.temp(self.ty(expr));
         b.push_assign(
             dest,
-            Rvalue::Borrow {
+            ValueExpr::Borrow {
                 mutable,
                 place: Place {
                     local,
@@ -805,7 +805,7 @@ impl LowerCtx<'_> {
             // no const args is exactly the base item's own value; const
             // args lower to compile-time bodies of their own (they are
             // const contexts wherever the mention sits — same machinery as
-            // `const` blocks) and an [`Rvalue::Instantiate`] attaches
+            // `const` blocks) and an [`ValueExpr::Instantiate`] attaches
             // their values to the fn value.
             ExprData::GenericApp { base, .. } => {
                 let name = match &self.body.exprs[*base] {
@@ -847,7 +847,7 @@ impl LowerCtx<'_> {
                                 let dest = b.temp(self.ty(expr));
                                 b.push_assign(
                                     dest,
-                                    Rvalue::Instantiate {
+                                    ValueExpr::Instantiate {
                                         item: loc,
                                         const_args,
                                     },
@@ -1096,7 +1096,7 @@ impl LowerCtx<'_> {
                     return self.trap(b, expr, "syntax error: missing operator".to_owned());
                 };
                 let dest = b.temp(self.ty(expr));
-                b.push_assign(dest, Rvalue::BinaryOp(*op, l, r), expr);
+                b.push_assign(dest, ValueExpr::BinaryOp(*op, l, r), expr);
                 Operand::Copy(dest.into())
             }
             // `-x`. A literal directly underneath folds into the constant
@@ -1128,7 +1128,7 @@ impl LowerCtx<'_> {
                 match self.ty(expr) {
                     Ty::Int(_) => {
                         let dest = b.temp(self.ty(expr));
-                        b.push_assign(dest, Rvalue::UnaryNeg(op), expr);
+                        b.push_assign(dest, ValueExpr::UnaryNeg(op), expr);
                         Operand::Copy(dest.into())
                     }
                     // Not an integer (diagnosed upstream): never observed.
@@ -1155,7 +1155,7 @@ impl LowerCtx<'_> {
 
                 b.current = then_block;
                 let then_op = self.lower_expr(b, *then_branch);
-                b.push_assign(dest, Rvalue::Use(then_op), *then_branch);
+                b.push_assign(dest, ValueExpr::Use(then_op), *then_branch);
                 let join = b.new_block();
                 b.terminate(TerminatorKind::Goto { target: join }, expr);
 
@@ -1163,10 +1163,10 @@ impl LowerCtx<'_> {
                 match else_branch {
                     Some(els) => {
                         let else_op = self.lower_expr(b, *els);
-                        b.push_assign(dest, Rvalue::Use(else_op), *els);
+                        b.push_assign(dest, ValueExpr::Use(else_op), *els);
                     }
                     // No `else`: the false edge produces `()`.
-                    None => b.push_assign(dest, Rvalue::Use(Operand::Const(Const::Unit)), expr),
+                    None => b.push_assign(dest, ValueExpr::Use(Operand::Const(Const::Unit)), expr),
                 }
                 b.terminate(TerminatorKind::Goto { target: join }, expr);
                 b.current = join;
@@ -1206,7 +1206,7 @@ impl LowerCtx<'_> {
                                 // one assignment.
                                 PatData::Bind(binding) => {
                                     let local = self.alloc_binding_local(b, *binding);
-                                    b.push_assign(local, Rvalue::Use(init_op), init);
+                                    b.push_assign(local, ValueExpr::Use(init_op), init);
                                 }
                                 // `_`: evaluated for effects only, nothing
                                 // to bind.
@@ -1271,7 +1271,7 @@ impl LowerCtx<'_> {
             // in the order the program writes them), collected by name, then
             // reassembled into the operand list in the type's canonical
             // (sorted) order — the same order `Ty::Record` uses, which is
-            // what `Rvalue::Field`'s index refers to. A field the literal
+            // what `ValueExpr::Field`'s index refers to. A field the literal
             // doesn't actually supply (missing-field diagnostic, already a
             // pending value trap) or one the type doesn't want (extra-field
             // diagnostic, likewise) gets a harmless placeholder: the whole
@@ -1310,7 +1310,7 @@ impl LowerCtx<'_> {
                 let dest = b.temp(self.ty(expr));
                 b.push_assign(
                     dest,
-                    Rvalue::Aggregate {
+                    ValueExpr::Aggregate {
                         kind: AggregateKind::Record(field_names),
                         ops,
                     },
@@ -1336,7 +1336,7 @@ impl LowerCtx<'_> {
                 match self.field_index(*receiver, name) {
                     Some(index) => {
                         let dest = b.temp(self.ty(expr));
-                        b.push_assign(dest, Rvalue::Field { base, index }, expr);
+                        b.push_assign(dest, ValueExpr::Field { base, index }, expr);
                         Operand::Copy(dest.into())
                     }
                     // No such field, or not a (known) record at all:
@@ -1357,7 +1357,7 @@ impl LowerCtx<'_> {
                 let dest = b.temp(self.ty(expr));
                 b.push_assign(
                     dest,
-                    Rvalue::Aggregate {
+                    ValueExpr::Aggregate {
                         kind: AggregateKind::Array,
                         ops,
                     },
@@ -1373,7 +1373,7 @@ impl LowerCtx<'_> {
                 let elem = self.lower_expr(b, *element);
                 let count = self.lower_expr(b, *count);
                 let dest = b.temp(self.ty(expr));
-                b.push_assign(dest, Rvalue::Repeat { elem, count }, expr);
+                b.push_assign(dest, ValueExpr::Repeat { elem, count }, expr);
                 Operand::Copy(dest.into())
             }
             // `a[i]`: base and index evaluate, then the element is read
@@ -1405,7 +1405,7 @@ impl LowerCtx<'_> {
                         let dest = b.temp(self.ty(expr));
                         b.push_assign(
                             dest,
-                            Rvalue::Index {
+                            ValueExpr::Index {
                                 base: base_op,
                                 index: index_op,
                             },
@@ -1504,7 +1504,7 @@ impl LowerCtx<'_> {
             // `(alloc, path)` value. The region is already gone (see
             // `Self::ty`), and at runtime a borrow and a raw pointer to
             // the same place are the same machine word; what separates
-            // them is `Rvalue::Borrow`'s tag minting — the loan the
+            // them is `ValueExpr::Borrow`'s tag minting — the loan the
             // checker (`crate::loans`) tracks, and the node the
             // interpreter's aliasing tree creates.
             ExprData::Borrow { mutable, place } => {
@@ -1533,7 +1533,7 @@ impl LowerCtx<'_> {
                         let dest = b.temp(self.ty(expr));
                         b.push_assign(
                             dest,
-                            Rvalue::Use(Operand::Copy(Place {
+                            ValueExpr::Use(Operand::Copy(Place {
                                 local: root,
                                 projection: vec![crate::ProjElem::Deref],
                             })),
@@ -1629,7 +1629,7 @@ impl LowerCtx<'_> {
                 // `lower_expr` wrapper plants the trap here.
                 match b.loop_frames.last().copied() {
                     Some(frame) if !self.value_traps.contains_key(&expr) => {
-                        b.push_assign(frame.result, Rvalue::Use(op), expr);
+                        b.push_assign(frame.result, ValueExpr::Use(op), expr);
                         // Leaving the loop ends the storage of every
                         // scope opened inside it.
                         b.push_storage_dead_from(frame.scope_depth, expr);
@@ -1671,7 +1671,7 @@ impl LowerCtx<'_> {
                     return Operand::Const(Const::Unit);
                 }
                 let ret = b.ret;
-                b.push_assign(ret, Rvalue::Use(op), expr);
+                b.push_assign(ret, ValueExpr::Use(op), expr);
                 b.terminate(TerminatorKind::Return, expr);
                 // Code after a `return` is unreachable; keep lowering it
                 // into a predecessor-less block (CFG stays total), like
@@ -1960,7 +1960,7 @@ impl LowerCtx<'_> {
                     let test = b.temp(Ty::Bool);
                     b.push_assign(
                         test,
-                        Rvalue::BinaryOp(BinOp::Eq, discr.clone(), Operand::Const(value)),
+                        ValueExpr::BinaryOp(BinOp::Eq, discr.clone(), Operand::Const(value)),
                         origin,
                     );
                     let then_block = b.new_block();
@@ -2037,7 +2037,7 @@ impl LowerCtx<'_> {
             None if self.value_traps.contains_key(&expr) => {
                 // A broken-pattern match: the pending value trap (planted
                 // by the `lower_expr` wrapper) is the whole story.
-                b.push_assign(dest, Rvalue::Use(Operand::Const(Const::Unit)), expr);
+                b.push_assign(dest, ValueExpr::Use(Operand::Const(Const::Unit)), expr);
                 b.terminate(TerminatorKind::Goto { target: join }, expr);
             }
             None => {
@@ -2086,7 +2086,7 @@ impl LowerCtx<'_> {
         self.bind_match_pattern(b, arm.pat, scrut, arm.body, lens);
         let value = self.lower_expr(b, arm.body);
         b.close_scope(arm.body);
-        b.push_assign(dest, Rvalue::Use(value), arm.body);
+        b.push_assign(dest, ValueExpr::Use(value), arm.body);
         b.terminate(TerminatorKind::Goto { target: join }, expr);
     }
 
@@ -2146,7 +2146,7 @@ impl LowerCtx<'_> {
     /// field index; a bare bind aliases the whole value.
     ///
     /// Through a borrow (`lens`), the payloads are not read at all: each
-    /// binder gets a `Rvalue::Borrow` of the payload's SUB-PLACE, reached
+    /// binder gets a `ValueExpr::Borrow` of the payload's SUB-PLACE, reached
     /// as `scrutinee.*.<index>`. That is the whole runtime content of
     /// "match projects through borrows" — the binding aliases the
     /// scrutinee's storage instead of copying out of a detached value, and
@@ -2170,7 +2170,7 @@ impl LowerCtx<'_> {
                 // A bare bind always binds the whole scrutinee (never
                 // narrowed to a variant), so it just aliases the value.
                 let local = self.alloc_binding_local(b, *binding);
-                b.push_assign(local, Rvalue::Use(scrut.clone()), origin);
+                b.push_assign(local, ValueExpr::Use(scrut.clone()), origin);
             }
             PatData::Variant { bindings, .. } => {
                 let payloads = self
@@ -2187,8 +2187,8 @@ impl LowerCtx<'_> {
                 for (index, &binding) in bindings.iter().enumerate() {
                     let local = self.alloc_binding_local(b, binding);
                     if index < payloads {
-                        let rvalue = match &lens {
-                            Some(lens) => Rvalue::Borrow {
+                        let value = match &lens {
+                            Some(lens) => ValueExpr::Borrow {
                                 mutable: lens.mutable,
                                 place: Place {
                                     local: lens.local,
@@ -2198,16 +2198,16 @@ impl LowerCtx<'_> {
                                     ],
                                 },
                             },
-                            None => Rvalue::Field {
+                            None => ValueExpr::Field {
                                 base: scrut.clone(),
                                 index: index as u32,
                             },
                         };
-                        b.push_assign(local, rvalue, origin);
+                        b.push_assign(local, value, origin);
                     } else {
                         // Arity error (already trapped): a placeholder
                         // keeps the local initialized and lowering total.
-                        b.push_assign(local, Rvalue::Use(Operand::Const(Const::Unit)), origin);
+                        b.push_assign(local, ValueExpr::Use(Operand::Const(Const::Unit)), origin);
                     }
                 }
             }
@@ -2314,7 +2314,7 @@ impl LowerCtx<'_> {
             PatData::Missing | PatData::Wildcard | PatData::Char(_) | PatData::Int { .. } => {}
             PatData::Bind(binding) => {
                 let local = self.alloc_binding_local(b, *binding);
-                b.push_assign(local, Rvalue::Use(value.clone()), origin);
+                b.push_assign(local, ValueExpr::Use(value.clone()), origin);
             }
             PatData::Record { fields, .. } => {
                 let rec = match self.infer.type_of_pat.get(pat) {
@@ -2332,7 +2332,7 @@ impl LowerCtx<'_> {
                         .and_then(|rec| rec.fields.iter().position(|(n, _)| *n == f.field));
                     match index {
                         Some(index) => {
-                            let field = Rvalue::Field {
+                            let field = ValueExpr::Field {
                                 base: value.clone(),
                                 index: index as u32,
                             };
@@ -2340,9 +2340,11 @@ impl LowerCtx<'_> {
                         }
                         // Unknown field (already diagnosed): a placeholder
                         // keeps the local initialized and lowering total.
-                        None => {
-                            b.push_assign(local, Rvalue::Use(Operand::Const(Const::Unit)), origin)
-                        }
+                        None => b.push_assign(
+                            local,
+                            ValueExpr::Use(Operand::Const(Const::Unit)),
+                            origin,
+                        ),
                     }
                 }
             }
@@ -2362,7 +2364,7 @@ impl LowerCtx<'_> {
                     let temp = b.temp(elem_ty.clone());
                     b.push_assign(
                         temp,
-                        Rvalue::Index {
+                        ValueExpr::Index {
                             base: value.clone(),
                             index: Operand::Const(index),
                         },
@@ -2497,7 +2499,7 @@ impl LowerCtx<'_> {
             match self.resolutions.get(target) {
                 Some(Resolution::Local(binding)) => match b.local_for_binding.get(binding) {
                     Some(&local) => {
-                        b.push_assign(local, Rvalue::Use(value_op), value);
+                        b.push_assign(local, ValueExpr::Use(value_op), value);
                     }
                     // A local of an enclosing function: the same unsupported
                     // capture the read path (`lower_name_ref`) reports.
@@ -2657,7 +2659,7 @@ impl LowerCtx<'_> {
             else {
                 return;
             };
-            b.push_assign(Place { local, projection }, Rvalue::Use(value_op), value);
+            b.push_assign(Place { local, projection }, ValueExpr::Use(value_op), value);
             return;
         }
         // Inference rejected the root as an assignment target (immutable
@@ -2726,7 +2728,7 @@ impl LowerCtx<'_> {
                             _ => unreachable!("chain holds only projection expressions"),
                         }
                     }
-                    b.push_assign(Place { local, projection }, Rvalue::Use(value_op), value);
+                    b.push_assign(Place { local, projection }, ValueExpr::Use(value_op), value);
                 }
                 // A local of an enclosing function: the same unsupported
                 // capture the read path (`lower_name_ref`) reports.
@@ -2822,7 +2824,7 @@ impl LowerCtx<'_> {
     /// `None` when the chain is not place-shaped — a call result, a
     /// literal, a record literal, an item, a capture of an enclosing
     /// function's local: those still lower as
-    /// [`Rvalue::Field`]/[`Rvalue::Index`] over a materialized base,
+    /// [`ValueExpr::Field`]/[`ValueExpr::Index`] over a materialized base,
     /// which is the right shape for a value that has no place of its own.
     fn lower_place_read(&mut self, b: &mut BodyBuilder, expr: ExprId) -> Option<Operand> {
         let (root, chain) = self.place_chain(expr);
@@ -2895,7 +2897,7 @@ impl LowerCtx<'_> {
         } else {
             Operand::Copy(place)
         };
-        b.push_assign(dest, Rvalue::Use(read), expr);
+        b.push_assign(dest, ValueExpr::Use(read), expr);
         Some(Operand::Copy(dest.into()))
     }
 
@@ -2904,9 +2906,9 @@ impl LowerCtx<'_> {
     /// and element steps resolve exactly like a field-assign target's,
     /// then the root decides the flavor —
     ///
-    /// - a **local**: [`Rvalue::AddrOf`] of its place, and the local is
+    /// - a **local**: [`ValueExpr::AddrOf`] of its place, and the local is
     ///   marked `addressable` (the two-tier promotion fact);
-    /// - a **`static` item**: [`Rvalue::AddrOfStatic`] — the item's one
+    /// - a **`static` item**: [`ValueExpr::AddrOfStatic`] — the item's one
     ///   machine-wide allocation, so every `S.&raw` is the same address;
     /// - a **`const` item**: the value is copied into a fresh temp and the
     ///   temp's address is taken — const=copied, now observable (each
@@ -2921,7 +2923,7 @@ impl LowerCtx<'_> {
     ///   silently and every later deref of it is detected UB.
     ///
     /// This is the ONE walk both `.&raw` and `.&` share. `flavor` decides
-    /// only which rvalue is planted at the end; every place rule, every
+    /// only which value expression is planted at the end; every place rule, every
     /// trap and the `addressable` marking are identical, which is the
     /// point: the two flavors differ in what they PROMISE, never in what
     /// they compute.
@@ -2977,7 +2979,7 @@ impl LowerCtx<'_> {
         if let Some(binding) = self.body.temp_local(root) {
             let value = self.lower_expr(b, root);
             let local = self.alloc_binding_local(b, binding);
-            b.push_assign(local, Rvalue::Use(value), root);
+            b.push_assign(local, ValueExpr::Use(value), root);
             return self.address_of_local(b, flavor, mutable, local, &chain, expr);
         }
         let ExprData::NameRef(name) = &self.body.exprs[root] else {
@@ -3029,7 +3031,7 @@ impl LowerCtx<'_> {
                         let dest = b.temp(self.ty(expr));
                         b.push_assign(
                             dest,
-                            Rvalue::AddrOfStatic {
+                            ValueExpr::AddrOfStatic {
                                 item: loc,
                                 projection,
                             },
@@ -3042,7 +3044,7 @@ impl LowerCtx<'_> {
                         // (cloned) const value in a temp and point at it.
                         let copy = b.temp(self.ty(root));
                         b.declare(copy);
-                        b.push_assign(copy, Rvalue::Use(Operand::Const(Const::Item(loc))), root);
+                        b.push_assign(copy, ValueExpr::Use(Operand::Const(Const::Item(loc))), root);
                         self.address_of_local(b, flavor, mutable, copy, &chain, expr)
                     }
                 }
@@ -3064,7 +3066,7 @@ impl LowerCtx<'_> {
         }
     }
 
-    /// The address of `local` extended by `chain`, as the rvalue `flavor`
+    /// The address of `local` extended by `chain`, as the value expression `flavor`
     /// asks for. Marks the local addressable.
     fn address_of_local(
         &mut self,
@@ -3345,7 +3347,7 @@ impl LowerCtx<'_> {
             return place.local;
         }
         let temp = b.temp(self.ty(expr));
-        b.push_assign(temp, Rvalue::Use(op), expr);
+        b.push_assign(temp, ValueExpr::Use(op), expr);
         temp
     }
 
@@ -3609,7 +3611,7 @@ impl LowerCtx<'_> {
     /// A member item's fn VALUE at the owner's generic arguments — shared
     /// by dot-calls (whose arguments come from the receiver's type) and
     /// qualified member references (which write them). Const params of the
-    /// owner's binder materialize per instance ([`Rvalue::Instantiate`]);
+    /// owner's binder materialize per instance ([`ValueExpr::Instantiate`]);
     /// type params need nothing (erasure).
     fn member_value_operand(
         &mut self,
@@ -3679,7 +3681,7 @@ impl LowerCtx<'_> {
         let dest = b.temp(self.ty(callee));
         b.push_assign(
             dest,
-            Rvalue::Instantiate {
+            ValueExpr::Instantiate {
                 item: member.clone(),
                 const_args,
             },
@@ -3796,8 +3798,8 @@ fn param_pats(body: &Body) -> FxHashMap<PatId, ExprId> {
 }
 
 /// The enum value `variant`'s constructor builds from `ops`, its payload.
-fn variant_aggregate(variant: &hir::ResolvedVariant, ops: Vec<Operand>) -> Rvalue {
-    Rvalue::Aggregate {
+fn variant_aggregate(variant: &hir::ResolvedVariant, ops: Vec<Operand>) -> ValueExpr {
+    ValueExpr::Aggregate {
         kind: AggregateKind::Variant {
             decl: variant.decl.clone(),
             index: variant.index,
@@ -3899,11 +3901,11 @@ impl BodyBuilder {
         self.locals.alloc(data)
     }
 
-    fn push_assign(&mut self, dest: impl Into<Place>, rvalue: Rvalue, origin: ExprId) {
+    fn push_assign(&mut self, dest: impl Into<Place>, value: ValueExpr, origin: ExprId) {
         self.blocks[self.current].statements.push(Statement {
             kind: StatementKind::Assign {
                 dest: dest.into(),
-                rvalue,
+                value,
             },
             origin,
         });
@@ -3927,10 +3929,10 @@ enum PtrFlavor {
 }
 
 impl PtrFlavor {
-    fn address_of(self, mutable: bool, place: Place) -> Rvalue {
+    fn address_of(self, mutable: bool, place: Place) -> ValueExpr {
         match self {
-            PtrFlavor::Raw => Rvalue::AddrOf { mutable, place },
-            PtrFlavor::Borrow => Rvalue::Borrow { mutable, place },
+            PtrFlavor::Raw => ValueExpr::AddrOf { mutable, place },
+            PtrFlavor::Borrow => ValueExpr::Borrow { mutable, place },
         }
     }
 }

@@ -96,10 +96,10 @@ const UNSUPPORTED: &[(&str, &str, &str)] = &[
     // Match-through-a-borrow is borrow code like any other, and it must
     // refuse by the SAME name rather than inventing a match-shaped
     // excuse: a borrowed match lowers to a deref-rooted `switch` and
-    // `Rvalue::Borrow` payload bindings, both of which this backend could
+    // `ValueExpr::Borrow` payload bindings, both of which this backend could
     // emit as plain address arithmetic that runs and silently drops
     // exclusivity. The refusal fires twice over — the scrutinee local's
-    // type has no layout, and `Rvalue::Borrow` is refused by name — and
+    // type has no layout, and `ValueExpr::Borrow` is refused by name — and
     // this pins that neither route was quietly opened.
     (
         "match_projection.must",

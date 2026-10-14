@@ -265,7 +265,7 @@ fn reads_at(body: &MirBody, point: Point) -> Vec<LocalId> {
 /// else in the statement reads `s`. A write through a deref is not one.
 fn in_place_write(body: &MirBody, point: Point) -> Option<LocalId> {
     let stmt = body.blocks[point.block].statements.get(point.index)?;
-    let StatementKind::Assign { dest, rvalue } = &stmt.kind else {
+    let StatementKind::Assign { dest, value } = &stmt.kind else {
         return None;
     };
     if dest.projection.is_empty()
@@ -277,7 +277,7 @@ fn in_place_write(body: &MirBody, point: Point) -> Option<LocalId> {
         return None;
     }
     let mut read = false;
-    cfg::value_places(rvalue, &mut |place| read |= place.local == dest.local);
+    cfg::value_places(value, &mut |place| read |= place.local == dest.local);
     for elem in &dest.projection {
         if let ProjElem::Index(op) = elem {
             cfg::operand_places(op, &mut |place| read |= place.local == dest.local);

@@ -161,7 +161,7 @@ pub fn nominal(db: &dyn Db, ty: &Ty) -> Layout<Nominal> {
 /// Column-wise, not variant-wise: element `j`'s column is as wide as the
 /// widest variant's element `j`, so a payload read needs the element
 /// position only — never the variant. That is what makes
-/// `Rvalue::Field` on an enum value compile to a plain slot copy in an
+/// `ValueExpr::Field` on an enum value compile to a plain slot copy in an
 /// arm, without the backend having to re-derive which variant the arm
 /// matched.
 pub struct EnumLayout {
@@ -222,7 +222,7 @@ fn enum_layout_at(db: &dyn Db, variants: &[(String, Vec<Ty>)], depth: u32) -> La
 
 /// Where field `index` of an aggregate starts, and — where it is
 /// knowable — what type it has. Handles every carrier
-/// `mir::Rvalue::Field` / `mir::ProjElem::Field` can name: records, named
+/// `mir::ValueExpr::Field` / `mir::ProjElem::Field` can name: records, named
 /// structs, and enums (positional, through the column layout).
 pub fn field(db: &dyn Db, ty: &Ty, index: u32) -> Layout<FieldRead> {
     let position = index as usize;
@@ -258,7 +258,7 @@ pub fn field(db: &dyn Db, ty: &Ty, index: u32) -> Layout<FieldRead> {
             // A payload read out of an enum value. The column layout
             // makes the OFFSET independent of the variant — the TYPE is
             // not: two variants may declare different types at the same
-            // position, and MIR's `Rvalue::Field` carries no variant
+            // position, and MIR's `ValueExpr::Field` carries no variant
             // index, so nothing here can say which one this read landed
             // on. `FieldRead::Column` therefore carries no type at all
             // (X10): a caller must size the read from a fact it already
