@@ -50,6 +50,19 @@ pub struct FileEdit {
     pub edit: TextEdit,
 }
 
+/// Inferred text shown inline where it could be written, with the edits
+/// that write the whole signature, whichever of its hints is accepted.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InlayHint {
+    pub offset: TextSize,
+    pub label: String,
+    /// Whether a space separates the hint from the text before it.
+    pub padding_left: bool,
+    pub fix_label: String,
+    /// In the hint's own file.
+    pub edits: Vec<TextEdit>,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Severity {
     Error,
@@ -411,6 +424,32 @@ impl Analysis {
             .filter_map(|&item| hir::insert_inferred_signature(&self.db, item, Some(range)))
             .map(|fix| in_file(file, fix))
             .collect()
+    }
+
+    /// The inferred parts of each signature in `file` that is not fully
+    /// annotated, placed where "insert inferred signature" would write
+    /// them. A filled `_` gets no hint: the user wrote it.
+    pub fn inlay_hints(&self, file: SourceFile) -> Vec<InlayHint> {
+        let mut hints = Vec::new();
+        for &item in hir::file_item_ids(&self.db, file) {
+            let Some(sig) = hir::inferred_signature(&self.db, item, None) else {
+                continue;
+            };
+            let edits: Vec<TextEdit> = sig.parts.iter().map(hir::SignaturePart::edit).collect();
+            hints.extend(
+                sig.parts
+                    .iter()
+                    .filter(|part| part.range.is_empty())
+                    .map(|part| InlayHint {
+                        offset: part.range.start(),
+                        label: part.text.clone(),
+                        padding_left: part.spaced,
+                        fix_label: sig.label.to_owned(),
+                        edits: edits.clone(),
+                    }),
+            );
+        }
+        hints
     }
 
     pub fn goto_definition(&self, pos: FilePosition) -> Option<NavigationTarget> {

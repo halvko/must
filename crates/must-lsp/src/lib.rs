@@ -31,7 +31,7 @@ use lsp_types::notification::{
 };
 use lsp_types::request::{
     CodeActionRequest, CodeLensRequest, Completion, ExecuteCommand, GotoDefinition, HoverRequest,
-    Request as _, SemanticTokensFullRequest, SemanticTokensRefresh,
+    InlayHintRequest, Request as _, SemanticTokensFullRequest, SemanticTokensRefresh,
 };
 
 /// The workspace command behind the ▶ run code lens: arguments are
@@ -53,6 +53,7 @@ pub fn server_capabilities() -> lsp_types::ServerCapabilities {
         definition_provider: Some(lsp_types::OneOf::Left(true)),
         hover_provider: Some(lsp_types::HoverProviderCapability::Simple(true)),
         code_action_provider: Some(lsp_types::CodeActionProviderCapability::Simple(true)),
+        inlay_hint_provider: Some(lsp_types::OneOf::Left(true)),
         code_lens_provider: Some(lsp_types::CodeLensOptions {
             resolve_provider: Some(false),
         }),
@@ -288,6 +289,11 @@ impl GlobalState {
             CodeActionRequest::METHOD => {
                 self.spawn_request(req, |snapshot, params| {
                     serde_json::to_value(snapshot.code_actions(params)).ok()
+                });
+            }
+            InlayHintRequest::METHOD => {
+                self.spawn_request(req, |snapshot, params| {
+                    serde_json::to_value(snapshot.inlay_hints(params)).ok()
                 });
             }
             CodeLensRequest::METHOD => {
@@ -856,6 +862,40 @@ fn diagnostics_notification(
 }
 
 impl Snapshot {
+    fn inlay_hints(&self, params: lsp_types::InlayHintParams) -> Option<Vec<lsp_types::InlayHint>> {
+        let uri = params.text_document.uri;
+        let Some(FileState::Open(file)) = self.files.by_uri.get(&uri).copied() else {
+            tracing::warn!(uri = %uri.as_str(), "inlay hints for a document that is not open");
+            return None;
+        };
+        let line_index = self.analysis.line_index(file);
+        // Compared as positions: the requested range may reach past the
+        // end of the text.
+        let visible = params.range.start..=params.range.end;
+        let hints = self
+            .analysis
+            .inlay_hints(file)
+            .into_iter()
+            .filter(|hint| visible.contains(&to_proto::position(&line_index, hint.offset)))
+            .map(|hint| lsp_types::InlayHint {
+                position: to_proto::position(&line_index, hint.offset),
+                label: lsp_types::InlayHintLabel::String(hint.label),
+                kind: Some(lsp_types::InlayHintKind::TYPE),
+                text_edits: Some(
+                    hint.edits
+                        .iter()
+                        .map(|edit| to_proto::text_edit(&line_index, edit))
+                        .collect(),
+                ),
+                tooltip: Some(lsp_types::InlayHintTooltip::String(hint.fix_label)),
+                padding_left: Some(hint.padding_left),
+                padding_right: None,
+                data: None,
+            })
+            .collect();
+        Some(hints)
+    }
+
     fn code_lenses(&self, params: lsp_types::CodeLensParams) -> Option<Vec<lsp_types::CodeLens>> {
         let uri = params.text_document.uri;
         let Some(FileState::Open(file)) = self.files.by_uri.get(&uri).copied() else {

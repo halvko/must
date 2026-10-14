@@ -25,13 +25,16 @@ Then install the editor extension once:
    payload variants, and record fields when your client supports them) come
    from your local build.
 3. Syntax highlighting comes from the tree-sitter grammar the extension
-   registers. For the server's semantic tokens on top of it, and for the ▶
-   run buttons, enable both in your Zed `settings.json` (code lenses are off
-   by default in Zed):
+   registers. For the server's semantic tokens on top of it, the ▶ run
+   buttons, and the inferred signatures of items that aren't fully annotated
+   (inlay hints; accepting one writes the signature in), enable them in your
+   Zed `settings.json` (code lenses and inlay hints are off by default in
+   Zed):
 
    ```json
    "languages": { "Must": { "semantic_tokens": "combined" } },
-   "code_lens": "on"
+   "code_lens": "on",
+   "inlay_hints": { "enabled": true }
    ```
 
    `"combined"` layers the two: tree-sitter colors what only it classifies
