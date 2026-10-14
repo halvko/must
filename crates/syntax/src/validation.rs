@@ -1508,7 +1508,7 @@ fn reject_nested_generic_binder(fn_literal: &ast::FnLiteral, errors: &mut Vec<Sy
     // `Option` can express that. Consts stay reserved on a different
     // ground entirely, and the message says so: a const argument is part
     // of an INSTANCE's identity, so it would have to reach
-    // `Rvalue::Instantiate`'s argument list and the mangled symbol — and
+    // `ValueExpr::Instantiate`'s argument list and the mangled symbol — and
     // the one place a member's arguments are carried reads them off the
     // receiver's own type, which cannot supply what the receiver does not
     // have. Granting it deletes the error below and nothing else here.

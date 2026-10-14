@@ -10,7 +10,7 @@ use hir::{Builtin, ConstLegality, ExprId, IntKind, ItemLoc, Ty};
 use la_arena::ArenaMap;
 use mir::{
     AggregateKind, BodyId, Const, LocalData, LocalId, MirBody, MirLowered, Operand, ProjElem,
-    Rvalue, Scope, StatementKind, TerminatorKind,
+    Scope, StatementKind, TerminatorKind, ValueExpr,
 };
 use rustc_hash::FxHashMap;
 
@@ -778,8 +778,8 @@ impl<'db, M: Mode> Machine<'db, M> {
 
         if let Some(stmt) = block.statements.get(statement) {
             match &stmt.kind {
-                StatementKind::Assign { dest, rvalue } => {
-                    let value = self.eval_rvalue(&loc, body, rvalue, stmt.origin)?;
+                StatementKind::Assign { dest, value } => {
+                    let value = self.eval_value_expr(&loc, body, value, stmt.origin)?;
                     // Element indices in the destination evaluate before
                     // the write (bounds are then checked at the write
                     // itself — an out-of-range element write is an
@@ -1602,25 +1602,25 @@ impl<'db, M: Mode> Machine<'db, M> {
         frame.statement = 0;
     }
 
-    fn eval_rvalue(
+    fn eval_value_expr(
         &mut self,
         loc: &ItemLoc,
         body: &MirBody,
-        rvalue: &Rvalue,
+        value: &ValueExpr,
         origin: ExprId,
     ) -> Result<Value, EvalError> {
-        match rvalue {
-            Rvalue::Use(op) => self.eval_operand(loc, body, op, origin),
-            Rvalue::BinaryOp(op, l, r) => {
+        match value {
+            ValueExpr::Use(op) => self.eval_operand(loc, body, op, origin),
+            ValueExpr::BinaryOp(op, l, r) => {
                 let l = self.eval_operand(loc, body, l, origin)?;
                 let r = self.eval_operand(loc, body, r, origin)?;
                 self.eval_bin_op(*op, l, r, loc, origin)
             }
-            Rvalue::UnaryNeg(op) => {
+            ValueExpr::UnaryNeg(op) => {
                 let v = self.eval_operand(loc, body, op, origin)?;
                 self.eval_unary_neg(v, loc, origin)
             }
-            Rvalue::Aggregate {
+            ValueExpr::Aggregate {
                 kind: AggregateKind::Record(names),
                 ops,
             } => {
@@ -1631,7 +1631,7 @@ impl<'db, M: Mode> Machine<'db, M> {
                 }
                 Ok(Value::Record { fields })
             }
-            Rvalue::Aggregate {
+            ValueExpr::Aggregate {
                 kind:
                     AggregateKind::Variant {
                         decl,
@@ -1651,7 +1651,7 @@ impl<'db, M: Mode> Machine<'db, M> {
                     payload,
                 })
             }
-            Rvalue::Aggregate {
+            ValueExpr::Aggregate {
                 kind: AggregateKind::Array,
                 ops,
             } => {
@@ -1665,7 +1665,7 @@ impl<'db, M: Mode> Machine<'db, M> {
             // per element — a compile-time `[0; 10_000_000_000]` must
             // exhaust the budget, not the server's memory (run-mode code
             // is the user's own process, unfueled as always).
-            Rvalue::Repeat { elem, count } => {
+            ValueExpr::Repeat { elem, count } => {
                 let elem = self.eval_operand(loc, body, elem, origin)?;
                 let count = self.eval_operand(loc, body, count, origin)?;
                 // The checker pins repeat counts to `usize`; a wrong kind is
@@ -1690,7 +1690,7 @@ impl<'db, M: Mode> Machine<'db, M> {
             // `a[i]`: the runtime bounds check — an ordinary trap (the
             // rejected-op story), deterministic, and worded exactly like
             // the compile-time squiggle when both sides are known there.
-            Rvalue::Index { base, index } => {
+            ValueExpr::Index { base, index } => {
                 let base = self.eval_operand(loc, body, base, origin)?;
                 let index = self.eval_operand(loc, body, index, origin)?;
                 let Value::Array(mut values) = base else {
@@ -1721,7 +1721,7 @@ impl<'db, M: Mode> Machine<'db, M> {
             // inherits this frame's const env, which is what lets a const
             // param forward as a const argument (`rep::<const N>` inside
             // another generic body).
-            Rvalue::Instantiate { item, const_args } => {
+            ValueExpr::Instantiate { item, const_args } => {
                 let args = const_args
                     .iter()
                     .map(|op| self.eval_operand(loc, body, op, origin))
@@ -1735,7 +1735,7 @@ impl<'db, M: Mode> Machine<'db, M> {
                     ..f
                 }))
             }
-            Rvalue::Field { base, index } => {
+            ValueExpr::Field { base, index } => {
                 let base = self.eval_operand(loc, body, base, origin)?;
                 let index = *index as usize;
                 let out_of_range = |this: &Self, what: &str, len: usize| {
@@ -1775,7 +1775,7 @@ impl<'db, M: Mode> Machine<'db, M> {
             // bounds-checked here (validity is judged at the deref): an
             // out-of-range address mints silently, and every later deref
             // of it is detected UB.
-            Rvalue::AddrOf { place, .. } => {
+            ValueExpr::AddrOf { place, .. } => {
                 let projection = self.resolve_projection(loc, body, &place.projection, origin)?;
                 let (alloc, path, tag) = self.resolve_place_alloc(
                     loc,
@@ -1797,7 +1797,7 @@ impl<'db, M: Mode> Machine<'db, M> {
             // its raw sibling would produce, plus the one thing that
             // separates them: a fresh node in the allocation's aliasing
             // tree, whose creation is itself an access through the parent.
-            Rvalue::Borrow { mutable, place } => {
+            ValueExpr::Borrow { mutable, place } => {
                 let projection = self.resolve_projection(loc, body, &place.projection, origin)?;
                 let (alloc, path, parent) = self.resolve_place_alloc(
                     loc,
@@ -1815,7 +1815,7 @@ impl<'db, M: Mode> Machine<'db, M> {
             // same address (static=identity, observable). Plain `S`
             // mentions keep cloning the memo, unchanged. Element steps
             // append unchecked, like every address-taking.
-            Rvalue::AddrOfStatic { item, projection } => {
+            ValueExpr::AddrOfStatic { item, projection } => {
                 let alloc = match self.static_allocs.get(item) {
                     Some(&alloc) => alloc,
                     None => {
@@ -1848,7 +1848,7 @@ impl<'db, M: Mode> Machine<'db, M> {
                             path.push(PathElem::Index(index));
                         }
                         // Deref-rooted chains lower through a pointer temp
-                        // (`Rvalue::AddrOf`), never through the static
+                        // (`ValueExpr::AddrOf`), never through the static
                         // form.
                         ResolvedProj::Deref => {
                             return Err(self.internal_error(

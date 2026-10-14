@@ -24,8 +24,8 @@ use eval::Value;
 use hir::body::BinOp;
 use hir::{ExprId, IntKind, ItemLoc, Ty};
 use mir::{
-    AggregateKind, BlockId, Const, LocalId, MirBody, Operand, Place, ProjElem, Rvalue,
-    StatementKind, TerminatorKind,
+    AggregateKind, BlockId, Const, LocalId, MirBody, Operand, Place, ProjElem, StatementKind,
+    TerminatorKind, ValueExpr,
 };
 
 use rustc_hash::FxHashMap;
@@ -253,7 +253,7 @@ impl<'a, 'db> Emitter<'a, 'db> {
         kind: &StatementKind,
         origin: ExprId,
     ) -> Result<(), Refusal> {
-        let StatementKind::Assign { dest, rvalue } = kind else {
+        let StatementKind::Assign { dest, value } = kind else {
             // A storage end emits nothing: every local has its own wasm
             // local for the whole function. It is the point at which a
             // slot could be handed to another local instead.
@@ -261,7 +261,7 @@ impl<'a, 'db> Emitter<'a, 'db> {
         };
         let dest_ty = self.place_ty(ctx, dest, origin)?;
         let width = self.slots(ctx, &dest_ty, origin)?;
-        let pushed = self.rvalue(ctx, rvalue, &dest_ty, width, origin)?;
+        let pushed = self.value_expr(ctx, value, &dest_ty, width, origin)?;
         // Deferred-error MIR can put a value of one shape where another
         // was expected (the program already has a diagnostic). Reconcile
         // rather than emit an ill-formed module.
@@ -280,32 +280,32 @@ impl<'a, 'db> Emitter<'a, 'db> {
         self.store_place(ctx, dest, scratch, width, origin)
     }
 
-    // --- rvalues ---------------------------------------------------------
+    // --- value expressions -----------------------------------------------
 
-    fn rvalue(
+    fn value_expr(
         &mut self,
         ctx: &mut Ctx<'db>,
-        rvalue: &Rvalue,
+        value: &ValueExpr,
         dest_ty: &Ty,
         width: u32,
         origin: ExprId,
     ) -> Result<u32, Refusal> {
-        match rvalue {
-            Rvalue::Use(op) => {
+        match value {
+            ValueExpr::Use(op) => {
                 let (src, ty) = self.operand(ctx, op, origin)?;
                 let count = self.slots(ctx, &ty, origin)?;
                 self.push_range(ctx, &src, 0, count, origin)?;
                 Ok(count)
             }
-            Rvalue::BinaryOp(op, l, r) => {
+            ValueExpr::BinaryOp(op, l, r) => {
                 self.binary(ctx, *op, l, r, origin)?;
                 Ok(1)
             }
-            Rvalue::UnaryNeg(op) => {
+            ValueExpr::UnaryNeg(op) => {
                 self.negate(ctx, op, origin)?;
                 Ok(1)
             }
-            Rvalue::Aggregate {
+            ValueExpr::Aggregate {
                 kind: AggregateKind::Variant { index, .. },
                 ops,
             } => self.variant(ctx, ops, *index, dest_ty, width, origin),
@@ -313,7 +313,7 @@ impl<'a, 'db> Emitter<'a, 'db> {
             // concatenate in the aggregate's canonical order, which IS the
             // order MIR hands the operands over in (records sorted by name,
             // elements positional).
-            Rvalue::Aggregate { ops, .. } => {
+            ValueExpr::Aggregate { ops, .. } => {
                 let mut total = 0;
                 for op in ops {
                     let (src, ty) = self.operand(ctx, op, origin)?;
@@ -323,7 +323,7 @@ impl<'a, 'db> Emitter<'a, 'db> {
                 }
                 Ok(total)
             }
-            Rvalue::Field { base, index } => {
+            ValueExpr::Field { base, index } => {
                 let (src, ty) = self.operand(ctx, base, origin)?;
                 let read = layout::field(self.db(), &ty, *index)
                     .map_err(|err| self.refuse(ctx, err, origin))?;
@@ -347,7 +347,7 @@ impl<'a, 'db> Emitter<'a, 'db> {
                 self.push_range(ctx, &src, read.offset(), count, origin)?;
                 Ok(count)
             }
-            Rvalue::Index { base, index } => {
+            ValueExpr::Index { base, index } => {
                 let (src, ty) = self.operand(ctx, base, origin)?;
                 let (_, element_width, len) =
                     layout::element(self.db(), &ty).map_err(|err| self.refuse(ctx, err, origin))?;
@@ -357,7 +357,7 @@ impl<'a, 'db> Emitter<'a, 'db> {
             }
             // `[e; N]`: N copies. The count is a compile-time value by
             // checking, so it is materialized here, not looped over.
-            Rvalue::Repeat { elem, count } => {
+            ValueExpr::Repeat { elem, count } => {
                 let times = match self.const_int(ctx, count)? {
                     Some(value) => value,
                     None => {
@@ -377,8 +377,8 @@ impl<'a, 'db> Emitter<'a, 'db> {
             }
             // A function value: zero slots. Monomorphization already
             // recorded which function this is.
-            Rvalue::Instantiate { .. } => Ok(0),
-            Rvalue::AddrOf { .. } | Rvalue::AddrOfStatic { .. } => Err(Refusal::new(
+            ValueExpr::Instantiate { .. } => Ok(0),
+            ValueExpr::AddrOf { .. } | ValueExpr::AddrOfStatic { .. } => Err(Refusal::new(
                 "taking an address (`.&raw`) — raw pointers and the heap are \
                  out of scope for this backend",
                 &ctx.loc,
@@ -389,7 +389,7 @@ impl<'a, 'db> Emitter<'a, 'db> {
             // COULD emit something that runs — and would silently drop the
             // exclusivity contract while doing it. Refusing is the whole
             // job here.
-            Rvalue::Borrow { .. } => Err(Refusal::new(
+            ValueExpr::Borrow { .. } => Err(Refusal::new(
                 "a safe borrow (`.&` / `.&mut`)",
                 &ctx.loc,
                 origin,
@@ -1594,7 +1594,7 @@ impl<'a, 'db> Emitter<'a, 'db> {
     /// type ([`layout::FieldRead`]), so this refuses rather than guesses.
     /// MIR does not emit such a read today (place projections come from
     /// NAMED field access, and enums have no named fields; payload reads
-    /// are `Rvalue::Field`, which is destination-sized above) — this is
+    /// are `ValueExpr::Field`, which is destination-sized above) — this is
     /// the guard that keeps it that way.
     fn field_of(
         &self,

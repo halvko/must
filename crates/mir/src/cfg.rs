@@ -7,8 +7,8 @@ use hir::ExprId;
 use rustc_hash::FxHashSet;
 
 use crate::{
-    BlockId, BodyId, CheckTrap, LocalId, MirBody, Operand, Place, ProjElem, Rvalue, StatementKind,
-    TerminatorKind,
+    BlockId, BodyId, CheckTrap, LocalId, MirBody, Operand, Place, ProjElem, StatementKind,
+    TerminatorKind, ValueExpr,
 };
 
 /// A location in one body: before statement `index` of `block`, or before
@@ -133,35 +133,35 @@ pub(crate) fn operand_places(op: &Operand, f: &mut impl FnMut(&Place)) {
 
 /// The operands a value is computed from, in evaluation order. A borrow's
 /// or a raw borrow's place is not an operand.
-pub(crate) fn value_operands(value: &Rvalue, f: &mut impl FnMut(&Operand)) {
+pub(crate) fn value_operands(value: &ValueExpr, f: &mut impl FnMut(&Operand)) {
     match value {
-        Rvalue::Use(op) | Rvalue::UnaryNeg(op) => f(op),
-        Rvalue::BinaryOp(_, a, b)
-        | Rvalue::Index { base: a, index: b }
-        | Rvalue::Repeat { elem: a, count: b } => {
+        ValueExpr::Use(op) | ValueExpr::UnaryNeg(op) => f(op),
+        ValueExpr::BinaryOp(_, a, b)
+        | ValueExpr::Index { base: a, index: b }
+        | ValueExpr::Repeat { elem: a, count: b } => {
             f(a);
             f(b);
         }
-        Rvalue::Aggregate { ops, .. }
-        | Rvalue::Instantiate {
+        ValueExpr::Aggregate { ops, .. }
+        | ValueExpr::Instantiate {
             const_args: ops, ..
         } => ops.iter().for_each(f),
-        Rvalue::Field { base, .. } => f(base),
-        Rvalue::AddrOfStatic { projection, .. } => {
+        ValueExpr::Field { base, .. } => f(base),
+        ValueExpr::AddrOfStatic { projection, .. } => {
             for elem in projection {
                 if let ProjElem::Index(op) = elem {
                     f(op);
                 }
             }
         }
-        Rvalue::Borrow { .. } | Rvalue::AddrOf { .. } => {}
+        ValueExpr::Borrow { .. } | ValueExpr::AddrOf { .. } => {}
     }
 }
 
 /// The places a value reads or borrows.
-pub(crate) fn value_places(value: &Rvalue, f: &mut impl FnMut(&Place)) {
+pub(crate) fn value_places(value: &ValueExpr, f: &mut impl FnMut(&Place)) {
     match value {
-        Rvalue::AddrOf { place, .. } | Rvalue::Borrow { place, .. } => place_places(place, f),
+        ValueExpr::AddrOf { place, .. } | ValueExpr::Borrow { place, .. } => place_places(place, f),
         value => value_operands(value, &mut |op| operand_places(op, f)),
     }
 }
@@ -173,10 +173,10 @@ pub(crate) fn value_places(value: &Rvalue, f: &mut impl FnMut(&Place)) {
 pub(crate) fn for_each_read(body: &MirBody, f: &mut impl FnMut(&Place)) {
     for (_, data) in body.blocks.iter() {
         for stmt in &data.statements {
-            let StatementKind::Assign { dest, rvalue } = &stmt.kind else {
+            let StatementKind::Assign { dest, value } = &stmt.kind else {
                 continue;
             };
-            value_places(rvalue, f);
+            value_places(value, f);
             for elem in &dest.projection {
                 if let ProjElem::Index(op) = elem {
                     operand_places(op, f);
@@ -239,8 +239,8 @@ pub(crate) fn uses_at(body: &MirBody, point: Point) -> Vec<LocalId> {
     let mut push = |place: &Place| uses.push(place.local);
     match data.statements.get(point.index) {
         Some(stmt) => match &stmt.kind {
-            StatementKind::Assign { dest, rvalue } => {
-                value_places(rvalue, &mut push);
+            StatementKind::Assign { dest, value } => {
+                value_places(value, &mut push);
                 if !dest.projection.is_empty() {
                     place_places(dest, &mut push);
                 }

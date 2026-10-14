@@ -976,7 +976,7 @@ pub struct MemberData {
     /// outright, type arguments are recovered by unification at the
     /// monomorphizing backend) — while a CONST parameter *is* instance
     /// identity, and the one place a member's arguments are carried
-    /// (`Rvalue::Instantiate`, whose const-arg list is read off the
+    /// (`ValueExpr::Instantiate`, whose const-arg list is read off the
     /// receiver's own type at the owner's binder indices) has no slot for
     /// one that the receiver cannot supply. The const half is rejected in
     /// `syntax::validation::reject_nested_generic_binder` and dropped here.

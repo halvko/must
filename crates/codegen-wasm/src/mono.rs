@@ -10,7 +10,7 @@
 //! deliberately threw information away:
 //!
 //! 1. **Type arguments are re-derived.** MIR is decl-keyed and erased, and
-//!    carries no type arguments at all — `Rvalue::Instantiate` is
+//!    carries no type arguments at all — `ValueExpr::Instantiate` is
 //!    const-args-only, because the interpreter never needs more. A backend
 //!    that must know how wide a `T` is recovers the missing arguments by
 //!    UNIFYING the callee's declared parameter types against the concrete
@@ -36,7 +36,7 @@ use base_db::Db;
 use eval::{ConstMode, FnValue, Machine, Value};
 use hir::item_tree::GenericParamKind;
 use hir::{Builtin, ConstArgValue, ExprId, GenericArg, ItemLoc, Ty};
-use mir::{BlockId, BodyId, Const, LocalId, MirBody, Operand, ProjElem, Rvalue, TerminatorKind};
+use mir::{BlockId, BodyId, Const, LocalId, MirBody, Operand, ProjElem, TerminatorKind, ValueExpr};
 use rustc_hash::FxHashMap;
 
 use crate::layout::{self, Unsupported};
@@ -377,13 +377,13 @@ impl<'db> Mono<'db> {
             let mut changed = false;
             for (_, block) in body.blocks.iter() {
                 for statement in &block.statements {
-                    let mir::StatementKind::Assign { dest, rvalue } = &statement.kind else {
+                    let mir::StatementKind::Assign { dest, value } = &statement.kind else {
                         continue;
                     };
                     if !dest.projection.is_empty() {
                         continue;
                     }
-                    let value = self.static_of_rvalue(key, &statics, rvalue);
+                    let value = self.static_of_value_expr(key, &statics, value);
                     let slot = raw(dest.local);
                     let merged = if seen[slot] {
                         statics[slot].clone().join(value)
@@ -455,17 +455,17 @@ impl<'db> Mono<'db> {
         }
     }
 
-    fn static_of_rvalue(
+    fn static_of_value_expr(
         &mut self,
         key: &InstanceKey,
         statics: &[StaticVal],
-        rvalue: &Rvalue,
+        value: &ValueExpr,
     ) -> StaticVal {
-        match rvalue {
-            Rvalue::Use(op) => self.static_of_operand(key, statics, op),
+        match value {
+            ValueExpr::Use(op) => self.static_of_operand(key, statics, op),
             // `rep::<3>` — the item's fn value with evaluated const
             // arguments attached, exactly as the interpreter builds it.
-            Rvalue::Instantiate { item, const_args } => {
+            ValueExpr::Instantiate { item, const_args } => {
                 let mut values = Vec::with_capacity(const_args.len());
                 for op in const_args {
                     match self.const_operand(key, op) {

@@ -3010,9 +3010,9 @@ fn mir_is_region_erased() {
 }
 
 #[test]
-fn a_safe_borrow_is_its_own_rvalue() {
+fn a_safe_borrow_is_its_own_value_expr() {
     // `.&`/`.&mut` and `.&raw`/`.&raw mut` compute the same address and
-    // lower through the same place walk, but they are DIFFERENT rvalues —
+    // lower through the same place walk, but they are DIFFERENT value expressions —
     // so every exhaustive consumer has to decide what a borrow means for
     // it instead of inheriting the raw answer. The wasm backend's refusal
     // hangs off exactly this.
@@ -3052,8 +3052,8 @@ fn a_safe_borrow_is_its_own_rvalue() {
 
 #[test]
 fn a_reborrow_through_a_borrow_stays_a_borrow() {
-    // `m.*.&mut` mints a NEW node (it is `Rvalue::Borrow`), while
-    // `m.*.&raw mut` inherits `m`'s (it is `Rvalue::AddrOf`). That split
+    // `m.*.&mut` mints a NEW node (it is `ValueExpr::Borrow`), while
+    // `m.*.&raw mut` inherits `m`'s (it is `ValueExpr::AddrOf`). That split
     // is the ruling that `.&raw` is deliberately not a decayed safe
     // borrow, visible in the IR.
     check_mir(
@@ -3102,7 +3102,7 @@ fn a_borrowed_match_reads_the_tag_through_the_deref_and_borrows_its_payloads() {
     //     read of a detached copy, so the interpreter's aliasing tree sees
     //     it and an invalidated scrutinee is caught before any arm runs;
     //   * `_4 = _2.*.0.&mut` — the payload binding is a BORROW of the
-    //     payload's sub-place, `Rvalue::Borrow` over `[Deref, Field(0)]`.
+    //     payload's sub-place, `ValueExpr::Borrow` over `[Deref, Field(0)]`.
     //     Compare the owned lowering (`match_on_enum_lowers_to_switch_variant`),
     //     which is `_4 = _2.0`: a value read out of a copy.
     check_mir(

@@ -16,8 +16,8 @@ use syntax::TextRange;
 
 use crate::cfg::{self, BitSet, Findings, Point};
 use crate::{
-    BlockId, CheckTrap, LocalId, MirBody, Operand, Place, ProjElem, Rvalue, StatementKind,
-    TerminatorKind,
+    BlockId, CheckTrap, LocalId, MirBody, Operand, Place, ProjElem, StatementKind, TerminatorKind,
+    ValueExpr,
 };
 
 /// One finding, keyed by HIR ids; ranges attach in the aggregator.
@@ -507,14 +507,11 @@ impl<'a> BodyCheck<'a> {
         let data = &self.body.blocks[point.block];
         match data.statements.get(point.index) {
             Some(stmt) => match &stmt.kind {
-                StatementKind::Assign {
-                    dest,
-                    rvalue: value,
-                } => {
+                StatementKind::Assign { dest, value } => {
                     // Asked before the reads below take a temporary.
                     let halted = self.is_halted(value, state);
                     match value {
-                        Rvalue::Borrow { place, .. } | Rvalue::AddrOf { place, .. } => {
+                        ValueExpr::Borrow { place, .. } | ValueExpr::AddrOf { place, .. } => {
                             self.place_use(point, origin, place, false, state, &mut out);
                         }
                         value => cfg::value_operands(value, &mut |op| {
@@ -591,7 +588,7 @@ impl<'a> BodyCheck<'a> {
     }
 
     /// Whether `value` is computed from a halted local.
-    fn is_halted(&self, value: &Rvalue, state: &State) -> bool {
+    fn is_halted(&self, value: &ValueExpr, state: &State) -> bool {
         let mut halted = false;
         if self.traps {
             cfg::value_operands(value, &mut |op| halted |= self.reads_halted(op, state));

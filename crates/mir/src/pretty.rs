@@ -5,7 +5,7 @@ use std::fmt::Write as _;
 
 use crate::{
     AggregateKind, BlockId, BodyId, Const, LocalId, MirBody, MirLowered, Operand, Place, ProjElem,
-    Rvalue, StatementKind, TerminatorKind,
+    StatementKind, TerminatorKind, ValueExpr,
 };
 
 pub fn render(lowered: &MirLowered) -> String {
@@ -47,8 +47,8 @@ fn render_body(id: BodyId, body: &MirBody, out: &mut String) {
         let _ = writeln!(out, "  {}:", block(id));
         for stmt in &data.statements {
             match &stmt.kind {
-                StatementKind::Assign { dest, rvalue } => {
-                    let _ = writeln!(out, "    {} = {}", place(dest), render_rvalue(rvalue));
+                StatementKind::Assign { dest, value } => {
+                    let _ = writeln!(out, "    {} = {}", place(dest), render_value_expr(value));
                 }
                 StatementKind::StorageDead { local: id, .. } => {
                     let _ = writeln!(out, "    storage_dead {}", local(*id));
@@ -60,14 +60,14 @@ fn render_body(id: BodyId, body: &MirBody, out: &mut String) {
     let _ = writeln!(out, "}}");
 }
 
-fn render_rvalue(rvalue: &Rvalue) -> String {
-    match rvalue {
-        Rvalue::Use(op) => operand(op),
-        Rvalue::BinaryOp(bin_op, l, r) => {
+fn render_value_expr(value: &ValueExpr) -> String {
+    match value {
+        ValueExpr::Use(op) => operand(op),
+        ValueExpr::BinaryOp(bin_op, l, r) => {
             format!("{bin_op:?}({}, {})", operand(l), operand(r))
         }
-        Rvalue::UnaryNeg(op) => format!("Neg({})", operand(op)),
-        Rvalue::Aggregate {
+        ValueExpr::UnaryNeg(op) => format!("Neg({})", operand(op)),
+        ValueExpr::Aggregate {
             kind: AggregateKind::Record(fields),
             ops,
         } => {
@@ -80,7 +80,7 @@ fn render_rvalue(rvalue: &Rvalue) -> String {
             format!("{{ {parts} }}")
         }
         // Spelled like the constructor call that built it.
-        Rvalue::Aggregate {
+        ValueExpr::Aggregate {
             kind: AggregateKind::Variant { decl, variant, .. },
             ops,
         } => {
@@ -92,34 +92,34 @@ fn render_rvalue(rvalue: &Rvalue) -> String {
                 format!("{name}({parts})")
             }
         }
-        Rvalue::Aggregate {
+        ValueExpr::Aggregate {
             kind: AggregateKind::Array,
             ops,
         } => {
             let parts = ops.iter().map(operand).collect::<Vec<_>>().join(", ");
             format!("[{parts}]")
         }
-        Rvalue::Field { base, index } => format!("{}.{index}", operand(base)),
-        Rvalue::Index { base, index } => format!("{}[{}]", operand(base), operand(index)),
-        Rvalue::Repeat { elem, count } => format!("[{}; {}]", operand(elem), operand(count)),
-        Rvalue::AddrOf { mutable, place: p } => {
+        ValueExpr::Field { base, index } => format!("{}.{index}", operand(base)),
+        ValueExpr::Index { base, index } => format!("{}[{}]", operand(base), operand(index)),
+        ValueExpr::Repeat { elem, count } => format!("[{}; {}]", operand(elem), operand(count)),
+        ValueExpr::AddrOf { mutable, place: p } => {
             let flavor = if *mutable { "&raw mut" } else { "&raw" };
             format!("{}.{flavor}", place(p))
         }
         // Rendered without a region: MIR is region-erased, and a snapshot
         // that showed one would be advertising information this layer does
         // not have.
-        Rvalue::Borrow { mutable, place: p } => {
+        ValueExpr::Borrow { mutable, place: p } => {
             let flavor = if *mutable { "&mut" } else { "&" };
             format!("{}.{flavor}", place(p))
         }
-        Rvalue::AddrOfStatic { item, projection } => {
+        ValueExpr::AddrOfStatic { item, projection } => {
             let mut path = format!("static {}", item.display_name());
             path.push_str(&projection_suffix(projection));
             path.push_str(".&raw");
             path
         }
-        Rvalue::Instantiate { item, const_args } => {
+        ValueExpr::Instantiate { item, const_args } => {
             let args = const_args
                 .iter()
                 .map(operand)
@@ -216,7 +216,7 @@ fn local(id: LocalId) -> String {
 }
 
 /// `_1` for a whole local, `_1.0.2` through a field-index projection (the
-/// same dotted spelling `Rvalue::Field` reads render with), `_1[_2]`
+/// same dotted spelling `ValueExpr::Field` reads render with), `_1[_2]`
 /// through an element projection, `_1.*` through a pointer deref.
 fn place(p: &Place) -> String {
     let mut out = local(p.local);
