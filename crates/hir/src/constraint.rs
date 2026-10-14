@@ -220,6 +220,14 @@ pub(crate) struct Constraints {
     next_region: u32,
     /// Canonical root var → the causes that decided its concrete type.
     causes: FxHashMap<TyVar, Vec<Cause>>,
+    /// Set for every body checked inside an inference group (T11): an
+    /// unbound variable meeting an erroneous type stays unbound, and
+    /// [`Self::poison`] poisons nothing, so one body's own error never
+    /// becomes `{error}` in another item's signature.
+    leave_errors_unbound: bool,
+    /// The variables [`Self::leave_errors_unbound`] left unbound because
+    /// they met an error.
+    left_unbound: Vec<TyVar>,
 }
 
 /// One outlives obligation collected from a body: `sup` must outlive `sub`,
@@ -277,6 +285,49 @@ pub enum RegionConstraintReason {
 }
 
 impl Constraints {
+    /// Constraints for one body; `in_group` when it is checked inside an
+    /// inference group.
+    pub(crate) fn new(in_group: bool) -> Self {
+        Constraints {
+            leave_errors_unbound: in_group,
+            ..Constraints::default()
+        }
+    }
+
+    /// Commit `var` to `{error}` after its mistake was reported. The one
+    /// way any check poisons a variable, so no body checked inside an
+    /// inference group ([`Self::new`]) can poison one of the group's.
+    pub(crate) fn poison(&mut self, table: &mut InPlaceUnificationTable<TyVar>, var: TyVar) {
+        if self.leave_errors_unbound {
+            self.left_unbound.push(var);
+        } else {
+            table.union_value(var, TyVarValue::Known(Ty::Error));
+        }
+    }
+
+    /// The variables this body left unbound instead of poisoning.
+    pub(crate) fn left_unbound(&self) -> &[TyVar] {
+        &self.left_unbound
+    }
+
+    /// Bind every still-unbound NUMBER-CLASS variable anywhere inside `ty`
+    /// to `{error}`: used after a mismatch was already reported against
+    /// it, so the literal(s) that minted them don't pile no-defining-use
+    /// diagnostics on top (errors are infectious and silent).
+    pub(crate) fn poison_unresolved_number(
+        &mut self,
+        table: &mut InPlaceUnificationTable<TyVar>,
+        ty: &Ty,
+    ) {
+        unresolved_numbers(table, ty, &mut |table, var| {
+            if self.leave_errors_unbound {
+                self.left_unbound.push(var);
+            } else {
+                table.union_value(var, TyVarValue::Known(Ty::Error));
+            }
+        });
+    }
+
     pub(crate) fn push_join(&mut self, join: Join) {
         self.joins.push(join);
     }
@@ -780,6 +831,10 @@ impl Constraints {
                 true
             }
             (Ty::Infer(var), ty) | (ty, Ty::Infer(var)) => {
+                if self.leave_errors_unbound && ty.contains_error() {
+                    self.left_unbound.push(var);
+                    return true;
+                }
                 // A NUMBER-CLASS variable resolves only to an integer
                 // scalar type (a defining use); anything else is an
                 // ordinary mismatch. `Ty::Error` stays infectious and
@@ -1150,7 +1205,7 @@ impl Constraints {
                         // is poisoned to `{error}`: a number var reads
                         // `{number}`, any other still-free variable reads `_`.
                         let actual = resolve_finished(table, &witness.ty);
-                        table.union_value(var, TyVarValue::Known(Ty::Error));
+                        self.poison(table, var);
                         culprits.push((witness, actual));
                     }
                 }
@@ -1237,7 +1292,7 @@ impl Constraints {
                 // construct, not a squiggle per leaf.
                 let actual = resolve_finished(table, &culprits[0].1);
                 for (witness, _) in &culprits {
-                    poison_unresolved_number(table, &witness.ty);
+                    self.poison_unresolved_number(table, &witness.ty);
                 }
                 diagnostics.push(InferenceDiagnostic::AllBranchesMismatch {
                     expr: join.expr,
@@ -1251,7 +1306,7 @@ impl Constraints {
                     // Render nested unpinned numbers as `{number}` first,
                     // then poison them: this mismatch is their whole story.
                     let actual = resolve_finished(table, &actual);
-                    poison_unresolved_number(table, &witness.ty);
+                    self.poison_unresolved_number(table, &witness.ty);
                     diagnostics.push(InferenceDiagnostic::TypeMismatch {
                         expr: witness.blame,
                         expected: expected.clone(),
@@ -1359,35 +1414,38 @@ pub(crate) fn is_unresolved_number(table: &mut InPlaceUnificationTable<TyVar>, t
     )
 }
 
-/// Bind every still-unbound NUMBER-CLASS variable anywhere inside `ty` to
-/// `{error}` — used after a mismatch was already reported against it, so
-/// the literal(s) that minted them don't pile no-defining-use diagnostics
-/// on top (errors are infectious and silent).
-pub(crate) fn poison_unresolved_number(table: &mut InPlaceUnificationTable<TyVar>, ty: &Ty) {
+/// Call `visit` on every still-unbound NUMBER-CLASS variable anywhere
+/// inside `ty`: the variables [`Constraints::poison_unresolved_number`]
+/// poisons, or leaves unbound inside a group.
+fn unresolved_numbers(
+    table: &mut InPlaceUnificationTable<TyVar>,
+    ty: &Ty,
+    visit: &mut impl FnMut(&mut InPlaceUnificationTable<TyVar>, TyVar),
+) {
     match resolve_shallow(table, ty) {
         Ty::Infer(var) => {
             if matches!(table.probe_value(var), TyVarValue::UnknownNumber) {
-                table.union_value(var, TyVarValue::Known(Ty::Error));
+                visit(table, var);
             }
         }
         Ty::Fn(f) => {
             for param in &f.params {
-                poison_unresolved_number(table, param);
+                unresolved_numbers(table, param, visit);
             }
-            poison_unresolved_number(table, &f.ret);
+            unresolved_numbers(table, &f.ret, visit);
         }
-        Ty::RawPtr { pointee, .. } => poison_unresolved_number(table, &pointee),
-        Ty::Borrow { referent, .. } => poison_unresolved_number(table, &referent),
-        Ty::Array { elem, .. } => poison_unresolved_number(table, &elem),
+        Ty::RawPtr { pointee, .. } => unresolved_numbers(table, &pointee, visit),
+        Ty::Borrow { referent, .. } => unresolved_numbers(table, &referent, visit),
+        Ty::Array { elem, .. } => unresolved_numbers(table, &elem, visit),
         Ty::Record(rec) => {
             for (_, field) in &rec.fields {
-                poison_unresolved_number(table, field);
+                unresolved_numbers(table, field, visit);
             }
         }
         Ty::Named(NamedTy { args, .. }) => {
             for arg in &args {
                 if let GenericArg::Ty(ty) = arg {
-                    poison_unresolved_number(table, ty);
+                    unresolved_numbers(table, ty, visit);
                 }
             }
         }

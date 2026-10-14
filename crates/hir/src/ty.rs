@@ -799,24 +799,41 @@ impl Ty {
     /// Collect the inference variables [`Self::contains_infer`] finds; after
     /// `resolve_fully` each is an unbound root.
     pub(crate) fn open_vars(&self, out: &mut rustc_hash::FxHashSet<TyVar>) {
+        self.collect_vars(true, out);
+    }
+
+    /// The [`Self::open_vars`] in what a value of this type produces: every
+    /// one except those in a function's parameters, at any depth.
+    pub(crate) fn produced_vars(&self, out: &mut rustc_hash::FxHashSet<TyVar>) {
+        self.collect_vars(false, out);
+    }
+
+    /// The one walk behind [`Self::open_vars`] and [`Self::produced_vars`];
+    /// `params` says whether a function's parameters are visited.
+    fn collect_vars(&self, params: bool, out: &mut rustc_hash::FxHashSet<TyVar>) {
         match self {
             Ty::Infer(var) => {
                 out.insert(*var);
             }
             Ty::Fn(f) => {
-                f.params.iter().for_each(|p| p.open_vars(out));
-                f.ret.open_vars(out);
+                if params {
+                    f.params.iter().for_each(|p| p.collect_vars(params, out));
+                }
+                f.ret.collect_vars(params, out);
             }
             Ty::RawPtr { pointee: inner, .. }
             | Ty::Borrow {
                 referent: inner, ..
             }
-            | Ty::Array { elem: inner, .. } => inner.open_vars(out),
-            Ty::Record(rec) => rec.fields.iter().for_each(|(_, ty)| ty.open_vars(out)),
+            | Ty::Array { elem: inner, .. } => inner.collect_vars(params, out),
+            Ty::Record(rec) => rec
+                .fields
+                .iter()
+                .for_each(|(_, ty)| ty.collect_vars(params, out)),
             Ty::Named(NamedTy { args, .. }) => {
                 for arg in args {
                     if let GenericArg::Ty(ty) = arg {
-                        ty.open_vars(out);
+                        ty.collect_vars(params, out);
                     }
                 }
             }
@@ -1998,10 +2015,12 @@ pub fn variant_payloads_for(db: &dyn Db, variant: &ResolvedVariant) -> Option<Ve
 }
 
 /// The type other items see for `item`. A fully-typed contract is the
-/// whole answer (a hard firewall edge: body edits never reach dependents) —
-/// written as an annotation, or synthesized from a self-sufficient
-/// fn-literal body (see [`crate::item_tree`]). Anything less — no contract,
-/// or one with holes — comes from the item's binding group: its own body,
+/// whole answer (a hard firewall edge: edits to the body never change this
+/// signature) — written as an annotation, or synthesized from a
+/// self-sufficient fn-literal body (see [`crate::item_tree`]). Such a body
+/// fills the holes of the unannotated items it calls (T11), so an edit to
+/// it can change *their* signatures. Anything less — no contract, or one
+/// with holes — comes from the item's inference group: its own body,
 /// inferred together with everything grouped with it (mutual recursion and
 /// callers alike — see [`crate::groups`]), where holes join in as
 /// unconstrained variables the bodies fill in. The firewall is then salsa
