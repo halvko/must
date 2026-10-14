@@ -473,7 +473,7 @@ jobs:
               | select((.path | type) == "string" and (.line | type) == "number"
                 and (.body | type) == "string")
               | {path, line, side: "RIGHT",
-                 body: ("**\($r):** " + (.body | gsub("<!--"; "&lt;!--")))}]' "$f" \
+                 body: ("**\($r):** " + (.body | sub("^(\\*\\*\($r):\\*\\* *)+"; "") | gsub("<!--"; "&lt;!--")))}]' "$f" \
               || echo '[]'
           done | jq -sc 'add // []')
           replies=$(for role in $(jq -r '.[]' <<< "$ROLES"); do
@@ -481,7 +481,7 @@ jobs:
             [ -s "$f" ] || continue
             jq -c --arg r "$role" '[.[]? | objects
               | select((.reply_to | type) == "number" and (.body | type) == "string")
-              | {reply_to, body: ("**\($r):** " + (.body | gsub("<!--"; "&lt;!--")))}]' "$f" \
+              | {reply_to, body: ("**\($r):** " + (.body | sub("^(\\*\\*\($r):\\*\\* *)+"; "") | gsub("<!--"; "&lt;!--")))}]' "$f" \
               || echo '[]'
           done | jq -sc 'add // []')
           # Replies come after the review, so it lands as one event.
