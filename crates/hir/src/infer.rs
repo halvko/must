@@ -20,8 +20,7 @@ use crate::body::{
 };
 use crate::constraint::{
     self, Cause, Constraints, Join, RegionConstraint, RegionConstraintReason, Witness,
-    is_unresolved_number, poison_unresolved_number, resolve_args_fully, resolve_finished,
-    resolve_fully,
+    is_unresolved_number, resolve_args_fully, resolve_finished, resolve_fully,
 };
 use crate::item_tree::RegionRef;
 use crate::item_tree::{
@@ -2444,10 +2443,25 @@ fn shared_step(body: &Body, place: ExprId, ty_of: &mut dyn FnMut(ExprId) -> Ty) 
 
 #[salsa::tracked(returns(ref))]
 pub fn infer<'db>(db: &'db dyn Db, item: ItemId<'db>) -> InferenceResult {
-    let body = body(db, item);
-    let file = item.file(db);
     let mut table = InPlaceUnificationTable::new();
     let no_group = FxHashMap::default();
+    check_item_body(db, item, &mut table, &no_group, false).finish()
+}
+
+/// Checks `item`'s own body against its annotation and returns the
+/// context, unfinished. Shared by [`infer`] and by a fully typed body
+/// feeding an inference group ([`crate::groups::infer_group`]), so both read
+/// the body the same way. `grouped` is true when the body is checked inside
+/// an inference group (see [`Constraints::new`]).
+pub(crate) fn check_item_body<'a, 'db>(
+    db: &'db dyn Db,
+    item: ItemId<'db>,
+    table: &'a mut InPlaceUnificationTable<TyVar>,
+    in_group: &'a FxHashMap<ItemLoc, Ty>,
+    grouped: bool,
+) -> InferCtx<'a, 'db> {
+    let body = body(db, item);
+    let file = item.file(db);
     let mut ctx;
 
     // The item's own generic binder (TR06): its type params resolve to rigid
@@ -2479,21 +2493,36 @@ pub fn infer<'db>(db: &'db dyn Db, item: ItemId<'db>) -> InferenceResult {
             db,
             file,
             ty_ref.unwrap_or(&TypeRef::Hole),
-            &mut table,
+            table,
             &type_params,
         );
         let cause = ty_ref.is_some().then_some(Cause::ItemAnnotation);
-        ctx = InferCtx::new(db, file, body, resolutions(db, item), &mut table, &no_group);
+        ctx = InferCtx::new(
+            db,
+            file,
+            body,
+            resolutions(db, item),
+            table,
+            in_group,
+            grouped,
+        );
         ctx.type_params = type_params;
         ctx.own_generics = generics;
         ctx.own_item = Some(item_loc(db, item));
         ctx.own_signature = Some(expected.clone());
         ctx.infer_expr_with(root, &expected, cause);
     } else {
-        ctx = InferCtx::new(db, file, body, resolutions(db, item), &mut table, &no_group);
+        ctx = InferCtx::new(
+            db,
+            file,
+            body,
+            resolutions(db, item),
+            table,
+            in_group,
+            grouped,
+        );
     }
-
-    ctx.finish()
+    ctx
 }
 
 /// One entry of [`InferCtx::return_targets`] — a body a `return` could be
@@ -2567,7 +2596,8 @@ pub(crate) struct InferCtx<'a, 'db> {
     /// [`Ty::Param`]s, const params → rigid [`ConstArgValue::Param`]s),
     /// applied by [`Self::lower_type_ref`] to every type annotation
     /// lowered inside this body (TR06). Empty for non-generic items and in
-    /// group mode (generic items never join groups).
+    /// group mode (generic items never join groups), except for a fully
+    /// typed member feeding a group, whose scope holds its concrete `Self`.
     type_params: ParamScope,
     /// The item's own binder entries, for const-param value types
     /// ([`Resolution::ConstParam`] carries only the index).
@@ -2763,6 +2793,7 @@ impl<'a, 'db> InferCtx<'a, 'db> {
         resolutions: &'db ArenaMap<ExprId, Resolution>,
         table: &'a mut InPlaceUnificationTable<TyVar>,
         in_group: &'a FxHashMap<ItemLoc, Ty>,
+        grouped: bool,
     ) -> InferCtx<'a, 'db> {
         InferCtx {
             db,
@@ -2772,7 +2803,7 @@ impl<'a, 'db> InferCtx<'a, 'db> {
             table,
             result: InferenceResult::default(),
             in_group,
-            constraints: Constraints::default(),
+            constraints: Constraints::new(grouped),
             scope_depth: 0,
             join_sinks: Vec::new(),
             witness_sink: None,
@@ -3269,6 +3300,11 @@ impl<'a, 'db> InferCtx<'a, 'db> {
                 GenericArg::Const(_) => arg.clone(),
             })
             .collect()
+    }
+
+    /// See [`Constraints::left_unbound`].
+    pub(crate) fn left_unbound(&self) -> &[TyVar] {
+        self.constraints.left_unbound()
     }
 
     /// Solve the deferred constraints. Must run after traversal in *every*
@@ -3808,7 +3844,8 @@ impl<'a, 'db> InferCtx<'a, 'db> {
         for &arg in args {
             let fresh = self.fresh_var();
             self.infer_expr(arg, &fresh);
-            poison_unresolved_number(self.table, &fresh);
+            self.constraints
+                .poison_unresolved_number(self.table, &fresh);
         }
     }
 
@@ -5060,7 +5097,8 @@ impl<'a, 'db> InferCtx<'a, 'db> {
                     self.adopt(&ret, &body_ty);
                 }
                 if slot_mismatched {
-                    poison_unresolved_number(self.table, &own_sig);
+                    self.constraints
+                        .poison_unresolved_number(self.table, &own_sig);
                 }
                 return fn_ty;
             }
@@ -5183,7 +5221,7 @@ impl<'a, 'db> InferCtx<'a, 'db> {
                         // The reservation is the whole story: nothing here
                         // demanded a type of the operand, so a bare literal
                         // in it must not add a no-defining-use sibling.
-                        poison_unresolved_number(self.table, &ty);
+                        self.constraints.poison_unresolved_number(self.table, &ty);
                     }
                     self.result
                         .diagnostics
@@ -5223,7 +5261,7 @@ impl<'a, 'db> InferCtx<'a, 'db> {
                     if let Some(value) = value {
                         let fresh = self.fresh_var();
                         let ty = self.infer_expr(*value, &fresh);
-                        poison_unresolved_number(self.table, &ty);
+                        self.constraints.poison_unresolved_number(self.table, &ty);
                     }
                     self.result
                         .diagnostics
@@ -5461,7 +5499,7 @@ impl<'a, 'db> InferCtx<'a, 'db> {
                     // signature is already committed to: poison it
                     // so the member reports via the needs-annotation
                     // path instead of publishing a guess.
-                    self.table.union_value(var, TyVarValue::Known(Ty::Error));
+                    self.constraints.poison(self.table, var);
                     self.infer_args_broken(args);
                     Ty::Error
                 }
@@ -8748,7 +8786,8 @@ impl<'a, 'db> InferCtx<'a, 'db> {
             if let GenericArgData::Const(value) = arg {
                 let fresh = self.fresh_var();
                 self.infer_expr(*value, &fresh);
-                poison_unresolved_number(self.table, &fresh);
+                self.constraints
+                    .poison_unresolved_number(self.table, &fresh);
             }
         }
     }
@@ -10288,8 +10327,10 @@ impl<'a, 'db> InferCtx<'a, 'db> {
                 actual: actual_shown,
                 reasons,
             });
-        poison_unresolved_number(self.table, &actual);
-        poison_unresolved_number(self.table, expected);
+        self.constraints
+            .poison_unresolved_number(self.table, &actual);
+        self.constraints
+            .poison_unresolved_number(self.table, expected);
         expected.clone()
     }
 

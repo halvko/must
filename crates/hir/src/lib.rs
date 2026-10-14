@@ -160,6 +160,15 @@ pub fn item_loc(db: &dyn Db, item: ItemId<'_>) -> ItemLoc {
     }
 }
 
+/// Whether `item` has a generic binder (an inherent member counts its
+/// owner's). Its body sees rigid params, so its calls never fill an
+/// inference group's holes (T11).
+pub fn is_generic_body(db: &dyn Db, item: ItemId<'_>) -> bool {
+    item_data(db, item)
+        .as_ref()
+        .is_some_and(|data| !data.generics.is_empty())
+}
+
 /// The owning type item of a member id (`None` for top-level items).
 pub fn member_owner<'db>(db: &'db dyn Db, item: ItemId<'db>) -> Option<ItemId<'db>> {
     item.member(db)?;

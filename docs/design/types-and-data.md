@@ -43,7 +43,28 @@
 - **T11** Inference groups use bidirected edges, not pure SCCs, because higher-order functions
   need their call sites in the same group to constrain type variables. Generic and fully-typed
   items are firewall items, checked once against their own contract and never against
-  instantiations, so they never join a group. There is no cross-file inference.
+  instantiations, so they never join a group. A fully-typed non-generic item (or member of a
+  non-generic type, or of a non-generic trait's impl) is still a constraint source: its body
+  feeds the group of the unannotated items it references, after the members' own bodies, so it
+  fills holes those bodies left open and never overrides them; its own signature stays as
+  written. Everything one such body references joins one group, so the result never depends on
+  which group ran first. No body's own error fills a hole, a member's or a source's: inside a
+  group, a variable that meets an erroneous type stays unbound, so a caller's typo never turns
+  its callee's signature into `{error}`. After every member's body has run, each variable in
+  what a member produces (its value, or what its functions return) that its body met an error
+  on and that is open becomes `{error}`, so no fully typed body decides what the body got
+  wrong. A member's use can, as it decides any variable members share: the first body to run
+  wins (TODO: halvko/must#146). A member whose value is itself `{error}`
+  (`static a = missing;`) is poisoned as soon as its body has run, so the poison also reaches
+  whatever an earlier body joined it to. Every signature sharing the variable gets `{error}`
+  too: one returning `f()` for a broken `f`, or a callee `h` returning its argument when a
+  broken caller returns `h(x)`. A variable that is only in a function's parameters, at any
+  depth, is not poisoned, and the rest of the signature (its arity, for one) stays as written.
+  The sources run in source order, so when two disagree on a hole, the first one's fill stands
+  and the second reports the mismatch (TODO: halvko/must#146: blame both). The firewall covers
+  the item's signature, not its body: editing a fully typed body re-infers the groups it feeds,
+  and can change its callees' signatures. A generic body stays a hard firewall: its rigid
+  params must not fill a monotype. There is no cross-file inference.
 - **T12** An unconstrained join resolves by a family-aware plurality vote over concrete branch
   types: unresolved branches abstain, all-free ties tie together, a family tie recovers with
   the first witness.

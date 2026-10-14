@@ -6037,36 +6037,37 @@ fn generic_variant_args_infer_from_the_payload() {
     );
 }
 
-/// A hole inside a type argument of a group signature reaches other items
-/// as `{error}`, and a call from another item asks for an annotation.
+/// A hole inside a type argument of a group signature that no body pins
+/// reaches other items as `{error}`, and a call from another item asks for
+/// an annotation (`g(1)` never says which integer).
 #[test]
 fn signature_hole_in_a_type_arg_needs_annotation_across_items() {
     check_diagnostics(
         r#"
 type Option = enum::<T> { Some(T), None };
 static g = fn (x) -> Option::<_> { ::Some(x) };
-static main = fn () -> Option::<usize> { g(1) };
+static main = fn () -> () { g(1); };
 "#,
         expect![[r#"
-            133..134: cannot infer the type of `g` across items; add a type annotation to its definition (defined here at 51..52)
+            120..121: cannot infer the type of `g` across items; add a type annotation to its definition (defined here at 51..52)
         "#]],
     );
 }
 
-/// A hole under a raw pointer in a group signature reaches other items as
-/// `{error}`, and a call from another item asks for an annotation.
+/// A hole under a raw pointer in a group signature that no body pins
+/// reaches other items as `{error}`, and a use from another item asks for
+/// an annotation.
 #[test]
 fn signature_hole_under_a_raw_pointer_needs_annotation_across_items() {
     check_diagnostics(
         r#"
 static g = fn (p: _.&raw) -> () { };
 static main = fn () -> () {
-    let n: usize = 1;
-    g(n.&raw)
+    let h = g;
 };
 "#,
         expect![[r#"
-            92..93: cannot infer the type of `g` across items; add a type annotation to its definition (defined here at 8..9)
+            78..79: cannot infer the type of `g` across items; add a type annotation to its definition (defined here at 8..9)
         "#]],
     );
 }
@@ -6100,10 +6101,10 @@ fn signature_hole_shared_with_a_qualified_mention_is_not_blamed_on_it() {
 type Option = enum::<T> { Some(T), None };
 static some = fn (x) -> Option::<_> { Option::Some(x) };
 static none = fn () -> Option::<_> { Option::None };
-static main = fn () -> Option::<usize> { some(1) };
+static main = fn () -> () { some(1); };
 "#,
         expect![[r#"
-            195..199: cannot infer the type of `some` across items; add a type annotation to its definition (defined here at 51..55)
+            182..186: cannot infer the type of `some` across items; add a type annotation to its definition (defined here at 51..55)
         "#]],
     );
 }
@@ -9863,36 +9864,1122 @@ type Box2 = struct::<T> { v: T } with {
     );
 }
 
+/// Each top-level value item's published signature, one per line.
+fn render_signatures(text: &str) -> String {
+    let db = RootDatabase::default();
+    let file = SourceFile::new(&db, "test.must".to_owned(), text.to_owned());
+    let tree = crate::item_tree::item_tree(&db, file);
+    crate::file_item_ids(&db, file)
+        .iter()
+        .zip(&tree.items)
+        .filter(|(_, data)| matches!(data.kind, crate::item_tree::ItemKind::Value(_)))
+        .map(|(&item, data)| {
+            format!(
+                "{}: {}\n",
+                data.name,
+                crate::ty::signature(&db, item).display()
+            )
+        })
+        .collect()
+}
+
+fn check_signatures(text: &str, expect: Expect) {
+    expect.assert_eq(&render_signatures(text));
+}
+
 /// Member bodies are NOT a second class of call site. A member is required
 /// to spell its full signature, which makes it a fully-typed item — and a
-/// fully-typed item is a firewall: its body's call sites contribute no
-/// reference edge, so a group-inferrable static called only from inside one
-/// stays unconstrained. The comparison arm proves that is the SAME rule an
-/// annotated static obeys, not a member-specific gap.
+/// fully-typed item's body feeds the groups of the items it calls (T11):
+/// a member's call fills an unannotated static's holes exactly as an
+/// annotated static's call does.
 #[test]
-fn a_member_body_firewalls_its_callees_like_an_annotated_static() {
-    let from_member = r#"
+fn a_member_body_fills_its_callees_holes_like_an_annotated_static() {
+    check_signatures(
+        r#"
 static id = fn (x) { x };
 type A = struct { n: usize } with {
     impl Self {
         use_it = fn(a: Self) -> usize { id(a.n) };
     }
 };
-"#;
-    let from_annotated_static = r#"
+"#,
+        expect![[r#"
+            id: fn(usize) -> usize
+        "#]],
+    );
+    check_signatures(
+        r#"
 static id = fn (x) { x };
 static use_it = fn (n: usize) -> usize { id(n) };
-"#;
-    check_diagnostics(
-        from_member,
+"#,
         expect![[r#"
-            119..121: cannot infer the type of `id` across items; add a type annotation to its definition (defined here at 8..10)
+            id: fn(usize) -> usize
+            use_it: fn(usize) -> usize
+        "#]],
+    );
+}
+
+/// A trait impl's member has the concrete `Self` its impl head names, so
+/// its body fills its callees' holes like any fully typed item.
+#[test]
+fn trait_impl_member_fills_its_callees_holes() {
+    check_signatures(
+        r#"
+static id = fn (x) { x };
+trait Size = requires { size: fn(Self) -> usize; } with {
+    impl usize {
+        size = fn(n: usize) -> usize { id(n) };
+    }
+};
+"#,
+        expect![[r#"
+            id: fn(usize) -> usize
+        "#]],
+    );
+    check_signatures(
+        r#"
+static id = fn (x) { x };
+type A = struct { n: usize };
+trait Size = requires { size: fn(Self) -> usize; } with {
+    impl A {
+        size = fn(a: Self) -> usize { id(a).n };
+    }
+};
+"#,
+        expect![[r#"
+            id: fn(A) -> A
+        "#]],
+    );
+}
+
+/// An impl whose head names no type fills its callees' holes: its `Self`
+/// is the silent `Ty::Error`, so only the head is reported, in either
+/// source order.
+#[test]
+fn unresolved_trait_impl_member_fills_its_callees_holes() {
+    let uses_n = r#"
+static id = fn (x) { x };
+trait Size = requires { size: fn(Self) -> usize; } with {
+    impl Nope {
+        size = fn(n: usize) -> usize { id(n) };
+    }
+};
+"#;
+    check_signatures(
+        uses_n,
+        expect![[r#"
+        id: fn(usize) -> usize
+    "#]],
+    );
+    check_diagnostics(
+        uses_n,
+        expect![[r#"
+        94..98: unknown type `Nope`
+    "#]],
+    );
+    let main_first = r#"
+static id = fn (x) { x };
+static main = fn () -> usize { id(1) };
+trait Size = requires { size: fn(Self) -> usize; } with {
+    impl Nope {
+        size = fn(s: Self) -> usize { id(s); 0 };
+    }
+};
+"#;
+    check_signatures(
+        main_first,
+        expect![[r#"
+        id: fn(usize) -> usize
+        main: fn() -> usize
+    "#]],
+    );
+    check_diagnostics(
+        main_first,
+        expect![[r#"
+        134..138: unknown type `Nope`
+    "#]],
+    );
+    let trait_first = r#"
+static id = fn (x) { x };
+trait Size = requires { size: fn(Self) -> usize; } with {
+    impl Nope {
+        size = fn(s: Self) -> usize { id(s); 0 };
+    }
+};
+static main = fn () -> usize { id(1) };
+"#;
+    check_signatures(
+        trait_first,
+        expect![[r#"
+        id: fn(usize) -> usize
+        main: fn() -> usize
+    "#]],
+    );
+    check_diagnostics(
+        trait_first,
+        expect![[r#"
+        94..98: unknown type `Nope`
+    "#]],
+    );
+}
+
+/// A fully typed caller with an unknown type in its signature fills
+/// nothing with it: the callee takes what the sound calls say, and the
+/// error is reported once.
+#[test]
+fn callers_broken_signature_does_not_poison_its_callee() {
+    let text = r#"
+static id = fn (x) { x };
+static broken = fn (x: Nope) -> usize { id(x); 0 };
+static main = fn () -> usize { id(1) };
+"#;
+    check_signatures(
+        text,
+        expect![[r#"
+        id: fn(usize) -> usize
+        broken: fn({error}) -> usize
+        main: fn() -> usize
+    "#]],
+    );
+    check_diagnostics(
+        text,
+        expect![[r#"
+        50..54: unknown type `Nope`
+    "#]],
+    );
+}
+
+/// An unresolved name in a fully typed caller's body fills nothing, but its
+/// sound calls fill their callees. A callee whose only use is the broken one stays
+/// undetermined.
+#[test]
+fn callers_broken_body_does_not_poison_its_callees() {
+    let text = r#"
+static id = fn (x) { x };
+static show = fn (y) { y };
+static main = fn (n: usize) -> usize { id(n); show(missing); 0 };
+"#;
+    check_signatures(
+        text,
+        expect![[r#"
+        id: fn(usize) -> usize
+        show: fn({error}) -> {error}
+        main: fn(usize) -> usize
+    "#]],
+    );
+    check_diagnostics(
+        text,
+        expect![[r#"
+            101..105: cannot infer the type of `show` across items; add a type annotation to its definition (defined here at 34..38)
+            106..113: unresolved name `missing`
+        "#]],
+    );
+}
+
+/// An impl member under an unknown head type fills nothing with its
+/// `Self`; its sound calls fill their callees.
+#[test]
+fn callers_broken_impl_head_does_not_poison_its_callees() {
+    let text = r#"
+static id = fn (x) { x };
+static show = fn (y) { y };
+trait Size = requires { size: fn(Self) -> usize; } with {
+    impl Nope {
+        size = fn(s: Self, n: usize) -> usize { id(n); show(s); 0 };
+    }
+};
+"#;
+    check_signatures(
+        text,
+        expect![[r#"
+        id: fn(usize) -> usize
+        show: fn({error}) -> {error}
+    "#]],
+    );
+    check_diagnostics(
+        text,
+        expect![[r#"
+            122..126: unknown type `Nope`
+            184..188: cannot infer the type of `show` across items; add a type annotation to its definition (defined here at 34..38)
+        "#]],
+    );
+}
+
+/// An unannotated caller's mistake fills nothing either: the callee takes
+/// the type the sound call gives it, whichever caller is annotated.
+#[test]
+fn unannotated_callers_broken_body_does_not_poison_its_callee() {
+    let text = r#"
+static show = fn (y) { y };
+static a = fn () -> () { show(missing); };
+static main = fn () -> usize { show(1) };
+"#;
+    check_signatures(
+        text,
+        expect![[r#"
+        show: fn(usize) -> usize
+        a: fn()
+        main: fn() -> usize
+    "#]],
+    );
+    check_diagnostics(
+        text,
+        expect![[r#"
+        59..66: unresolved name `missing`
+    "#]],
+    );
+}
+
+/// A member whose own value is erroneous gets an erroneous signature, so
+/// its uses neither decide its type nor disagree about it, in either order.
+#[test]
+fn erroneous_static_member_is_not_decided_by_its_uses() {
+    let b_first = r#"
+static a = missing;
+static b = fn () -> () { print(a) };
+static c = fn () -> usize { a };
+"#;
+    check_signatures(
+        b_first,
+        expect![[r#"
+            a: {error}
+            b: fn()
+            c: fn() -> usize
+        "#]],
+    );
+    // TODO: halvko/must#156: the uses repeat `a`'s error as "not enough
+    // information".
+    check_diagnostics(
+        b_first,
+        expect![[r#"
+            12..19: unresolved name `missing`
+            52..53: cannot infer the type of `a` across items; add a type annotation to its definition (defined here at 8..9)
+            86..87: cannot infer the type of `a` across items; add a type annotation to its definition (defined here at 8..9)
+        "#]],
+    );
+    let c_first = r#"
+static a = missing;
+static c = fn () -> usize { a };
+static b = fn () -> () { print(a) };
+"#;
+    check_signatures(
+        c_first,
+        expect![[r#"
+            a: {error}
+            c: fn() -> usize
+            b: fn()
         "#]],
     );
     check_diagnostics(
-        from_annotated_static,
+        c_first,
         expect![[r#"
-            68..70: cannot infer the type of `id` across items; add a type annotation to its definition (defined here at 8..10)
+            12..19: unresolved name `missing`
+            49..50: cannot infer the type of `a` across items; add a type annotation to its definition (defined here at 8..9)
+            85..86: cannot infer the type of `a` across items; add a type annotation to its definition (defined here at 8..9)
+        "#]],
+    );
+}
+
+/// A function member whose own type is erroneous gets an erroneous
+/// signature, so its calls neither decide it nor disagree about it, in
+/// either order.
+#[test]
+fn erroneous_fn_member_is_not_decided_by_its_calls() {
+    let g_first = r#"
+static f = fn () { missing };
+static g = fn () -> usize { f() };
+static h = fn () -> str { f() };
+"#;
+    check_signatures(
+        g_first,
+        expect![[r#"
+        f: fn() -> {error}
+        g: fn() -> usize
+        h: fn() -> str
+    "#]],
+    );
+    // TODO: halvko/must#156: the calls repeat `f`'s error as "not enough
+    // information".
+    check_diagnostics(
+        g_first,
+        expect![[r#"
+            20..27: unresolved name `missing`
+            59..60: cannot infer the type of `f` across items; add a type annotation to its definition (defined here at 8..9)
+            92..93: cannot infer the type of `f` across items; add a type annotation to its definition (defined here at 8..9)
+        "#]],
+    );
+    let h_first = r#"
+static f = fn () { missing };
+static h = fn () -> str { f() };
+static g = fn () -> usize { f() };
+"#;
+    check_signatures(
+        h_first,
+        expect![[r#"
+        f: fn() -> {error}
+        h: fn() -> str
+        g: fn() -> usize
+    "#]],
+    );
+    check_diagnostics(
+        h_first,
+        expect![[r#"
+            20..27: unresolved name `missing`
+            57..58: cannot infer the type of `f` across items; add a type annotation to its definition (defined here at 8..9)
+            92..93: cannot infer the type of `f` across items; add a type annotation to its definition (defined here at 8..9)
+        "#]],
+    );
+}
+
+/// An error that meets only a parameter leaves it open: uses decide
+/// parameters, so `main` decides `g`'s, which `f` shares.
+#[test]
+fn members_own_error_leaves_a_parameter_it_shares_open() {
+    let text = r#"
+static g = fn (y) { y };
+static f = fn (x) { g(x); x == missing };
+static main = fn () -> usize { g(1) };
+"#;
+    check_signatures(
+        text,
+        expect![[r#"
+            g: fn(usize) -> usize
+            f: fn(usize) -> bool
+            main: fn() -> usize
+        "#]],
+    );
+    check_diagnostics(
+        text,
+        expect![[r#"
+            57..64: unresolved name `missing`
+        "#]],
+    );
+}
+
+/// The same holds for the parameter of a function a member returns.
+#[test]
+fn members_own_error_leaves_the_parameter_of_a_returned_fn_open() {
+    let curried = r#"
+static f = fn () { fn (x) { x == missing; 0 } };
+static main = fn () -> usize { let n: usize = 1; f()(n) };
+"#;
+    check_signatures(
+        curried,
+        expect![[r#"
+            f: fn() -> fn(usize) -> usize
+            main: fn() -> usize
+        "#]],
+    );
+    // TODO: halvko/must#152: `f`'s own body doesn't see that its group
+    // made the `0` a `usize`.
+    check_diagnostics(
+        curried,
+        expect![[r#"
+            34..41: unresolved name `missing`
+            43..44: cannot infer the type of this number: it has no defining use — add a type annotation
+        "#]],
+    );
+}
+
+/// A variable in what a member produces that met an error is poisoned
+/// even where another member shares it: that member's type depends on the
+/// broken body too, so `g`'s uses (`main`'s included) say "not enough
+/// information".
+#[test]
+fn members_own_mismatch_poisons_a_result_it_shares() {
+    let text = r#"
+static g = fn (y) { y };
+static f = fn (x) { g(x); x == 1; let b: bool = x; x };
+static main = fn () -> usize { g(1) };
+"#;
+    // TODO: halvko/must#157: `f`'s own `bool` mismatch isn't reported: its
+    // `x` reads `g`'s poisoned parameter.
+    check_signatures(
+        text,
+        expect![[r#"
+        g: fn({error}) -> {error}
+        f: fn({error}) -> {error}
+        main: fn() -> usize
+    "#]],
+    );
+    check_diagnostics(
+        text,
+        expect![[r#"
+            46..47: cannot infer the type of `g` across items; add a type annotation to its definition (defined here at 8..9)
+            113..114: cannot infer the type of `g` across items; add a type annotation to its definition (defined here at 8..9)
+        "#]],
+    );
+}
+
+/// A member that returns an erroneous member's result is erroneous too,
+/// whichever of the two runs first, so its uses don't disagree about it.
+#[test]
+fn member_returning_an_erroneous_members_result_is_not_decided_by_its_uses() {
+    let caller_first = r#"
+static a = fn () { f() };
+static f = fn () { missing };
+static g = fn () -> usize { a() };
+static h = fn () -> str { a() };
+"#;
+    check_signatures(
+        caller_first,
+        expect![[r#"
+        a: fn() -> {error}
+        f: fn() -> {error}
+        g: fn() -> usize
+        h: fn() -> str
+    "#]],
+    );
+    check_diagnostics(
+        caller_first,
+        expect![[r#"
+            20..21: cannot infer the type of `f` across items; add a type annotation to its definition (defined here at 34..35)
+            46..53: unresolved name `missing`
+            85..86: cannot infer the type of `a` across items; add a type annotation to its definition (defined here at 8..9)
+            118..119: cannot infer the type of `a` across items; add a type annotation to its definition (defined here at 8..9)
+        "#]],
+    );
+    let callee_first = r#"
+static f = fn () { missing };
+static a = fn () { f() };
+static g = fn () -> usize { a() };
+static h = fn () -> str { a() };
+"#;
+    check_signatures(
+        callee_first,
+        expect![[r#"
+        f: fn() -> {error}
+        a: fn() -> {error}
+        g: fn() -> usize
+        h: fn() -> str
+    "#]],
+    );
+    check_diagnostics(
+        callee_first,
+        expect![[r#"
+            20..27: unresolved name `missing`
+            50..51: cannot infer the type of `f` across items; add a type annotation to its definition (defined here at 8..9)
+            85..86: cannot infer the type of `a` across items; add a type annotation to its definition (defined here at 38..39)
+            118..119: cannot infer the type of `a` across items; add a type annotation to its definition (defined here at 38..39)
+        "#]],
+    );
+}
+
+/// An error that reaches only a member's parameter leaves the rest of its
+/// signature as written, so a call is still checked against its arity and
+/// return type.
+#[test]
+fn erroneous_parameter_keeps_a_members_arity_and_return() {
+    let text = r#"
+static f = fn (x) { x == missing; true };
+static g = fn () -> str { f(1, 2) };
+"#;
+    check_signatures(
+        text,
+        expect![[r#"
+            f: fn({error}) -> bool
+            g: fn() -> str
+        "#]],
+    );
+    check_diagnostics(
+        text,
+        expect![[r#"
+            26..33: unresolved name `missing`
+            69..70: cannot infer the type of `f` across items; add a type annotation to its definition (defined here at 8..9)
+            69..76: expected 1 argument(s), found 2 (`f` is defined here at 8..9)
+            69..76: type mismatch: expected `str`, found `bool` (expected `str` because of this return type at 60..66)
+        "#]],
+    );
+}
+
+/// A member's own error doesn't decide a parameter it shares with a later
+/// member, so that member's own body decides it, in either order.
+#[test]
+fn members_own_error_leaves_a_shared_parameter_to_its_other_member() {
+    let f_first = r#"
+static f = fn (x) { g(x); x == missing };
+static g = fn (y) { let z: usize = y; y };
+static main = fn () -> usize { g(1) };
+"#;
+    check_signatures(
+        f_first,
+        expect![[r#"
+        f: fn(usize) -> bool
+        g: fn(usize) -> usize
+        main: fn() -> usize
+    "#]],
+    );
+    check_diagnostics(
+        f_first,
+        expect![[r#"
+        32..39: unresolved name `missing`
+    "#]],
+    );
+    let g_first = r#"
+static g = fn (y) { let z: usize = y; y };
+static f = fn (x) { g(x); x == missing };
+static main = fn () -> usize { g(1) };
+"#;
+    check_signatures(
+        g_first,
+        expect![[r#"
+        g: fn(usize) -> usize
+        f: fn(usize) -> bool
+        main: fn() -> usize
+    "#]],
+    );
+    check_diagnostics(
+        g_first,
+        expect![[r#"
+        75..82: unresolved name `missing`
+    "#]],
+    );
+}
+
+/// A parameter that met an error and that a later member's body joins to
+/// the result is poisoned in either order.
+#[test]
+fn parameter_joined_to_the_result_later_is_poisoned_in_either_order() {
+    let f_first = r#"
+static f = fn (x) { x == missing; h(x) };
+static h = fn (y) { y };
+static main = fn () -> usize { f(1) };
+"#;
+    check_signatures(
+        f_first,
+        expect![[r#"
+        f: fn({error}) -> {error}
+        h: fn({error}) -> {error}
+        main: fn() -> usize
+    "#]],
+    );
+    // TODO: halvko/must#156: the calls repeat `f`'s error as "not enough
+    // information".
+    check_diagnostics(
+        f_first,
+        expect![[r#"
+            26..33: unresolved name `missing`
+            35..36: cannot infer the type of `h` across items; add a type annotation to its definition (defined here at 50..51)
+            99..100: cannot infer the type of `f` across items; add a type annotation to its definition (defined here at 8..9)
+        "#]],
+    );
+    let h_first = r#"
+static h = fn (y) { y };
+static f = fn (x) { x == missing; h(x) };
+static main = fn () -> usize { f(1) };
+"#;
+    check_signatures(
+        h_first,
+        expect![[r#"
+        h: fn({error}) -> {error}
+        f: fn({error}) -> {error}
+        main: fn() -> usize
+    "#]],
+    );
+    check_diagnostics(
+        h_first,
+        expect![[r#"
+            51..58: unresolved name `missing`
+            60..61: cannot infer the type of `h` across items; add a type annotation to its definition (defined here at 8..9)
+            99..100: cannot infer the type of `f` across items; add a type annotation to its definition (defined here at 33..34)
+        "#]],
+    );
+}
+
+/// A member's own error doesn't decide a result it shares with a later
+/// member, so that member's own body decides it, in either order.
+#[test]
+fn members_own_error_leaves_a_shared_result_to_its_other_member() {
+    let f_first = r#"
+static f = fn () { let r = g(); r == missing; r };
+static g = fn () { let z: usize = 1; z };
+static main = fn () -> usize { g() };
+"#;
+    check_signatures(
+        f_first,
+        expect![[r#"
+        f: fn() -> usize
+        g: fn() -> usize
+        main: fn() -> usize
+    "#]],
+    );
+    check_diagnostics(
+        f_first,
+        expect![[r#"
+        38..45: unresolved name `missing`
+    "#]],
+    );
+    let g_first = r#"
+static g = fn () { let z: usize = 1; z };
+static f = fn () { let r = g(); r == missing; r };
+static main = fn () -> usize { g() };
+"#;
+    check_signatures(
+        g_first,
+        expect![[r#"
+        g: fn() -> usize
+        f: fn() -> usize
+        main: fn() -> usize
+    "#]],
+    );
+    check_diagnostics(
+        g_first,
+        expect![[r#"
+        80..87: unresolved name `missing`
+    "#]],
+    );
+}
+
+/// A member's use decides an erroneous member's result, as it decides any
+/// variable members share: the first body to run wins, in either order.
+#[test]
+fn members_use_decides_an_erroneous_members_result() {
+    let use_first = r#"
+static b = fn () { print(a()) };
+static a = fn () { missing };
+"#;
+    check_signatures(
+        use_first,
+        expect![[r#"
+        b: fn()
+        a: fn() -> str
+    "#]],
+    );
+    check_diagnostics(
+        use_first,
+        expect![[r#"
+        53..60: unresolved name `missing`
+    "#]],
+    );
+    let a_first = r#"
+static a = fn () { missing };
+static b = fn () { print(a()) };
+"#;
+    check_signatures(
+        a_first,
+        expect![[r#"
+        a: fn() -> str
+        b: fn()
+    "#]],
+    );
+    check_diagnostics(
+        a_first,
+        expect![[r#"
+        20..27: unresolved name `missing`
+    "#]],
+    );
+}
+
+/// Two members' uses that disagree on an erroneous member's result: the
+/// first to run wins and the second reports the mismatch.
+#[test]
+fn members_uses_disagreeing_on_an_erroneous_result_first_wins() {
+    // TODO: halvko/must#146: which use reports the mismatch depends on
+    // member order.
+    let k_first = r#"
+static f = fn () { missing };
+static k = fn () { print(f()) };
+static m = fn () { let n: usize = f(); n };
+"#;
+    check_signatures(
+        k_first,
+        expect![[r#"
+        f: fn() -> str
+        k: fn()
+        m: fn() -> usize
+    "#]],
+    );
+    check_diagnostics(
+        k_first,
+        expect![[r#"
+        20..27: unresolved name `missing`
+        98..101: type mismatch: expected `usize`, found `str` (expected `usize` because of this annotation at 90..95)
+    "#]],
+    );
+    let m_first = r#"
+static f = fn () { missing };
+static m = fn () { let n: usize = f(); n };
+static k = fn () { print(f()) };
+"#;
+    check_signatures(
+        m_first,
+        expect![[r#"
+        f: fn() -> usize
+        m: fn() -> usize
+        k: fn()
+    "#]],
+    );
+    check_diagnostics(
+        m_first,
+        expect![[r#"
+        20..27: unresolved name `missing`
+        100..103: type mismatch: expected `str`, found `usize`
+    "#]],
+    );
+}
+
+/// A static whose value is `{error}` is poisoned right after its body runs,
+/// so the poison reaches a member an earlier body joined it to.
+#[test]
+fn erroneous_static_poisons_what_an_earlier_body_joined_it_to() {
+    // TODO: halvko/must#146: `name` is `{error}` only when `check` runs
+    // before `a`. TODO: halvko/must#156: the uses repeat `a`'s error as
+    // "not enough information".
+    let check_first = r#"
+static check = fn () { a == name() };
+static a = missing;
+static name = fn () { "bob" };
+"#;
+    check_signatures(
+        check_first,
+        expect![[r#"
+        check: fn() -> bool
+        a: {error}
+        name: fn() -> {error}
+    "#]],
+    );
+    check_diagnostics(
+        check_first,
+        expect![[r#"
+        24..25: cannot infer the type of `a` across items; add a type annotation to its definition (defined here at 46..47)
+        29..33: cannot infer the type of `name` across items; add a type annotation to its definition (defined here at 66..70)
+        50..57: unresolved name `missing`
+    "#]],
+    );
+    let a_first = r#"
+static a = missing;
+static check = fn () { a == name() };
+static name = fn () { "bob" };
+"#;
+    check_signatures(
+        a_first,
+        expect![[r#"
+        a: {error}
+        check: fn() -> bool
+        name: fn() -> str
+    "#]],
+    );
+    check_diagnostics(
+        a_first,
+        expect![[r#"
+        12..19: unresolved name `missing`
+        44..45: cannot infer the type of `a` across items; add a type annotation to its definition (defined here at 8..9)
+    "#]],
+    );
+}
+
+/// An error unrelated to a member's own type leaves its signature to its
+/// uses.
+#[test]
+fn error_outside_a_members_type_leaves_its_signature_open() {
+    let text = r#"
+static f = fn (x) { let z = missing; x };
+static main = fn () -> usize { f(1) };
+"#;
+    check_signatures(
+        text,
+        expect![[r#"
+        f: fn(usize) -> usize
+        main: fn() -> usize
+    "#]],
+    );
+    check_diagnostics(
+        text,
+        expect![[r#"
+        29..36: unresolved name `missing`
+    "#]],
+    );
+}
+
+/// A mismatch in a member's own body that doesn't reach its type leaves
+/// its parameter open for a caller to fill.
+#[test]
+fn mismatch_in_a_members_body_leaves_its_parameter_open() {
+    let text = r#"
+static f = fn (x) { let y: bool = x.&; x };
+static main = fn () -> usize { f(1) };
+"#;
+    check_signatures(
+        text,
+        expect![[r#"
+            f: fn(usize) -> usize
+            main: fn() -> usize
+        "#]],
+    );
+    check_diagnostics(
+        text,
+        expect![[r#"
+            35..38: type mismatch: expected `bool`, found `_.&` (expected `bool` because of this annotation at 28..32)
+        "#]],
+    );
+}
+
+/// Calling a member that isn't a function is the caller's mistake: it is
+/// reported at the call, and the member keeps the type its other uses give
+/// it.
+#[test]
+fn calling_a_non_function_member_keeps_its_type() {
+    let text = r#"
+static five = 5;
+static main = fn () -> usize { five(1) };
+static other = fn () -> usize { five };
+"#;
+    check_signatures(
+        text,
+        expect![[r#"
+        five: usize
+        main: fn() -> usize
+        other: fn() -> usize
+    "#]],
+    );
+    // TODO: halvko/must#152: `five`'s own body does not see the type its
+    // group solved, so its `5` reports no defining use.
+    check_diagnostics(
+        text,
+        expect![[r#"
+        15..16: cannot infer the type of this number: it has no defining use — add a type annotation
+        49..53: expression of type `usize` is not callable
+    "#]],
+    );
+}
+
+/// A caller whose use of a member mismatches doesn't poison the member,
+/// whichever caller comes first: the other caller's use decides it, and the
+/// mismatch is reported once, at the mismatching use.
+#[test]
+fn mismatching_caller_does_not_poison_a_number_member() {
+    let main_first = r#"
+static five = 5;
+static main = fn () -> bool { five };
+static other = fn () -> usize { five };
+"#;
+    check_signatures(
+        main_first,
+        expect![[r#"
+            five: usize
+            main: fn() -> bool
+            other: fn() -> usize
+        "#]],
+    );
+    // TODO: halvko/must#152: `five`'s own body does not see the type its
+    // group solved, so its `5` reports no defining use.
+    check_diagnostics(
+        main_first,
+        expect![[r#"
+        15..16: cannot infer the type of this number: it has no defining use — add a type annotation
+        48..52: type mismatch: expected `bool`, found `usize` (expected `bool` because of this return type at 38..45)
+    "#]],
+    );
+    let other_first = r#"
+static five = 5;
+static other = fn () -> usize { five };
+static main = fn () -> bool { five };
+"#;
+    check_signatures(
+        other_first,
+        expect![[r#"
+            five: usize
+            other: fn() -> usize
+            main: fn() -> bool
+        "#]],
+    );
+    // TODO: halvko/must#152: `five`'s own body does not see the type its
+    // group solved, so its `5` reports no defining use.
+    check_diagnostics(
+        other_first,
+        expect![[r#"
+        15..16: cannot infer the type of this number: it has no defining use — add a type annotation
+        88..92: type mismatch: expected `bool`, found `usize` (expected `bool` because of this return type at 78..85)
+    "#]],
+    );
+}
+
+/// A fully typed caller's call fills a hole in its callee's signature; the
+/// caller's own signature stays as written.
+#[test]
+fn fully_typed_caller_fills_its_callees_holes() {
+    check_signatures(
+        r#"
+type Option = enum::<T> { Some(T), None };
+static g = fn (x) -> Option::<_> { ::Some(x) };
+static main = fn () -> () { let o: Option::<usize> = g(1); };
+"#,
+        expect![[r#"
+            g: fn(usize) -> Option::<usize>
+            main: fn()
+        "#]],
+    );
+}
+
+/// A caller that ties two callees together (`g(f(1))`) puts them in one
+/// group, so the result doesn't depend on declaration order.
+#[test]
+fn fully_typed_caller_merges_the_callees_its_body_ties_together() {
+    let text = r#"
+static f = fn (x) { x };
+static g = fn (y) { y };
+static main = fn () -> usize { g(f(1)) };
+"#;
+    let db = RootDatabase::default();
+    let file = SourceFile::new(&db, "test.must".to_owned(), text.to_owned());
+    let groups = crate::groups::inference_groups(&db, file);
+    assert_eq!(
+        groups.group_of[2], None,
+        "the fully typed caller is no member"
+    );
+    assert_eq!(
+        groups.group_of[0], groups.group_of[1],
+        "one caller ties both callees into one group"
+    );
+    check_signatures(
+        text,
+        expect![[r#"
+            f: fn(usize) -> usize
+            g: fn(usize) -> usize
+            main: fn() -> usize
+        "#]],
+    );
+    check_signatures(
+        r#"
+static main = fn () -> usize { g(f(1)) };
+static g = fn (y) { y };
+static f = fn (x) { x };
+"#,
+        expect![[r#"
+            main: fn() -> usize
+            g: fn(usize) -> usize
+            f: fn(usize) -> usize
+        "#]],
+    );
+}
+
+/// Editing a fully typed caller re-runs the group it feeds, but when the
+/// filled signature comes out the same, nothing else re-infers.
+#[test]
+fn fully_typed_caller_edit_backdates_behind_its_group() {
+    use salsa::Setter as _;
+    use std::sync::{Arc, Mutex};
+
+    let log: Arc<Mutex<Vec<String>>> = Arc::default();
+    let log_handle = Arc::clone(&log);
+    let mut db = RootDatabase::with_event_callback(Box::new(move |event| {
+        if let salsa::EventKind::WillExecute { database_key } = event.kind {
+            log_handle.lock().unwrap().push(format!("{database_key:?}"));
+        }
+    }));
+
+    let text_v1 = r#"
+static id = fn (x) { x };
+static main = fn () -> usize { id(1) };
+static other = fn () -> usize { id(2) + 1 };
+"#;
+    let text_v2 = r#"
+static id = fn (x) { x };
+static main = fn () -> usize { id(1) + 0 };
+static other = fn () -> usize { id(2) + 1 };
+"#;
+
+    let file = SourceFile::new(&db, "test.must".to_owned(), text_v1.to_owned());
+    for &item in crate::file_item_ids(&db, file) {
+        crate::infer::infer(&db, item);
+    }
+    log.lock().unwrap().clear();
+    file.set_text(&mut db).to(text_v2.to_owned());
+    for &item in crate::file_item_ids(&db, file) {
+        crate::infer::infer(&db, item);
+    }
+    let log = log.lock().unwrap();
+    assert!(
+        log.iter().any(|entry| entry.contains("infer_group")),
+        "the edited caller feeds `id`'s group: {log:#?}"
+    );
+    assert_eq!(
+        log.iter()
+            .filter(|entry| entry.starts_with("infer("))
+            .count(),
+        1,
+        "only the edited item may re-infer; executed: {log:#?}"
+    );
+}
+
+/// A callee's own body decides its signature; a fully typed caller only
+/// fills what the body left free. A caller that disagrees is reported once,
+/// at the caller, against the callee's published signature.
+#[test]
+fn fully_typed_caller_cannot_override_its_callees_own_body() {
+    check_diagnostics(
+        r#"
+static g = fn () { true };
+static main = fn () -> usize { g() };
+"#,
+        expect![[r#"
+            59..62: type mismatch: expected `usize`, found `bool` (expected `usize` because of this return type at 48..56)
+        "#]],
+    );
+}
+
+/// Two fully typed callers that disagree: the group runs fully typed
+/// bodies in source order, one pass (T11), so the first fills the hole and
+/// the second is reported, deterministically.
+#[test]
+fn first_fully_typed_caller_fills_the_hole() {
+    check_signatures(
+        r#"
+static id = fn (x) { x };
+static a = fn () -> usize { id(1) };
+static b = fn () -> bool { id(true) };
+"#,
+        expect![[r#"
+            id: fn(usize) -> usize
+            a: fn() -> usize
+            b: fn() -> bool
+        "#]],
+    );
+    check_signatures(
+        r#"
+static id = fn (x) { x };
+static b = fn () -> bool { id(true) };
+static a = fn () -> usize { id(1) };
+"#,
+        expect![[r#"
+            id: fn(bool) -> bool
+            b: fn() -> bool
+            a: fn() -> usize
+        "#]],
+    );
+}
+
+/// A generic caller is a hard firewall: its body sees `T` as a rigid
+/// param, and filling a monotype hole with it would leak `T` out of its
+/// binder.
+#[test]
+fn generic_caller_does_not_fill_its_callees_holes() {
+    check_diagnostics(
+        r#"
+static id = fn (x) { x };
+static wrap = fn::<T>(t: T) -> T { id(t) };
+"#,
+        expect![[r#"
+            62..64: cannot infer the type of `id` across items; add a type annotation to its definition (defined here at 8..10)
+        "#]],
+    );
+}
+
+/// The same for a member of a generic type: its `Self` mentions the
+/// owner's params.
+#[test]
+fn generic_types_member_does_not_fill_its_callees_holes() {
+    check_diagnostics(
+        r#"
+static id = fn (x) { x };
+type W = struct::<T> { t: T } with {
+    impl Self {
+        get = fn(w: Self) -> Self { id(w) };
+    }
+};
+"#,
+        expect![[r#"
+            116..118: cannot infer the type of `id` across items; add a type annotation to its definition (defined here at 8..10)
         "#]],
     );
 }
