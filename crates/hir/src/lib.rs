@@ -12,6 +12,7 @@ pub mod constraint;
 pub mod diag;
 pub mod groups;
 pub mod infer;
+pub mod inferred_signature;
 pub mod item_tree;
 pub mod linear_check;
 pub mod outlives;
@@ -33,6 +34,7 @@ pub use const_check::ConstCheckDiagnostic;
 pub use constraint::Cause;
 pub use constraint::{RegionConstraint, RegionConstraintReason};
 pub use infer::{InferenceDiagnostic, InferenceResult, TurbofishList};
+pub use inferred_signature::insert_inferred_signature;
 pub use item_tree::{
     Constness, ItemKind, ItemTree, MemberHome, TypeDeclData, TypeRef, item_source,
     trait_requirements, type_decl,
@@ -50,8 +52,8 @@ pub use trap_sites::{
 };
 pub use ty::{
     ConstArgValue, DotReach, FnTy, GenericArg, IntKind, IntValue, NamedTy, ReceiverShape, Region,
-    RegionVar, ResolvedVariant, SelfPosition, Ty, dispatches_on, dot_reach, enum_variants,
-    member_self_position, member_self_ty, receiver_takes, render_variant, signature,
+    RegionVar, ResolvedVariant, SelfPosition, Ty, annotation_text, dispatches_on, dot_reach,
+    enum_variants, member_self_position, member_self_ty, receiver_takes, render_variant, signature,
     substitute_args, type_underlying, type_underlying_for, variant_payloads_for, widens_to,
 };
 pub use unsafe_check::UnsafeCheckDiagnostic;
@@ -1103,6 +1105,14 @@ pub fn file_diagnostics(db: &dyn Db, file: SourceFile) -> Vec<Diagnostic> {
             // the squiggled one.
             related.extend(enum_note);
             let fix = match diag {
+                // Write the definition's inferred signature in. Fixes here
+                // edit the diagnosed file only, so a definition elsewhere
+                // gets none.
+                InferenceDiagnostic::NeedsAnnotation { item: target, .. }
+                    if target.file == file =>
+                {
+                    insert_inferred_signature(db, target.to_id(db), None)
+                }
                 // Insert `mut ` where the grammar has a slot for it before
                 // this binding — a `let`, a parameter, or a record-pattern
                 // field (before the FIELD name, which for a rename is not

@@ -693,29 +693,45 @@ impl Snapshot {
             tracing::warn!(uri = %uri.as_str(), "code action for a document that is not open");
             return None;
         };
-        // Every fix this server offers is a quick fix, so a client that
-        // asked for other kinds gets nothing.
-        if let Some(only) = &params.context.only {
-            if !only
-                .iter()
-                .any(|kind| kind == &lsp_types::CodeActionKind::QUICKFIX)
-            {
-                return Some(Vec::new());
-            }
-        }
+        // Diagnostic fixes are quick fixes and assists are rewrites; a
+        // client that asked for some kinds gets only those (a kind covers
+        // its dotted subkinds, as the protocol defines).
+        let wants = |kind: &lsp_types::CodeActionKind| {
+            params.context.only.as_ref().is_none_or(|only| {
+                only.iter().any(|asked| {
+                    kind.as_str() == asked.as_str()
+                        || kind
+                            .as_str()
+                            .strip_prefix(asked.as_str())
+                            .is_some_and(|rest| rest.starts_with('.'))
+                })
+            })
+        };
         let line_index = self.analysis.line_index(file);
         let start = from_proto::offset(&line_index, params.range.start)?;
         let end = from_proto::offset(&line_index, params.range.end)?;
         let query = syntax::TextRange::new(start, end);
 
-        let mut actions = Vec::new();
-        for diagnostic in self.analysis.diagnostics(file) {
-            let Some(fix) = diagnostic.fix.clone() else {
-                continue;
-            };
-            if diagnostic.range.intersect(query).is_none() {
-                continue;
+        let mut offers: Vec<(ide::Fix, Option<ide::Diagnostic>)> = Vec::new();
+        if wants(&lsp_types::CodeActionKind::QUICKFIX) {
+            for diagnostic in self.analysis.diagnostics(file) {
+                let Some(fix) = diagnostic.fix.clone() else {
+                    continue;
+                };
+                if diagnostic.range.intersect(query).is_none() {
+                    continue;
+                }
+                offers.push((fix, Some(diagnostic)));
             }
+        }
+        if wants(&lsp_types::CodeActionKind::REFACTOR_REWRITE) {
+            for fix in self.analysis.assists(file, query) {
+                offers.push((fix, None));
+            }
+        }
+
+        let mut actions = Vec::new();
+        for (fix, diagnostic) in offers {
             // Each edit names its target file; resolve every one through
             // its own URI and line index. An edit whose file the client
             // doesn't have open drops the whole action — applying half a
@@ -742,8 +758,14 @@ impl Snapshot {
             actions.push(lsp_types::CodeActionOrCommand::CodeAction(
                 lsp_types::CodeAction {
                     title: fix.label,
-                    kind: Some(lsp_types::CodeActionKind::QUICKFIX),
-                    diagnostics: Some(vec![to_proto::diagnostic(self, &line_index, diagnostic)]),
+                    kind: Some(if diagnostic.is_some() {
+                        lsp_types::CodeActionKind::QUICKFIX
+                    } else {
+                        lsp_types::CodeActionKind::REFACTOR_REWRITE
+                    }),
+                    diagnostics: diagnostic.map(|diagnostic| {
+                        vec![to_proto::diagnostic(self, &line_index, diagnostic)]
+                    }),
                     edit: Some(lsp_types::WorkspaceEdit {
                         changes: Some(changes),
                         ..Default::default()

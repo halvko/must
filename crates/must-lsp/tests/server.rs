@@ -296,6 +296,67 @@ fn quick_fix_wraps_fn_body_in_braces() {
 }
 
 #[test]
+fn code_action_inserts_the_inferred_signature() {
+    let mut client = TestClient::start();
+    let file = uri("file:///infer-sig.must");
+
+    client.open(&file, "static s = \"hi\";");
+    client.next_diagnostics();
+
+    let request = |client: &mut TestClient, only: Option<Vec<lsp_types::CodeActionKind>>| {
+        client
+            .request::<lsp_types::request::CodeActionRequest>(lsp_types::CodeActionParams {
+                text_document: lsp_types::TextDocumentIdentifier { uri: file.clone() },
+                // The cursor on the name `s`.
+                range: lsp_types::Range::new(
+                    lsp_types::Position::new(0, 7),
+                    lsp_types::Position::new(0, 7),
+                ),
+                context: lsp_types::CodeActionContext {
+                    only,
+                    ..Default::default()
+                },
+                work_done_progress_params: Default::default(),
+                partial_result_params: Default::default(),
+            })
+            .expect("expected code actions")
+    };
+
+    let actions = request(&mut client, None);
+    assert_eq!(actions.len(), 1);
+    let lsp_types::CodeActionOrCommand::CodeAction(action) = &actions[0] else {
+        panic!("expected a code action, got {actions:?}");
+    };
+    assert_eq!(action.title, "Insert inferred type");
+    assert_eq!(
+        action.kind,
+        Some(lsp_types::CodeActionKind::REFACTOR_REWRITE)
+    );
+    assert_eq!(action.diagnostics, None);
+    // Uri-keyed maps are the shape the LSP protocol mandates.
+    #[allow(clippy::mutable_key_type)]
+    let changes = action
+        .edit
+        .as_ref()
+        .and_then(|e| e.changes.as_ref())
+        .expect("action has a workspace edit");
+    let edits = &changes[&file];
+    assert_eq!(edits.len(), 1);
+    // A pure insertion right after the name: `static s: str = "hi";`.
+    assert_eq!(edits[0].range.start, lsp_types::Position::new(0, 8));
+    assert_eq!(edits[0].range.end, lsp_types::Position::new(0, 8));
+    assert_eq!(edits[0].new_text, ": str");
+
+    // `refactor` covers `refactor.rewrite`; `quickfix` does not.
+    let refactor = request(&mut client, Some(vec![lsp_types::CodeActionKind::REFACTOR]));
+    assert_eq!(refactor.len(), 1);
+    let quickfix = request(&mut client, Some(vec![lsp_types::CodeActionKind::QUICKFIX]));
+    assert_eq!(quickfix.len(), 0);
+
+    drop(client);
+}
+
+#[test]
 fn quick_fix_inserts_semicolon_from_cursor_on_anchor() {
     let mut client = TestClient::start();
     let file = uri("file:///semicolon.must");
