@@ -121,6 +121,15 @@ impl AnalysisHost {
     pub fn close_file(&mut self, file: SourceFile) {
         self.set_file_text(file, String::new());
     }
+
+    /// The expression count past which an inference group warns, `None`
+    /// for never (see [`base_db::Settings::big_inference_group`]).
+    pub fn set_big_inference_group(&mut self, expressions: Option<u32>) {
+        use salsa::Setter as _;
+        base_db::settings(&self.db)
+            .set_big_inference_group(&mut self.db)
+            .to(expressions);
+    }
 }
 
 /// A read-only snapshot of the analysis state at some revision. Cheap to

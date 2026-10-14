@@ -232,6 +232,98 @@ fn is_constraint_source(db: &dyn Db, item: crate::ItemId<'_>) -> bool {
             .is_some_and(|type_ref| type_ref.is_fully_typed())
 }
 
+/// The warning for groups bigger than [`base_db::Settings`] allows: every
+/// body the group covers (members and the fully typed bodies feeding it)
+/// gets one warning, at its first use of an unannotated member, with each
+/// member it uses as related information. Annotating those members takes
+/// them out of the group.
+pub fn big_group_diagnostics(db: &dyn Db, file: SourceFile) -> Vec<crate::Diagnostic> {
+    use syntax::ast::AstNode as _;
+    let Some(threshold) = base_db::settings(db).big_inference_group(db) else {
+        return Vec::new();
+    };
+    let groups = inference_groups(db, file);
+    let ids = file_item_ids(db, file);
+    let mut diagnostics = Vec::new();
+    for (members, sources) in groups.groups.iter().zip(&groups.sources) {
+        let bodies: Vec<crate::ItemId<'_>> = members
+            .iter()
+            .map(|&member| ids[member])
+            .chain(sources.iter().map(|source| source.to_id(db)))
+            .collect();
+        let size: u64 = bodies
+            .iter()
+            .map(|&item| crate::body::body(db, item).exprs.len() as u64)
+            .sum();
+        if size <= u64::from(threshold) {
+            continue;
+        }
+        let count = members.len() + sources.len();
+        let member_locs: rustc_hash::FxHashSet<ItemLoc> =
+            members.iter().map(|&m| item_loc(db, ids[m])).collect();
+        for item in bodies {
+            let own = item_loc(db, item);
+            let (_, source_map) = crate::body::body_with_source_map(db, item);
+            let mut first_use = None;
+            let mut used: Vec<&ItemLoc> = Vec::new();
+            let mut seen: rustc_hash::FxHashSet<&ItemLoc> = Default::default();
+            for (expr, resolution) in crate::resolutions(db, item).iter() {
+                let crate::Resolution::Item(target) = resolution else {
+                    continue;
+                };
+                // Recursion is the item's own business, not a call into
+                // the group.
+                if *target == own || !member_locs.contains(target) || seen.contains(target) {
+                    continue;
+                }
+                let Some(ptr) = source_map.node_for_expr(expr) else {
+                    continue;
+                };
+                first_use.get_or_insert(ptr.text_range());
+                seen.insert(target);
+                used.push(target);
+            }
+            let (Some(range), Some(first)) = (first_use, used.first()) else {
+                continue;
+            };
+            let name = first.display_name();
+            let what = match used.len() {
+                1 => format!("`{name}` is missing a complete type signature, and it is"),
+                2 => format!(
+                    "`{name}` and 1 other item used here are missing complete type signatures, \
+                     and they are"
+                ),
+                n => format!(
+                    "`{name}` and {} other items used here are missing complete type \
+                     signatures, and they are",
+                    n - 1
+                ),
+            };
+            diagnostics.push(crate::Diagnostic {
+                range,
+                severity: crate::Severity::Warning,
+                message: format!(
+                    "{what} inferred in a group of {count} items (with {size} expressions); \
+                     inference this large may slow down your editor"
+                ),
+                fix: None,
+                related: used
+                    .iter()
+                    .filter_map(|target| {
+                        let name = crate::item_tree::item_source(db, target.to_id(db))?.name()?;
+                        Some(crate::RelatedInfo {
+                            file: target.file,
+                            range: name.syntax().text_range(),
+                            message: format!("`{}` is defined here", target.display_name()),
+                        })
+                    })
+                    .collect(),
+            });
+        }
+    }
+    diagnostics
+}
+
 struct Tarjan<'a> {
     edges: &'a [Vec<usize>],
     include: &'a [bool],

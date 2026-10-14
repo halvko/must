@@ -10902,6 +10902,61 @@ static other = fn () -> usize { id(2) + 1 };
     );
 }
 
+fn render_diagnostics_with_big_group(text: &str, big_inference_group: Option<u32>) -> String {
+    use salsa::Setter as _;
+    let mut db = RootDatabase::default();
+    base_db::settings(&db)
+        .set_big_inference_group(&mut db)
+        .to(big_inference_group);
+    let file = SourceFile::new(&db, "test.must".to_owned(), text.to_owned());
+    crate::file_diagnostics(&db, file)
+        .into_iter()
+        .map(|d| {
+            let related = d
+                .related
+                .iter()
+                .map(|r| format!(" ({} at {:?})", r.message, r.range))
+                .collect::<String>();
+            format!("{:?} {:?}: {}{related}\n", d.severity, d.range, d.message)
+        })
+        .collect::<String>()
+}
+
+/// A group past the size setting warns once per body, at its first use of
+/// an unannotated member, pointing at every member it uses. Recursion
+/// doesn't count: it is the item's own business. A group exactly at the
+/// setting is fine, and `None` turns the warning off.
+#[test]
+fn big_inference_group_warns_at_uses_of_its_unannotated_items() {
+    let text = r#"
+static f = fn (x) { if x > 10 { x } else { f(x + 1) } };
+static g = fn (y) { y + f(y) };
+static main = fn () -> usize { g(1) + g(2) + f(3) };
+"#;
+    expect![[r#"
+        Warning 82..83: `f` is missing a complete type signature, and it is inferred in a group of 3 items (with 34 expressions); inference this large may slow down your editor (`f` is defined here at 8..9)
+        Warning 121..122: `g` and 1 other item used here are missing complete type signatures, and they are inferred in a group of 3 items (with 34 expressions); inference this large may slow down your editor (`g` is defined here at 65..66) (`f` is defined here at 8..9)
+    "#]]
+    .assert_eq(&render_diagnostics_with_big_group(text, Some(33)));
+    expect![[r#""#]].assert_eq(&render_diagnostics_with_big_group(text, Some(34)));
+    expect![[r#""#]].assert_eq(&render_diagnostics_with_big_group(text, None));
+}
+
+/// Mutually recursive unannotated items are one group, each body inferred
+/// once against the shared signatures, so each warns at its use of the
+/// other: annotating either one breaks the cycle.
+#[test]
+fn big_inference_group_warns_across_mutual_recursion() {
+    let text = r#"
+static even = fn (n: usize) { if n == 0 { true } else { odd(n - 1) } };
+static odd = fn (n: usize) { if n == 0 { false } else { even(n - 1) } };
+"#;
+    expect![[r#"
+        Warning 57..60: `odd` is missing a complete type signature, and it is inferred in a group of 2 items (with 28 expressions); inference this large may slow down your editor (`odd` is defined here at 80..83)
+        Warning 129..133: `even` is missing a complete type signature, and it is inferred in a group of 2 items (with 28 expressions); inference this large may slow down your editor (`even` is defined here at 8..12)
+    "#]].assert_eq(&render_diagnostics_with_big_group(text, Some(0)));
+}
+
 /// A callee's own body decides its signature; a fully typed caller only
 /// fills what the body left free. A caller that disagrees is reported once,
 /// at the caller, against the callee's published signature.

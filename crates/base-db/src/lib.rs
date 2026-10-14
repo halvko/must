@@ -29,6 +29,28 @@ pub struct Prelude {
     pub file: SourceFile,
 }
 
+/// Settings the editor or command line may change. One per database.
+#[salsa::input(singleton)]
+pub struct Settings {
+    /// An inference group covering more expressions than this (its
+    /// members' bodies plus the fully typed bodies that feed it) warns at
+    /// each body's first use of its unannotated items: every edit to a body
+    /// it covers re-runs all of it. `None` turns the warning off.
+    pub big_inference_group: Option<u32>,
+}
+
+impl Settings {
+    /// About 4ms of group inference per edit in a release build: timing a
+    /// cold `signature` query over generated groups of 300 to 25000
+    /// expressions was linear, about 0.4µs per expression.
+    pub const DEFAULT_BIG_INFERENCE_GROUP: Option<u32> = Some(10_000);
+}
+
+/// The settings of `db`.
+pub fn settings(db: &dyn Db) -> Settings {
+    Settings::get(db)
+}
+
 #[salsa::db]
 pub trait Db: salsa::Database {}
 
@@ -62,6 +84,7 @@ impl RootDatabase {
         let db = RootDatabase { storage };
         let file = SourceFile::new(&db, "<prelude>".to_owned(), String::new());
         Prelude::new(&db, file);
+        Settings::new(&db, Settings::DEFAULT_BIG_INFERENCE_GROUP);
         db
     }
 }
