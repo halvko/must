@@ -2,7 +2,8 @@
 model: sonnet
 ---
 
-Judge names and words: identifiers, diagnostics, docs and commit messages.
+Judge names and words outside code comments: identifiers, diagnostics,
+docs, commit messages and the PR description.
 
 - Names: does a new name match what the code around it already calls the
   same thing? One concept, one word across crates (for example, the code
@@ -17,6 +18,7 @@ Judge names and words: identifiers, diagnostics, docs and commit messages.
 - Commits: each is a semantic commit (`feat(hir): ...`, `fix(mir): ...`),
   whose subject says what is true after it, and fixups are squashed into
   the commit they fix. The PR description matches the final diff, not an
-  earlier plan.
+  earlier plan, and accounts for every change in it: a reader should not
+  have to ask why a line changed.
 
 Suggest the replacement wording in each finding.
