@@ -58,7 +58,7 @@ async function startClient(): Promise<void> {
   }
   const server: Executable = {
     command,
-    args: [],
+    args: ["lsp"],
     options: { env: { ...process.env } },
   };
   const options: LanguageClientOptions = {

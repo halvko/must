@@ -15,7 +15,7 @@ fn main() -> must_lsp::ServerResult<()> {
             let stdin = std::io::stdin();
             let stdout = std::io::stdout();
             must_lsp::dap::run(stdin.lock(), stdout.lock())?;
-            return Ok(());
+            Ok(())
         }
         must_lsp::cli::Command::Message { text, code } => {
             if code == 0 {
@@ -25,9 +25,11 @@ fn main() -> must_lsp::ServerResult<()> {
             }
             std::process::exit(code);
         }
-        must_lsp::cli::Command::Serve => {}
+        must_lsp::cli::Command::Lsp => serve(),
     }
+}
 
+fn serve() -> must_lsp::ServerResult<()> {
     // stdout is the LSP channel; logs go to stderr.
     tracing_subscriber::fmt()
         .with_writer(std::io::stderr)
@@ -35,11 +37,11 @@ fn main() -> must_lsp::ServerResult<()> {
         .with_ansi(false)
         .init();
 
-    tracing::info!("must starting");
+    tracing::info!("must lsp starting");
     let (connection, io_threads) = lsp_server::Connection::stdio();
     must_lsp::run(connection)?;
     io_threads.join()?;
-    tracing::info!("must exiting");
+    tracing::info!("must lsp exiting");
     Ok(())
 }
 

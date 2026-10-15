@@ -1,6 +1,6 @@
 //! Top-level argument dispatch for the `must` binary.
 //!
-//! Deliberately hand-rolled over `std`: the surface is four subcommands and
+//! Deliberately hand-rolled over `std`: the surface is five subcommands and
 //! two flags, and a CLI dependency would buy nothing a `match` doesn't.
 //! Parsing is separated from acting so it can be tested without spawning a
 //! process — [`parse`] is total, and every rejection names `--help`.
@@ -8,8 +8,8 @@
 /// What a top-level argument list asks for.
 #[derive(Debug, PartialEq, Eq)]
 pub enum Command<'a> {
-    /// No arguments: speak LSP over stdio.
-    Serve,
+    /// `lsp`: speak the Language Server Protocol over stdio.
+    Lsp,
     /// `run` and its own arguments (the file, `-e`).
     Run(&'a [String]),
     /// `check` and the files to check.
@@ -27,11 +27,11 @@ pub const HELP: &str = "\
 must — the language server and toolchain for Must
 
 USAGE:
-    must                                  Serve LSP over stdio (the default)
     must run <file.must> [-e <expr>]      Evaluate an expression in a file's scope
     must check <file.must>...             Check files, printing diagnostics as text
     must compile <file.must> -o <out.wasm>
                                           Compile to a self-contained WebAssembly module
+    must lsp                              Speak the Language Server Protocol over stdio
     must dap                              Speak the Debug Adapter Protocol over stdio
 
 OPTIONS:
@@ -67,13 +67,33 @@ EXIT STATUS:
     2  bad usage, or a file could not be read
 ";
 
+/// What a bare `must` prints.
+const NO_SUBCOMMAND: &str = "\
+error: no subcommand given
+
+SUBCOMMANDS:
+    run      Evaluate an expression in a file's scope
+    check    Check files, printing diagnostics as text
+    compile  Compile to a self-contained WebAssembly module
+    lsp      Speak the Language Server Protocol over stdio (for editors)
+    dap      Speak the Debug Adapter Protocol over stdio (for editors)
+
+try `must --help` for their arguments and options
+";
+
 /// Classify `args` (the arguments after the program name). Total: every
 /// input yields either something to do or a message to print.
 pub fn parse(args: &[String]) -> Command<'_> {
     let Some(first) = args.first().map(String::as_str) else {
-        return Command::Serve;
+        // A bare `must` prints the subcommands rather than waiting for LSP
+        // on stdin.
+        return Command::Message {
+            text: NO_SUBCOMMAND.to_owned(),
+            code: 2,
+        };
     };
     match first {
+        "lsp" => Command::Lsp,
         "run" => Command::Run(&args[1..]),
         "check" => Command::Check(&args[1..]),
         "compile" => Command::Compile(&args[1..]),
@@ -86,9 +106,7 @@ pub fn parse(args: &[String]) -> Command<'_> {
             text: format!("must {}\n", env!("CARGO_PKG_VERSION")),
             code: 0,
         },
-        // Anything else would previously have started the language server
-        // by accident — a typo'd subcommand silently hanging on stdin is
-        // the worst possible answer.
+        // An unknown argument says so; it never starts something.
         other => {
             let what = if other.starts_with('-') {
                 "unknown option"
@@ -119,8 +137,19 @@ mod tests {
     }
 
     #[test]
-    fn no_arguments_serves_lsp() {
-        assert_eq!(parse_owned(&[]), Command::Serve);
+    fn no_arguments_is_a_usage_error_listing_the_subcommands() {
+        let Command::Message { text, code } = parse_owned(&[]) else {
+            panic!("a bare `must` prints a message instead of serving");
+        };
+        assert_eq!(code, 2);
+        assert!(text.starts_with("error: no subcommand given\n"), "{text}");
+        for subcommand in ["run", "check", "compile", "lsp", "dap"] {
+            assert!(
+                text.contains(&format!("\n    {subcommand} ")),
+                "the overview must list `{subcommand}`:\n{text}"
+            );
+        }
+        assert!(text.contains("try `must --help`"), "{text}");
     }
 
     #[test]
@@ -134,6 +163,7 @@ mod tests {
             "must check <file.must>...",
             "must compile <file.must> -o <out.wasm>",
             "must dap",
+            "must lsp",
             "MUST_LSP_LOG",
             "-e, --entry",
             "-o, --output",
@@ -194,6 +224,7 @@ try `must --help`
             Command::Check(rest) if rest.len() == 2
         ));
         assert_eq!(parse_owned(&["dap"]), Command::Dap);
+        assert_eq!(parse_owned(&["lsp"]), Command::Lsp);
         assert!(matches!(
             parse_owned(&["compile", "a.must", "-o", "a.wasm"]),
             Command::Compile(rest) if rest.len() == 3

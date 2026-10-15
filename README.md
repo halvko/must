@@ -45,8 +45,11 @@ Then install the editor extension once:
 
 The extension finds the server by looking for `must` on PATH first, then
 falling back to `<worktree>/target/debug/must` — so opening this repo
-Just Works after `cargo build`. After rebuilding the server, restart it with
-`editor: restart language server` (no extension reinstall needed).
+Just Works after `cargo build`. The extension starts the server as
+`must lsp`; a bare `must` prints the subcommands and exits with status 2.
+
+After rebuilding the server, restart it with `editor: restart language
+server` (no extension reinstall needed).
 
 To edit `.must` files *outside* this repo, put the server on PATH:
 
