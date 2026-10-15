@@ -6,7 +6,7 @@
 // typed `Arena` — both carrying their operations as INHERENT MEMBERS
 // (`impl Self` in the type's `with`-chain), called with a dot.
 //
-// Run: must-lsp run examples/heap.must
+// Run: must run examples/heap.must
 //
 // The ground rules, all demonstrated below:
 //

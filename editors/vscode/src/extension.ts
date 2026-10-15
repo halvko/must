@@ -12,7 +12,7 @@ let client: LanguageClient | undefined;
 let output: vscode.OutputChannel | undefined;
 const exclusive = serialized();
 
-const SERVER_NAME = process.platform === "win32" ? "must-lsp.exe" : "must-lsp";
+const SERVER_NAME = process.platform === "win32" ? "must.exe" : "must";
 
 function isExecutable(file: string): boolean {
   try {
@@ -23,7 +23,7 @@ function isExecutable(file: string): boolean {
   }
 }
 
-/** `must.serverPath`, else `must-lsp` on PATH, else a workspace's debug build. */
+/** `must.serverPath`, else `must` on PATH, else a workspace's debug build. */
 function findServer(): string | undefined {
   const configured = vscode.workspace
     .getConfiguration("must")
@@ -51,7 +51,7 @@ async function startClient(): Promise<void> {
   const command = findServer();
   if (command === undefined) {
     void vscode.window.showErrorMessage(
-      "Must: no must-lsp found. Put it on PATH, build it into " +
+      "Must: no `must` binary found. Put it on PATH, build it into " +
         "target/debug/ of a workspace folder, or set must.serverPath.",
     );
     return;

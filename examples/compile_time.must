@@ -4,9 +4,9 @@
 // which is why its literal carries the `const fn` marker: only `const fn`s
 // may be called in a const context.
 //
-// Run: must-lsp run examples/compile_time.must -e 'fortnight_seconds'    (=> 1209600)
-// Run: must-lsp run examples/compile_time.must -e 'is_big'              (=> true)
-// Run: must-lsp run examples/compile_time.must -e 'greet()'             (=> "computed at compile time, not when greet() runs")
+// Run: must run examples/compile_time.must -e 'fortnight_seconds'    (=> 1209600)
+// Run: must run examples/compile_time.must -e 'is_big'              (=> true)
+// Run: must run examples/compile_time.must -e 'greet()'             (=> "computed at compile time, not when greet() runs")
 
 // Annotations on statics are optional — unannotated items get their types
 // inferred from their bodies (until visibility lands; exported items will

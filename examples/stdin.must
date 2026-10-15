@@ -6,7 +6,7 @@
 // — matching on `read_line()` until `::End` — is the whole idiom for
 // draining stdin.
 //
-// Run: printf 'a\nb\nc\n' | must-lsp run examples/stdin.must
+// Run: printf 'a\nb\nc\n' | must run examples/stdin.must
 //
 // An Advent-of-Code-shaped demo: read every line until end-of-input, count
 // them, and compare the count against a literal — the shape a puzzle

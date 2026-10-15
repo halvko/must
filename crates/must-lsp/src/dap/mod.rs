@@ -1,4 +1,4 @@
-//! `must-lsp dap`: a Debug Adapter Protocol session where the adapter *is*
+//! `must dap`: a Debug Adapter Protocol session where the adapter *is*
 //! the runtime — Zed spawns this binary, and the program runs in-process on
 //! the same MIR interpreter the editor's const eval uses. Supports launch,
 //! breakpoints, stepping, stack/variables inspection, console evaluation,

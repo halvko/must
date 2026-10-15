@@ -1,4 +1,4 @@
-//! `must-lsp run file.must -e 'expr'`: evaluate an expression in a file's
+//! `must run file.must -e 'expr'`: evaluate an expression in a file's
 //! scope with run-mode semantics. The same MIR and machine the editor's
 //! const eval uses — only the driver differs.
 //!
@@ -28,7 +28,7 @@ pub fn run(path: &str, expr: &str) -> i32 {
     };
     let stdout = std::io::stdout();
     // Real, locked, line-buffered stdin — `read_line`'s source in `run`
-    // mode (the CLI's `must-lsp run program.must < input.txt` contract).
+    // mode (the CLI's `must run program.must < input.txt` contract).
     // Wrapped so a program that blocks on an interactive terminal gets a
     // one-time heads-up before it does; piped/redirected input (the
     // ordinary case) passes through untouched and silent.
@@ -56,7 +56,7 @@ pub fn run(path: &str, expr: &str) -> i32 {
 /// Wraps a [`std::io::BufRead`] and, the first time a byte is drawn from it,
 /// prints a one-time note to `hint_out` if `is_tty` says the source is an
 /// interactive terminal. Piped or redirected input (`is_tty: false`) is
-/// never touched — the `must-lsp run program.must < input.txt` contract
+/// never touched — the `must run program.must < input.txt` contract
 /// stays completely silent.
 ///
 /// Sits underneath `RunMode::input`, so one flag covers BOTH stdin entry

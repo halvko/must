@@ -19,7 +19,7 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-const BIN: &str = env!("CARGO_BIN_EXE_must-lsp");
+const BIN: &str = env!("CARGO_BIN_EXE_must");
 
 /// A fixture that overflows a `u8`, used to exercise trap decoding.
 const OVERFLOW_TRAP_SOURCE: &str =
@@ -69,7 +69,7 @@ fn compile(example: &Path, wasm: &Path) {
             wasm.to_str().unwrap(),
         ])
         .output()
-        .expect("spawn must-lsp compile");
+        .expect("spawn must compile");
     assert!(
         output.status.success(),
         "compile failed: {}",
@@ -102,7 +102,7 @@ fn wasm_run_mjs_matches_the_interpreter_on_display_must() {
     let interpreted = Command::new(BIN)
         .args(["run", example.to_str().unwrap()])
         .output()
-        .expect("spawn must-lsp run");
+        .expect("spawn must run");
     assert!(
         interpreted.status.success(),
         "the interpreter should run display.must cleanly: {}",
@@ -183,7 +183,7 @@ fn must_wasm_js_matches_the_interpreter_on_display_must() {
     let interpreted = Command::new(BIN)
         .args(["run", example.to_str().unwrap()])
         .output()
-        .expect("spawn must-lsp run");
+        .expect("spawn must run");
     assert!(
         interpreted.status.success(),
         "the interpreter should run display.must cleanly: {}",

@@ -35,11 +35,11 @@ fn main() -> must_lsp::ServerResult<()> {
         .with_ansi(false)
         .init();
 
-    tracing::info!("must-lsp starting");
+    tracing::info!("must starting");
     let (connection, io_threads) = lsp_server::Connection::stdio();
     must_lsp::run(connection)?;
     io_threads.join()?;
-    tracing::info!("must-lsp exiting");
+    tracing::info!("must exiting");
     Ok(())
 }
 
@@ -59,13 +59,13 @@ fn run_command(args: &[String]) -> i32 {
             _ if file.is_none() => file = Some(arg.clone()),
             _ => {
                 eprintln!("error: unexpected argument `{arg}`");
-                eprintln!("try `must-lsp --help`");
+                eprintln!("try `must --help`");
                 return 2;
             }
         }
     }
     let Some(file) = file else {
-        eprintln!("usage: must-lsp run <file.must> [-e <expression>]");
+        eprintln!("usage: must run <file.must> [-e <expression>]");
         return 2;
     };
     must_lsp::runner::run(&file, expr.as_deref().unwrap_or("main()"))
@@ -95,13 +95,13 @@ fn compile_command(args: &[String]) -> i32 {
             _ if file.is_none() => file = Some(arg.clone()),
             _ => {
                 eprintln!("error: unexpected argument `{arg}`");
-                eprintln!("try `must-lsp --help`");
+                eprintln!("try `must --help`");
                 return 2;
             }
         }
     }
     let (Some(file), Some(output)) = (file, output) else {
-        eprintln!("usage: must-lsp compile <file.must> -o <out.wasm> [-e <expression>]");
+        eprintln!("usage: must compile <file.must> -o <out.wasm> [-e <expression>]");
         return 2;
     };
     must_lsp::compile::compile(&file, &output, expr.as_deref().unwrap_or("main()"))

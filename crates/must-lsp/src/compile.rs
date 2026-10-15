@@ -1,9 +1,9 @@
-//! `must-lsp compile file.must -o file.wasm`: the WebAssembly backend at
+//! `must compile file.must -o file.wasm`: the WebAssembly backend at
 //! the command line.
 //!
 //! The compiled module is a *platform instance* in P01's sense — it
 //! imports its effects (`must.print`) and exports `main`, and it carries
-//! no runtime whatsoever. What it runs is the same MIR `must-lsp run`
+//! no runtime whatsoever. What it runs is the same MIR `must run`
 //! interprets, so the two agree by construction (and by the differential
 //! harness in `crates/codegen-wasm/tests`).
 //!
@@ -14,7 +14,7 @@
 //!   is written, exiting with `check`'s own exit code. This is narrower
 //!   than it sounds: it covers the file's own items, not the `-e` entry
 //!   expression injected on top of them. That expression runs the way
-//!   `must-lsp run` runs it — as run-mode code, not a checked const
+//!   `must run` runs it — as run-mode code, not a checked const
 //!   context — because injecting it AS a const context (a `static`
 //!   initializer) would reject the ordinary case of calling a non-`const
 //!   fn` at all, and `-e` defaults to exactly that: `main()`. A bad entry

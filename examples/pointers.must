@@ -6,7 +6,7 @@
 // sit inside an `unsafe { ... }` block, the one place the checker asks you to
 // vouch for the pointer yourself.
 //
-// Run: must-lsp run examples/pointers.must
+// Run: must run examples/pointers.must
 //
 // Pointers cannot leave compile-time evaluation and cannot be printed (a
 // deref value renders as `&raw <opaque>`, never a number), so this tour

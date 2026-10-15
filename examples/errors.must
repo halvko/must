@@ -1,7 +1,7 @@
 // This file is intentionally broken: every item below trips exactly one
-// diagnostic, meant to be read next to `must-lsp check`'s output.
+// diagnostic, meant to be read next to `must check`'s output.
 //
-// Run: must-lsp check examples/errors.must
+// Run: must check examples/errors.must
 //
 // Each comment quotes the diagnostic's headline (the message text; not the
 // source spans, which shift with the file). The real command prints more
@@ -9,7 +9,7 @@
 // several `= help:` quick fixes — pasted in full in the accompanying
 // report.
 //
-// `must-lsp check examples/errors.must` reports, at the time of writing,
+// `must check examples/errors.must` reports, at the time of writing,
 // exactly: found 40 errors and 1 warning.
 
 // 1. Type mismatch, with the annotation blamed as the cause.
@@ -88,7 +88,7 @@ static rigid_add_one = fn::<T>(x: T, y: T) -> T {
 // 9. Compile-time out-of-bounds: an array length is part of its type, so an
 //    index the checker can evaluate is checked right then — no need to run
 //    anything. The *same* message is what a genuinely runtime-only index
-//    traps with (`must-lsp run` on a dynamic OOB prints it verbatim); the
+//    traps with (`must run` on a dynamic OOB prints it verbatim); the
 //    length just lets the checker reach it early here.
 //    error: index out of bounds: the length is 2 but the index is 2
 static compile_time_oob = fn () -> usize {

@@ -109,11 +109,11 @@
 <body>
 
 <h1>Must Wasm Playground</h1>
-<p>Run a WebAssembly module compiled by <code>must-lsp</code>, entirely in this page — no server, no install.</p>
+<p>Run a WebAssembly module compiled by <code>must</code>, entirely in this page — no server, no install.</p>
 
 <div class="howto">
   <strong>How to compile:</strong>
-  <pre>must-lsp compile examples/display.must -o display.wasm</pre>
+  <pre>must compile examples/display.must -o display.wasm</pre>
 </div>
 
 <div id="drop">
@@ -218,7 +218,7 @@
         if (outcome.result.length === 0) {
           resultPane.textContent = "() — ran to completion, no value (or the interpreter would print nothing for this result either)";
         } else if (outcome.result.length === 1) {
-          resultPane.textContent = `${outcome.result[0]}  (raw i64 — this page has no type info to render it as bool/str/record; compare against \`must-lsp run\` for the typed value)`;
+          resultPane.textContent = `${outcome.result[0]}  (raw i64 — this page has no type info to render it as bool/str/record; compare against \`must run\` for the typed value)`;
         } else {
           resultPane.textContent = `[${outcome.result.join(", ")}]  (raw i64 slots)`;
         }

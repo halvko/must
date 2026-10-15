@@ -266,7 +266,7 @@ pub const IMPORT_MODULE: &str = "must";
 pub const STACK_BUDGET: usize = 8 * 1024 * 1024;
 
 /// Compile the program whose entry point is `entry`'s initializer — the
-/// same body the runner evaluates, so `must-lsp run` and `must-lsp
+/// same body the runner evaluates, so `must run` and `must
 /// compile` execute the same code by construction.
 ///
 /// Run this on a thread of at least [`STACK_BUDGET`] bytes: the walk over

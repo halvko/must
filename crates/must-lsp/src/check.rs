@@ -1,4 +1,4 @@
-//! `must-lsp check file.must ...`: batch diagnostics as text. The same
+//! `must check file.must ...`: batch diagnostics as text. The same
 //! `ide::Analysis` the editor drives — only the presentation differs: text
 //! with source snippets instead of published LSP diagnostics.
 
@@ -8,7 +8,7 @@ use ide::{AnalysisHost, LineIndex, Severity};
 /// 0 clean (warnings allowed), 1 with errors, 2 on usage/IO problems.
 pub fn check(paths: &[String]) -> i32 {
     if paths.is_empty() {
-        eprintln!("usage: must-lsp check <file.must>...");
+        eprintln!("usage: must check <file.must>...");
         return 2;
     }
     let mut host = AnalysisHost::new();

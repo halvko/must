@@ -4,12 +4,12 @@
 // each body is checked exactly once, before any call site is known, and
 // every instantiation shares that one check.
 //
-// Run: must-lsp run examples/generics.must -e 'id("hi")'       (=> "hi")
-// Run: must-lsp run examples/generics.must -e 'id::<usize>(4)' (=> 4)
-// Run: must-lsp run examples/generics.must -e 'square_val'     (=> 49)
-// Run: must-lsp run examples/generics.must -e 'cube_val'       (=> 27)
-// Run: must-lsp run examples/generics.must -e 'braced_val'     (=> 49)
-// Run: must-lsp run examples/generics.must -e 'pair_first'     (=> "left")
+// Run: must run examples/generics.must -e 'id("hi")'       (=> "hi")
+// Run: must run examples/generics.must -e 'id::<usize>(4)' (=> 4)
+// Run: must run examples/generics.must -e 'square_val'     (=> 49)
+// Run: must run examples/generics.must -e 'cube_val'       (=> 27)
+// Run: must run examples/generics.must -e 'braced_val'     (=> 49)
+// Run: must run examples/generics.must -e 'pair_first'     (=> "left")
 
 // A type-param generic, fully annotated: `x: T` and `-> T` are mandatory,
 // not stylistic. With no inference group to lean on, there is no argument

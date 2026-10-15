@@ -1,4 +1,4 @@
-//! `must-lsp compile` at the process level: a real `.wasm` file comes out,
+//! `must compile` at the process level: a real `.wasm` file comes out,
 //! a real engine runs it, and the refusals are the ones a user sees.
 //!
 //! The in-process differential harness (`crates/codegen-wasm/tests`) is
@@ -10,7 +10,7 @@
 use std::io::Write;
 use std::process::{Command, Stdio};
 
-const BIN: &str = env!("CARGO_BIN_EXE_must-lsp");
+const BIN: &str = env!("CARGO_BIN_EXE_must");
 
 fn fixture(name: &str, text: &str) -> std::path::PathBuf {
     let path =
@@ -30,7 +30,7 @@ fn run(args: &[&str]) -> (String, i32) {
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .output()
-        .expect("spawn must-lsp");
+        .expect("spawn must");
     let mut merged = String::from_utf8(output.stdout).expect("stdout is UTF-8");
     merged.push_str(&String::from_utf8(output.stderr).expect("stderr is UTF-8"));
     (merged, output.status.code().expect("exited normally"))
@@ -222,7 +222,7 @@ fn an_ill_typed_entry_expression_compiles_to_a_module_that_traps() {
     // wrong-arity call lowers the way any ill-typed body does — totally,
     // with a trap standing in for the diagnostic — so `compile` still
     // writes a module, and that module traps the instant it runs, the way
-    // `must-lsp run` would fail on the same expression. Not a silent
+    // `must run` would fail on the same expression. Not a silent
     // miscompile: loud, just at a different time than a file-body error.
     let source = fixture(
         "entry-ill-typed",
@@ -274,12 +274,12 @@ static main = fn () -> () {}
 fn missing_arguments_are_usage_errors() {
     let (message, code) = run(&["compile"]);
     assert_eq!(code, 2, "{message}");
-    assert!(message.contains("usage: must-lsp compile"), "{message}");
+    assert!(message.contains("usage: must compile"), "{message}");
 
     let source = fixture("noout", "static main = fn () -> () {}");
     let (message, code) = run(&["compile", source.to_str().unwrap()]);
     assert_eq!(code, 2, "an output path is required: {message}");
-    assert!(message.contains("usage: must-lsp compile"), "{message}");
+    assert!(message.contains("usage: must compile"), "{message}");
     let _ = std::fs::remove_file(&source);
 
     let (message, code) = run(&["compile", "/nonexistent/nope.must", "-o", "/tmp/x.wasm"]);

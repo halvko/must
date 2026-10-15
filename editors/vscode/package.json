@@ -1,7 +1,7 @@
 {
   "name": "must",
   "displayName": "Must",
-  "description": "Must language support: the must-lsp language server and its semantic highlighting",
+  "description": "Must language support: the Must language server and its semantic highlighting",
   "version": "0.0.1",
   "publisher": "halvko",
   "license": "MIT",
@@ -38,7 +38,7 @@
         "must.serverPath": {
           "type": "string",
           "default": "",
-          "markdownDescription": "Path to the `must-lsp` binary. When empty, `must-lsp` on `PATH` is used, then `target/debug/must-lsp` in a workspace folder."
+          "markdownDescription": "Path to the `must` binary. When empty, `must` on `PATH` is used, then `target/debug/must` in a workspace folder."
         }
       }
     },

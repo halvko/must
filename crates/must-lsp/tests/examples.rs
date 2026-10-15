@@ -1,7 +1,7 @@
 //! Regression smoke test over `examples/`: every top-level `.must` file
 //! there must `check` clean (`errors.must` excepted — it is intentionally
 //! dirty) and must `run` — via the invocation(s) its header comment
-//! documents with `// Run: must-lsp run ...`, or the default entry point
+//! documents with `// Run: must run ...`, or the default entry point
 //! when none is documented — without hanging, printing exactly what it
 //! printed the last time its output was verified by eye.
 //!
@@ -22,7 +22,7 @@ use std::time::{Duration, Instant};
 
 use expect_test::{Expect, expect};
 
-const BIN: &str = env!("CARGO_BIN_EXE_must-lsp");
+const BIN: &str = env!("CARGO_BIN_EXE_must");
 
 /// Generous, but not infinite: every example here runs in well under a
 /// second normally, so a few seconds of slack catches only genuine hangs.
@@ -96,7 +96,7 @@ fn every_example_file_has_smoke_coverage() {
     );
 }
 
-/// Spawn `must-lsp <args>` from the workspace root and poll for
+/// Spawn `must <args>` from the workspace root and poll for
 /// completion rather than blocking on `wait`, so a wedged child can be
 /// killed and reported instead of hanging the test process forever.
 /// `label` identifies the invocation in the panic message only.
@@ -108,7 +108,7 @@ fn spawn_with_timeout(args: &[&str], label: &str) -> (String, String, i32) {
 /// (written up front, then the handle is dropped/closed so a `read_line`
 /// loop sees genuine end-of-input) — the real-process mirror of
 /// `runner::tests::check_with_input`'s in-process injection, exercising the
-/// actual `must-lsp run program.must < input.txt` contract.
+/// actual `must run program.must < input.txt` contract.
 fn spawn_with_timeout_input(
     args: &[&str],
     label: &str,
@@ -126,7 +126,7 @@ fn spawn_with_timeout_input(
     if input.is_some() {
         command.stdin(Stdio::piped());
     }
-    let mut child = command.spawn().expect("spawn must-lsp");
+    let mut child = command.spawn().expect("spawn must");
 
     if let Some(input) = input {
         use std::io::Write;
@@ -180,7 +180,7 @@ fn spawn_with_timeout_input(
     (stdout, stderr, code)
 }
 
-/// `must-lsp check examples/<file>`: assert the combined diagnostics text
+/// `must check examples/<file>`: assert the combined diagnostics text
 /// (stdout: rendered diagnostics; stderr: the summary line) and exit code
 /// match. Every example except `errors.must` is expected clean (empty
 /// output, exit 0); `errors.must` is intentionally dirty and pins its
@@ -189,35 +189,26 @@ fn assert_check(file: &str, want_code: i32, want: Expect) {
     let rel = format!("examples/{file}");
     let label = format!("check {rel}");
     let (stdout, stderr, code) = spawn_with_timeout(&["check", &rel], &label);
-    assert_eq!(
-        code, want_code,
-        "unexpected exit code from `must-lsp {label}`"
-    );
+    assert_eq!(code, want_code, "unexpected exit code from `must {label}`");
     want.assert_eq(&format!("{stdout}{stderr}"));
 }
 
-/// One documented (or default) `must-lsp run ...` invocation: assert
+/// One documented (or default) `must run ...` invocation: assert
 /// stdout and exit code match. `args` is the full argument list after the
 /// binary name, e.g. `["run", "examples/loops.must", "-e", "sum_to(10)"]`.
 fn assert_run(args: &[&str], want_code: i32, want: Expect) {
     let label = args.join(" ");
     let (stdout, _stderr, code) = spawn_with_timeout(args, &label);
-    assert_eq!(
-        code, want_code,
-        "unexpected exit code from `must-lsp {label}`"
-    );
+    assert_eq!(code, want_code, "unexpected exit code from `must {label}`");
     want.assert_eq(&stdout);
 }
 
 /// [`assert_run`], with `input` piped to the child's stdin — the real-CLI
-/// exercise of `must-lsp run program.must < input.txt`.
+/// exercise of `must run program.must < input.txt`.
 fn assert_run_with_input(args: &[&str], input: &str, want_code: i32, want: Expect) {
     let label = args.join(" ");
     let (stdout, _stderr, code) = spawn_with_timeout_input(args, &label, Some(input));
-    assert_eq!(
-        code, want_code,
-        "unexpected exit code from `must-lsp {label}`"
-    );
+    assert_eq!(code, want_code, "unexpected exit code from `must {label}`");
     want.assert_eq(&stdout);
 }
 
@@ -680,8 +671,8 @@ fn display_runs() {
 
 #[test]
 fn errors_runs() {
-    // No `must-lsp run ...` invocation is documented (its header only
-    // documents `must-lsp check`), so this is the default entry. The file
+    // No `must run ...` invocation is documented (its header only
+    // documents `must check`), so this is the default entry. The file
     // defines no `main`, so running it (rather than checking it) traps
     // immediately on the synthetic entry expression.
     assert_run(&["run", "examples/errors.must"], 1, expect![[r#""#]]);

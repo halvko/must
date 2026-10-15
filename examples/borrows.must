@@ -1,6 +1,6 @@
 // Safe borrows and regions.
 //
-// Run: must-lsp run examples/borrows.must
+// Run: must run examples/borrows.must
 //
 // A borrow is spelled POSTFIX, like every other place adaptor: `x.&` is a
 // shared borrow, `x.&mut` an exclusive one, and `r.*` reads through either.
