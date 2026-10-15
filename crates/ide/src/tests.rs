@@ -6717,7 +6717,7 @@ static main = fn { let _y: str = g(1, "a"); };
         .into_iter()
         .find(|d| {
             d.message
-                .starts_with("cannot infer the type of `g` across items")
+                .starts_with("not enough information to infer the type of `g`")
         })
         .expect("has the needs-annotation diagnostic");
     let fix = diagnostic.fix.expect("diagnostic has a fix");

@@ -278,15 +278,16 @@ pub enum InferenceDiagnostic {
         expected: usize,
         found: usize,
     },
-    /// A use of an item whose signature can't be determined because its
-    /// definition lacks annotations. Permanent for exported symbols (their
-    /// contract must be written); interprocedural inference will lift it
-    /// for private items. See [`signature_needs_annotation`].
+    /// A use of an item whose signature its group left open (T11). See
+    /// [`signature_needs_annotation`].
     NeedsAnnotation {
         /// The referencing expression.
         expr: ExprId,
         /// The item whose type couldn't be inferred.
         item: ItemLoc,
+        /// Whether the use is in a generic body, whose calls never fill a
+        /// group's holes.
+        generic_caller: bool,
     },
     /// An assignment whose target is (or is a chain of field accesses
     /// rooted at) a local declared without `mut` — mutability is transitive
@@ -1802,15 +1803,24 @@ impl InferenceDiagnostic {
             InferenceDiagnostic::ArgCountMismatch {
                 expected, found, ..
             } => format!("expected {expected} argument(s), found {found}"),
-            InferenceDiagnostic::NeedsAnnotation { item, .. } => {
+            InferenceDiagnostic::NeedsAnnotation {
+                item,
+                generic_caller,
+                ..
+            } => {
                 let display = if item.name.is_empty() {
                     "this item"
                 } else {
                     &item.name
                 };
+                let why = if *generic_caller {
+                    " (calls from a generic function don't fill in its holes)"
+                } else {
+                    ""
+                };
                 format!(
-                    "cannot infer the type of `{display}` across items; \
-                     add a type annotation to its definition"
+                    "not enough information to infer the type of `{display}`; \
+                     add a type annotation to its definition{why}"
                 )
             }
             InferenceDiagnostic::AssignToImmutable { name, place, .. } => {
@@ -3997,6 +4007,9 @@ impl<'a, 'db> InferCtx<'a, 'db> {
                                     InferenceDiagnostic::NeedsAnnotation {
                                         expr,
                                         item: loc.clone(),
+                                        generic_caller: self.own_item.as_ref().is_some_and(|own| {
+                                            crate::is_generic_body(self.db, own.to_id(self.db))
+                                        }),
                                     },
                                 );
                             }

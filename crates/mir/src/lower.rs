@@ -3012,6 +3012,7 @@ impl LowerCtx<'_> {
                         InferenceDiagnostic::NeedsAnnotation {
                             expr: root,
                             item: loc.clone(),
+                            generic_caller: hir::is_generic_body(self.db, self.item),
                         }
                         .message()
                     } else {

@@ -777,7 +777,7 @@ static main = fn { let f = id; };
               _1: fn({error}) -> {error}
               _2: fn({error}) -> {error}  // f
               bb0:
-                _1 = trap "cannot infer the type of `id` across items; add a type annotation to its definition" -> bb1
+                _1 = trap "not enough information to infer the type of `id`; add a type annotation to its definition" -> bb1
               bb1:
                 _2 = _1
                 _0 = ()

@@ -731,7 +731,7 @@ static id = fn (x) { x };
 static main = fn { id; };
 "#,
         expect![[r#"
-            46..48: cannot infer the type of `id` across items; add a type annotation to its definition (defined here at 8..10)
+            46..48: not enough information to infer the type of `id`; add a type annotation to its definition (defined here at 8..10)
         "#]],
     );
 }
@@ -750,9 +750,9 @@ static y = if c { 1 } else { x(2) };
 static x = y;
 "#,
         expect![[r#"
-            47..48: cannot infer the type of `x` across items; add a type annotation to its definition (defined here at 62..63)
+            47..48: not enough information to infer the type of `x`; add a type annotation to its definition (defined here at 62..63)
             47..48: cannot call a value in a const context; whether it is a `const fn` is not known from its type (this item's initializer is a const context at 18..24)
-            66..67: cannot infer the type of `y` across items; add a type annotation to its definition (defined here at 25..26)
+            66..67: not enough information to infer the type of `y`; add a type annotation to its definition (defined here at 25..26)
         "#]],
     );
 }
@@ -837,7 +837,7 @@ static id: _ = fn (x) { x };
 static main = fn { id; };
 "#,
         expect![[r#"
-            49..51: cannot infer the type of `id` across items; add a type annotation to its definition (defined here at 8..10)
+            49..51: not enough information to infer the type of `id`; add a type annotation to its definition (defined here at 8..10)
         "#]],
     );
 }
@@ -2533,7 +2533,7 @@ static s: struct { x: usize, y: _ } = panic("boom");
 static main = fn { s; };
 "#,
         expect![[r#"
-            73..74: cannot infer the type of `s` across items; add a type annotation to its definition (defined here at 8..9)
+            73..74: not enough information to infer the type of `s`; add a type annotation to its definition (defined here at 8..9)
         "#]],
     );
 
@@ -6049,7 +6049,7 @@ static g = fn (x) -> Option::<_> { ::Some(x) };
 static main = fn () -> () { g(1); };
 "#,
         expect![[r#"
-            120..121: cannot infer the type of `g` across items; add a type annotation to its definition (defined here at 51..52)
+            120..121: not enough information to infer the type of `g`; add a type annotation to its definition (defined here at 51..52)
         "#]],
     );
 }
@@ -6067,7 +6067,7 @@ static main = fn () -> () {
 };
 "#,
         expect![[r#"
-            78..79: cannot infer the type of `g` across items; add a type annotation to its definition (defined here at 8..9)
+            78..79: not enough information to infer the type of `g`; add a type annotation to its definition (defined here at 8..9)
         "#]],
     );
 }
@@ -6086,14 +6086,14 @@ static main = fn () -> () {
 "#,
         expect![[r#"
             21..22: a safe borrow must name its region (`T.&::<@a>`); regions are not elided in a signature yet
-            89..90: cannot infer the type of `g` across items; add a type annotation to its definition (defined here at 8..9)
+            89..90: not enough information to infer the type of `g`; add a type annotation to its definition (defined here at 8..9)
         "#]],
     );
 }
 
 /// A qualified variant mention whose type parameter only the signature's
 /// hole leaves open reports nothing: the hole is reported where the item
-/// is used across items.
+/// is used by another item.
 #[test]
 fn signature_hole_shared_with_a_qualified_mention_is_not_blamed_on_it() {
     check_diagnostics(
@@ -6104,7 +6104,7 @@ static none = fn () -> Option::<_> { Option::None };
 static main = fn () -> () { some(1); };
 "#,
         expect![[r#"
-            182..186: cannot infer the type of `some` across items; add a type annotation to its definition (defined here at 51..55)
+            182..186: not enough information to infer the type of `some`; add a type annotation to its definition (defined here at 51..55)
         "#]],
     );
 }
@@ -6123,7 +6123,7 @@ static main = fn () -> usize {
 };
 "#,
         expect![[r#"
-            118..119: cannot infer the type of `g` across items; add a type annotation to its definition (defined here at 51..52)
+            118..119: not enough information to infer the type of `g`; add a type annotation to its definition (defined here at 51..52)
         "#]],
     );
 }
@@ -6515,7 +6515,7 @@ fn addr_of_mut_of_a_static_is_reserved() {
         "static s = 7;\nstatic main = fn { let p = s.&raw mut; };",
         expect![[r#"
             11..12: cannot infer the type of this number: it has no defining use — add a type annotation
-            41..42: cannot infer the type of `s` across items; add a type annotation to its definition (defined here at 7..8)
+            41..42: not enough information to infer the type of `s`; add a type annotation to its definition (defined here at 7..8)
             41..42: cannot take `.&raw mut` of `s`: `static mut` is not supported yet (`s` is defined here at 7..8)
         "#]],
     );
@@ -6528,8 +6528,8 @@ fn addr_of_shared_of_items_is_fine() {
         expect![[r#"
             11..12: cannot infer the type of this number: it has no defining use — add a type annotation
             24..25: cannot infer the type of this number: it has no defining use — add a type annotation
-            54..55: cannot infer the type of `s` across items; add a type annotation to its definition (defined here at 7..8)
-            70..71: cannot infer the type of `c` across items; add a type annotation to its definition (defined here at 20..21)
+            54..55: not enough information to infer the type of `s`; add a type annotation to its definition (defined here at 7..8)
+            70..71: not enough information to infer the type of `c`; add a type annotation to its definition (defined here at 20..21)
         "#]],
     );
 }
@@ -9006,7 +9006,7 @@ fn unannotated_static_number_reports_no_defining_use_too() {
         "static x = 3;\nstatic f = fn { let y = x; };",
         expect![[r#"
             11..12: cannot infer the type of this number: it has no defining use — add a type annotation
-            38..39: cannot infer the type of `x` across items; add a type annotation to its definition (defined here at 7..8)
+            38..39: not enough information to infer the type of `x`; add a type annotation to its definition (defined here at 7..8)
         "#]],
     );
 }
@@ -10070,7 +10070,7 @@ static main = fn (n: usize) -> usize { id(n); show(missing); 0 };
     check_diagnostics(
         text,
         expect![[r#"
-            101..105: cannot infer the type of `show` across items; add a type annotation to its definition (defined here at 34..38)
+            101..105: not enough information to infer the type of `show`; add a type annotation to its definition (defined here at 34..38)
             106..113: unresolved name `missing`
         "#]],
     );
@@ -10100,7 +10100,7 @@ trait Size = requires { size: fn(Self) -> usize; } with {
         text,
         expect![[r#"
             122..126: unknown type `Nope`
-            184..188: cannot infer the type of `show` across items; add a type annotation to its definition (defined here at 34..38)
+            184..188: not enough information to infer the type of `show`; add a type annotation to its definition (defined here at 34..38)
         "#]],
     );
 }
@@ -10153,8 +10153,8 @@ static c = fn () -> usize { a };
         b_first,
         expect![[r#"
             12..19: unresolved name `missing`
-            52..53: cannot infer the type of `a` across items; add a type annotation to its definition (defined here at 8..9)
-            86..87: cannot infer the type of `a` across items; add a type annotation to its definition (defined here at 8..9)
+            52..53: not enough information to infer the type of `a`; add a type annotation to its definition (defined here at 8..9)
+            86..87: not enough information to infer the type of `a`; add a type annotation to its definition (defined here at 8..9)
         "#]],
     );
     let c_first = r#"
@@ -10174,8 +10174,8 @@ static b = fn () -> () { print(a) };
         c_first,
         expect![[r#"
             12..19: unresolved name `missing`
-            49..50: cannot infer the type of `a` across items; add a type annotation to its definition (defined here at 8..9)
-            85..86: cannot infer the type of `a` across items; add a type annotation to its definition (defined here at 8..9)
+            49..50: not enough information to infer the type of `a`; add a type annotation to its definition (defined here at 8..9)
+            85..86: not enough information to infer the type of `a`; add a type annotation to its definition (defined here at 8..9)
         "#]],
     );
 }
@@ -10204,8 +10204,8 @@ static h = fn () -> str { f() };
         g_first,
         expect![[r#"
             20..27: unresolved name `missing`
-            59..60: cannot infer the type of `f` across items; add a type annotation to its definition (defined here at 8..9)
-            92..93: cannot infer the type of `f` across items; add a type annotation to its definition (defined here at 8..9)
+            59..60: not enough information to infer the type of `f`; add a type annotation to its definition (defined here at 8..9)
+            92..93: not enough information to infer the type of `f`; add a type annotation to its definition (defined here at 8..9)
         "#]],
     );
     let h_first = r#"
@@ -10225,8 +10225,8 @@ static g = fn () -> usize { f() };
         h_first,
         expect![[r#"
             20..27: unresolved name `missing`
-            57..58: cannot infer the type of `f` across items; add a type annotation to its definition (defined here at 8..9)
-            92..93: cannot infer the type of `f` across items; add a type annotation to its definition (defined here at 8..9)
+            57..58: not enough information to infer the type of `f`; add a type annotation to its definition (defined here at 8..9)
+            92..93: not enough information to infer the type of `f`; add a type annotation to its definition (defined here at 8..9)
         "#]],
     );
 }
@@ -10305,8 +10305,8 @@ static main = fn () -> usize { g(1) };
     check_diagnostics(
         text,
         expect![[r#"
-            46..47: cannot infer the type of `g` across items; add a type annotation to its definition (defined here at 8..9)
-            113..114: cannot infer the type of `g` across items; add a type annotation to its definition (defined here at 8..9)
+            46..47: not enough information to infer the type of `g`; add a type annotation to its definition (defined here at 8..9)
+            113..114: not enough information to infer the type of `g`; add a type annotation to its definition (defined here at 8..9)
         "#]],
     );
 }
@@ -10333,10 +10333,10 @@ static h = fn () -> str { a() };
     check_diagnostics(
         caller_first,
         expect![[r#"
-            20..21: cannot infer the type of `f` across items; add a type annotation to its definition (defined here at 34..35)
+            20..21: not enough information to infer the type of `f`; add a type annotation to its definition (defined here at 34..35)
             46..53: unresolved name `missing`
-            85..86: cannot infer the type of `a` across items; add a type annotation to its definition (defined here at 8..9)
-            118..119: cannot infer the type of `a` across items; add a type annotation to its definition (defined here at 8..9)
+            85..86: not enough information to infer the type of `a`; add a type annotation to its definition (defined here at 8..9)
+            118..119: not enough information to infer the type of `a`; add a type annotation to its definition (defined here at 8..9)
         "#]],
     );
     let callee_first = r#"
@@ -10358,9 +10358,9 @@ static h = fn () -> str { a() };
         callee_first,
         expect![[r#"
             20..27: unresolved name `missing`
-            50..51: cannot infer the type of `f` across items; add a type annotation to its definition (defined here at 8..9)
-            85..86: cannot infer the type of `a` across items; add a type annotation to its definition (defined here at 38..39)
-            118..119: cannot infer the type of `a` across items; add a type annotation to its definition (defined here at 38..39)
+            50..51: not enough information to infer the type of `f`; add a type annotation to its definition (defined here at 8..9)
+            85..86: not enough information to infer the type of `a`; add a type annotation to its definition (defined here at 38..39)
+            118..119: not enough information to infer the type of `a`; add a type annotation to its definition (defined here at 38..39)
         "#]],
     );
 }
@@ -10385,7 +10385,7 @@ static g = fn () -> str { f(1, 2) };
         text,
         expect![[r#"
             26..33: unresolved name `missing`
-            69..70: cannot infer the type of `f` across items; add a type annotation to its definition (defined here at 8..9)
+            69..70: not enough information to infer the type of `f`; add a type annotation to its definition (defined here at 8..9)
             69..76: expected 1 argument(s), found 2 (`f` is defined here at 8..9)
             69..76: type mismatch: expected `str`, found `bool` (expected `str` because of this return type at 60..66)
         "#]],
@@ -10459,8 +10459,8 @@ static main = fn () -> usize { f(1) };
         f_first,
         expect![[r#"
             26..33: unresolved name `missing`
-            35..36: cannot infer the type of `h` across items; add a type annotation to its definition (defined here at 50..51)
-            99..100: cannot infer the type of `f` across items; add a type annotation to its definition (defined here at 8..9)
+            35..36: not enough information to infer the type of `h`; add a type annotation to its definition (defined here at 50..51)
+            99..100: not enough information to infer the type of `f`; add a type annotation to its definition (defined here at 8..9)
         "#]],
     );
     let h_first = r#"
@@ -10480,8 +10480,8 @@ static main = fn () -> usize { f(1) };
         h_first,
         expect![[r#"
             51..58: unresolved name `missing`
-            60..61: cannot infer the type of `h` across items; add a type annotation to its definition (defined here at 8..9)
-            99..100: cannot infer the type of `f` across items; add a type annotation to its definition (defined here at 33..34)
+            60..61: not enough information to infer the type of `h`; add a type annotation to its definition (defined here at 8..9)
+            99..100: not enough information to infer the type of `f`; add a type annotation to its definition (defined here at 33..34)
         "#]],
     );
 }
@@ -10641,10 +10641,10 @@ static name = fn () { "bob" };
     check_diagnostics(
         check_first,
         expect![[r#"
-        24..25: cannot infer the type of `a` across items; add a type annotation to its definition (defined here at 46..47)
-        29..33: cannot infer the type of `name` across items; add a type annotation to its definition (defined here at 66..70)
-        50..57: unresolved name `missing`
-    "#]],
+            24..25: not enough information to infer the type of `a`; add a type annotation to its definition (defined here at 46..47)
+            29..33: not enough information to infer the type of `name`; add a type annotation to its definition (defined here at 66..70)
+            50..57: unresolved name `missing`
+        "#]],
     );
     let a_first = r#"
 static a = missing;
@@ -10662,9 +10662,9 @@ static name = fn () { "bob" };
     check_diagnostics(
         a_first,
         expect![[r#"
-        12..19: unresolved name `missing`
-        44..45: cannot infer the type of `a` across items; add a type annotation to its definition (defined here at 8..9)
-    "#]],
+            12..19: unresolved name `missing`
+            44..45: not enough information to infer the type of `a`; add a type annotation to its definition (defined here at 8..9)
+        "#]],
     );
 }
 
@@ -11015,7 +11015,7 @@ static id = fn (x) { x };
 static wrap = fn::<T>(t: T) -> T { id(t) };
 "#,
         expect![[r#"
-            62..64: cannot infer the type of `id` across items; add a type annotation to its definition (defined here at 8..10)
+            62..64: not enough information to infer the type of `id`; add a type annotation to its definition (calls from a generic function don't fill in its holes) (defined here at 8..10)
         "#]],
     );
 }
@@ -11034,7 +11034,7 @@ type W = struct::<T> { t: T } with {
 };
 "#,
         expect![[r#"
-            116..118: cannot infer the type of `id` across items; add a type annotation to its definition (defined here at 8..10)
+            116..118: not enough information to infer the type of `id`; add a type annotation to its definition (calls from a generic function don't fill in its holes) (defined here at 8..10)
         "#]],
     );
 }
