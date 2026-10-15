@@ -27,7 +27,7 @@ impl zed::Extension for MustExtension {
     ) -> zed::Result<zed::Command> {
         Ok(zed::Command {
             command: server_path(worktree),
-            args: Vec::new(),
+            args: vec!["lsp".to_owned()],
             // Shell env so MUST_LSP_LOG reaches the server.
             env: worktree.shell_env(),
         })

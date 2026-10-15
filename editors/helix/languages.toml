@@ -33,6 +33,7 @@
 
 [language-server.must-lsp]
 command = "must"
+args = ["lsp"]
 # Server logs (a `tracing` env-filter) go to Helix's log file (`hx --log`):
 # environment = { MUST_LSP_LOG = "must_lsp=debug" }
 

@@ -54,6 +54,57 @@ fn help_exits_zero_and_usage_errors_exit_two() {
 }
 
 #[test]
+fn a_bare_invocation_is_a_usage_error_not_a_server() {
+    let output = Command::new(BIN)
+        .stdin(Stdio::null())
+        .output()
+        .expect("spawn must");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert_eq!(output.status.code(), Some(2), "{stderr}");
+    assert!(output.stdout.is_empty(), "nothing on stdout: {output:?}");
+    assert!(stderr.starts_with("error: no subcommand given"), "{stderr}");
+    assert!(stderr.contains("try `must --help`"), "{stderr}");
+}
+
+/// Frame one JSON-RPC message the way LSP's base protocol does.
+fn lsp_frame(json: &str) -> String {
+    format!("Content-Length: {}\r\n\r\n{json}", json.len())
+}
+
+#[test]
+fn lsp_serves_and_exits_cleanly() {
+    let mut child = Command::new(BIN)
+        .arg("lsp")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("spawn must lsp");
+    let session = [
+        r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"capabilities":{}}}"#,
+        r#"{"jsonrpc":"2.0","method":"initialized","params":{}}"#,
+        r#"{"jsonrpc":"2.0","id":2,"method":"shutdown"}"#,
+        r#"{"jsonrpc":"2.0","method":"exit"}"#,
+    ]
+    .map(lsp_frame)
+    .concat();
+    // Dropping stdin after the write closes it, as an editor does on exit.
+    child
+        .stdin
+        .take()
+        .expect("piped stdin")
+        .write_all(session.as_bytes())
+        .expect("write the session");
+    let output = child.wait_with_output().expect("wait for must lsp");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert_eq!(output.status.code(), Some(0), "{stdout}");
+    assert!(
+        stdout.contains(r#""capabilities""#),
+        "initialize is answered with the server's capabilities:\n{stdout}"
+    );
+}
+
+#[test]
 fn program_output_precedes_the_crash_report() {
     // The regression this pins: `print` appends no newline, so a program
     // that crashes mid-line leaves its output in stdout's line buffer.
