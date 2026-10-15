@@ -1,15 +1,15 @@
 # Must support for Helix. Helix has no extension system: append this to
 # ~/.config/helix/languages.toml (or `.helix/languages.toml` in a project).
 #
-# `command` assumes `must-lsp` on PATH (`cargo install --path crates/must-lsp`).
+# `command` assumes `must` on PATH (`cargo install --path crates/must-lsp`).
 # To dogfood a local build instead, point both `command`s at
-# <this repo>/target/debug/must-lsp (absolute path; Helix does not expand
+# <this repo>/target/debug/must (absolute path; Helix does not expand
 # `~` or resolve relative paths against the workspace).
 #
 # What Helix gets from the server: diagnostics, hover, goto-definition,
 # completions (snippets included), code actions, and the debug adapter.
 # What it cannot get: the ▶ run lenses (Helix has no code-lens support).
-# Run a file from the shell instead: `must-lsp run path/to/file.must`.
+# Run a file from the shell instead: `must run path/to/file.must`.
 #
 # Highlighting and indentation come from the tree-sitter grammar at the
 # bottom of this file; Helix has no LSP semantic tokens. It needs Helix
@@ -32,7 +32,7 @@
 # `hx --grammar build` after every `npm run generate`.
 
 [language-server.must-lsp]
-command = "must-lsp"
+command = "must"
 # Server logs (a `tracing` env-filter) go to Helix's log file (`hx --log`):
 # environment = { MUST_LSP_LOG = "must_lsp=debug" }
 
@@ -54,7 +54,7 @@ indent = { tab-width = 4, unit = "    " }
 [language.debugger]
 name = "must"
 transport = "stdio"
-command = "must-lsp"
+command = "must"
 args = ["dap"]
 quirks = { absolute-paths = true }
 

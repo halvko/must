@@ -1,6 +1,6 @@
 // must-wasm.js — the shared engine behind tools/wasm-run.mjs (a Node CLI)
 // and tools/playground.html (a browser page): compile and run a module
-// `must-lsp compile` produced, decoding its trap table when it doesn't
+// `must compile` produced, decoding its trap table when it doesn't
 // return cleanly. No dependencies beyond the WebAssembly and TextDecoder
 // globals every JS host already has.
 //
@@ -69,7 +69,7 @@ function parseTraps(mod) {
 //
 // The backend exports exactly one function, `main`
 // (`codegen_wasm::ENTRY_EXPORT`) — the entry expression is chosen at
-// compile time with `must-lsp compile -e <expression>`, default `main()` —
+// compile time with `must compile -e <expression>`, default `main()` —
 // so there is no entry name to pass in here.
 //
 // `onPrint(text)` fires once per `must.print` call, in order. Returns a

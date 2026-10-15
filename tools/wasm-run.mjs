@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// wasm-run.mjs — run a `must-lsp compile`d WebAssembly module from a plain
+// wasm-run.mjs — run a `must compile`d WebAssembly module from a plain
 // Node process. No dependencies beyond Node itself and ./must-wasm.js.
 //
 // Usage:
@@ -13,7 +13,7 @@
 //   - calls the module's one exported function, `main`
 //     (`codegen_wasm::ENTRY_EXPORT` — see crates/codegen-wasm/src/lib.rs;
 //     the backend exports exactly one function, chosen at compile time
-//     with `must-lsp compile -e <expression>`, default `main()`);
+//     with `must compile -e <expression>`, default `main()`);
 //   - on a clean return, prints the result: nothing for a unit (zero-slot)
 //     result, otherwise the raw `i64` slot(s) the ABI returns — there is no
 //     type information in a `.wasm` file alone, so this is a "RAW"
@@ -124,7 +124,7 @@ async function main() {
 
   // A clean return. `result` are the raw `i64` ABI slots rendered as
   // strings — there is no type in a `.wasm` file to render them against,
-  // so an empty result (unit) prints nothing, matching `must-lsp run`'s
+  // so an empty result (unit) prints nothing, matching `must run`'s
   // own silence on `()`, and any slots print as plain numbers rather than
   // a typed `Display`.
   if (json) {

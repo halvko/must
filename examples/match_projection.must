@@ -1,7 +1,7 @@
 // Matching a BORROW: `match` projects through it.
 //
-// Run: must-lsp run examples/match_projection.must
-// Run: must-lsp run examples/match_projection.must -e project_in_demo()
+// Run: must run examples/match_projection.must
+// Run: must run examples/match_projection.must -e project_in_demo()
 //
 // The rule is one sentence: matching a borrow binds payload BORROWS;
 // matching an owned place copies or moves, exactly as it always did. There

@@ -3,6 +3,12 @@ name = "must-lsp"
 version.workspace = true
 edition.workspace = true
 
+# The binary is the whole toolchain (server, runner, checker, compiler,
+# debug adapter), so it is named for the language, not for the server.
+[[bin]]
+name = "must"
+path = "src/main.rs"
+
 [dependencies]
 ide.workspace = true
 base-db.workspace = true

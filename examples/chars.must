@@ -9,7 +9,7 @@
 // string. There is no Iterator yet, so the `loop`/`match` below is the
 // whole idiom for walking a string, exactly as it is for draining stdin.
 //
-// Run: printf '(a(b)c)\n(()\n' | must-lsp run examples/chars.must
+// Run: printf '(a(b)c)\n(()\n' | must run examples/chars.must
 //
 // An Advent-of-Code-shaped demo: read every line, add one for each `(` and
 // subtract one for each `)`, and print where the running total ends up.

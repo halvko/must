@@ -6,9 +6,9 @@
 // `struct { x = 1 }` builds one, `struct { x: usize = 1 }` spells both
 // halves, and shorthand `struct { x }` means `struct { x = x }`.
 //
-// Run: must-lsp run examples/records.must -e 'sum_pair'    (=> 0)
-// Run: must-lsp run examples/records.must -e 'moved'       (=> { x = 5, y = 0 })
-// Run: must-lsp run examples/records.must -e 'same_point'  (=> true)
+// Run: must run examples/records.must -e 'sum_pair'    (=> 0)
+// Run: must run examples/records.must -e 'moved'       (=> { x = 5, y = 0 })
+// Run: must run examples/records.must -e 'same_point'  (=> true)
 
 // A plain record type is structural: no name, exact field match required —
 // `struct { x: usize, y: usize }` and `struct { y: usize, x: usize }` are

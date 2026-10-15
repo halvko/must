@@ -2321,18 +2321,18 @@ the program rather than returning: `ReadLineResult` has no error arm.
 message shape (const evaluation cannot have side effects) — see
 `examples/errors.must`.
 
-`must-lsp run` wires real, locked, line-buffered stdin through to a running
+`must run` wires real, locked, line-buffered stdin through to a running
 program, so the ordinary pipe invocation works:
 
 ```
-printf 'a\nb\nc\n' | must-lsp run examples/stdin.must
+printf 'a\nb\nc\n' | must run examples/stdin.must
 ```
 
 For a file, redirection is the way to feed it — same wiring, no producer
 process needed:
 
 ```
-must-lsp run program.must < input.txt
+must run program.must < input.txt
 ```
 
 A prompt written with no trailing newline still reaches the terminal before
@@ -2634,7 +2634,7 @@ second iteration disposed of something already gone.
 
 A compiled module's imports are `must.print(ptr, len)` plus whatever
 `extern static` declarations the program itself made, and it exports one
-function, `main` (the entry expression compiled in, chosen with `must-lsp
+function, `main` (the entry expression compiled in, chosen with `must
 compile -e <expression>`, default `main()`). Two tools in `tools/` run one:
 `wasm-run.mjs` from the command line, `playground.html` by opening it in a
 browser and dropping the file on it — `file://` works, no server needed.
@@ -2645,7 +2645,7 @@ modules as-is.
 
 On a clean return both print the raw ABI result slots — a `.wasm` file
 carries no type information, so this is not the typed `Display`
-`must-lsp run` gives. On a trap both decode which one fired and why, from
+`must run` gives. On a trap both decode which one fired and why, from
 the module's `trap_code`/`panic_message_*` globals (also read by the
 differential test harness) and its `must.traps` custom section, which
 exists so a host with no access to the compiler can still name the trap.

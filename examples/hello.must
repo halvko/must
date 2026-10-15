@@ -8,7 +8,7 @@
 // literal newline inside a string (strings are multiline) or with the `\n`
 // escape. Both appear below.
 //
-// Run: must-lsp run examples/hello.must
+// Run: must run examples/hello.must
 
 static banner = "+----------------+
 |  Hello, Must!  |

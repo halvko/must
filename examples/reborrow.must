@@ -1,7 +1,7 @@
 // Borrow-returning members: `get_or_default` over a two-slot map.
 //
-// Run: must-lsp run examples/reborrow.must
-// Run: must-lsp run examples/reborrow.must -e total_count()
+// Run: must run examples/reborrow.must
+// Run: must run examples/reborrow.must -e total_count()
 //
 // Short, and every line of it needs a piece of the borrow-`Self` story:
 //

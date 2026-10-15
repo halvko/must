@@ -140,7 +140,7 @@ pub struct Analysis {
 
 impl Analysis {
     /// Wraps a database that has no [`AnalysisHost`] of its own — a batch
-    /// tool that built its `RootDatabase` and files directly (`must-lsp
+    /// tool that built its `RootDatabase` and files directly (`must
     /// compile`, checking a file it parsed itself, is the current example)
     /// still gets the full diagnostic pipeline (hir, mir, const-eval)
     /// rather than a hand-rolled subset of it.

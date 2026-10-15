@@ -1,7 +1,7 @@
 // `String` as a LIBRARY — an owned, allocation-backed string whose disposal
 // is enforced by the type system rather than by a destructor.
 //
-// Run: printf 'alpha\r\n\nbeta\ngamma' | must-lsp run examples/string_lib.must
+// Run: printf 'alpha\r\n\nbeta\ngamma' | must run examples/string_lib.must
 //
 // The whole feature is one clause:
 //

@@ -5,7 +5,7 @@
 // is a squiggle, and only an index the checker can't pin down is left to
 // trap at runtime.
 //
-// Run: must-lsp run examples/arrays.must
+// Run: must run examples/arrays.must
 //
 // Arrays of numbers don't print, so this tour computes with them and prints
 // string labels for what it observed.

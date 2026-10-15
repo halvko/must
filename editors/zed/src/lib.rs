@@ -6,13 +6,13 @@ use zed_extension_api::{
 
 struct MustExtension;
 
-/// `must-lsp` on PATH (e.g. `cargo install --path crates/must-lsp`) wins;
+/// `must` on PATH (e.g. `cargo install --path crates/must-lsp`) wins;
 /// otherwise assume the worktree is this repo and use its build output, so
 /// dogfooding works from a plain clone + `cargo build`.
 fn server_path(worktree: &Worktree) -> String {
     worktree
-        .which("must-lsp")
-        .unwrap_or_else(|| format!("{}/target/debug/must-lsp", worktree.root_path()))
+        .which("must")
+        .unwrap_or_else(|| format!("{}/target/debug/must", worktree.root_path()))
 }
 
 impl zed::Extension for MustExtension {

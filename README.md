@@ -10,7 +10,7 @@ You need stable Rust, a C compiler (the workspace builds the tree-sitter
 parser in `editors/tree-sitter-must` to test it) and [Zed](https://zed.dev).
 
 ```sh
-cargo build            # builds target/debug/must-lsp
+cargo build            # builds target/debug/must
 cargo test --workspace # parser snapshots, hir/inference, in-process LSP tests
 ```
 
@@ -43,8 +43,8 @@ Then install the editor extension once:
    parameter). `"full"` shows the server's tokens alone and leaves those
    plain; `"off"` shows tree-sitter alone.
 
-The extension finds the server by looking for `must-lsp` on PATH first, then
-falling back to `<worktree>/target/debug/must-lsp` — so opening this repo
+The extension finds the server by looking for `must` on PATH first, then
+falling back to `<worktree>/target/debug/must` — so opening this repo
 Just Works after `cargo build`. After rebuilding the server, restart it with
 `editor: restart language server` (no extension reinstall needed).
 
@@ -68,8 +68,8 @@ cd editors/vscode && npm ci && npx @vscode/vsce package
 code --install-extension must-*.vsix
 ```
 
-The extension finds the server like the Zed one does: `must-lsp` on PATH,
-then `<workspace folder>/target/debug/must-lsp`; the `must.serverPath`
+The extension finds the server like the Zed one does: `must` on PATH,
+then `<workspace folder>/target/debug/must`; the `must.serverPath`
 setting overrides both. After rebuilding the server, run `Must: Restart
 Server`. VS Code started from the Dock on macOS does not inherit your shell's
 PATH: launch it from a shell, or set `must.serverPath`.
@@ -77,9 +77,9 @@ PATH: launch it from a shell, or set `must.serverPath`.
 ### Helix
 
 Helix has no extension system; `editors/helix/languages.toml` is the whole
-integration. Append it to `~/.config/helix/languages.toml` (with `must-lsp`
+integration. Append it to `~/.config/helix/languages.toml` (with `must`
 on PATH, or edit both `command`s to an absolute path to
-`target/debug/must-lsp`) and check `hx --health must`. Diagnostics, hover,
+`target/debug/must`) and check `hx --health must`. Diagnostics, hover,
 goto-definition, completions, code actions, and the debugger
 (`:debug-start`, same templates as `.zed/debug.json`) all work. What
 doesn't: the ▶ run lenses, since Helix has no code lenses. Run files from
@@ -153,8 +153,8 @@ The same binary runs Must code (the LSP's analysis, MIR, and interpreter —
 no separate toolchain):
 
 ```sh
-must-lsp run examples/hello.must                    # evaluates main()
-must-lsp run examples/functions.must -e 'fib(20)'   # any expression in file scope
+must run examples/hello.must                    # evaluates main()
+must run examples/functions.must -e 'fib(20)'   # any expression in file scope
 ```
 
 It also *compiles* Must code, to a self-contained WebAssembly module with
@@ -162,7 +162,7 @@ no runtime of any kind — no allocator, no collector, no unwinder, no
 support library:
 
 ```sh
-must-lsp compile examples/display.must -o display.wasm
+must compile examples/display.must -o display.wasm
 node tools/wasm-run.mjs display.wasm
 ```
 
@@ -193,7 +193,7 @@ same thing written as a library over a declared `extern` item
 the `forget` capability (`string_lib.must`), walking text character by
 character (`chars.must`), and a generic `Option` with the member shapes
 around it (`option.must`) — plus `errors.must`, an intentionally broken file
-pairing each diagnostic with the exact message `must-lsp check` prints for
+pairing each diagnostic with the exact message `must check` prints for
 it.
 
 Programs run even when they don't typecheck: execution proceeds until it
@@ -250,7 +250,7 @@ crates/
   eval/         the MIR interpreter: const eval (salsa query)
   ide/          editor-agnostic analysis API (diagnostics, hover, goto-def)
   codegen-wasm/ the WebAssembly backend: monomorphization + code emission
-  must-lsp/     the LSP binary: transport + main loop, plus `run`, `compile` and the runner
+  must-lsp/     the `must` binary: LSP transport + main loop, plus `run`, `compile` and the runner
   tree-sitter-agreement/ test-only: the tree-sitter grammar checked against syntax + ide
 editors/zed/ Zed extension (separate workspace; compiled to wasm by Zed)
 editors/helix/ Helix configuration (languages.toml)

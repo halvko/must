@@ -6,12 +6,12 @@
 // higher-order calls: passing a function value as an ordinary argument and
 // calling it from inside the callee.
 //
-// Run: must-lsp run examples/functions.must -e 'fib(20)'                 (=> 6765)
-// Run: must-lsp run examples/functions.must -e 'gcd(1071, 462)'          (=> 21)
-// Run: must-lsp run examples/functions.must -e 'is_even(76)'             (=> true)
-// Run: must-lsp run examples/functions.must -e 'is_odd(76)'              (=> false)
-// Run: must-lsp run examples/functions.must -e 'apply_twice(double, 5)'  (=> 20)
-// Run: must-lsp run examples/functions.must                              (=> FizzBuzz 1..15, then the checks below)
+// Run: must run examples/functions.must -e 'fib(20)'                 (=> 6765)
+// Run: must run examples/functions.must -e 'gcd(1071, 462)'          (=> 21)
+// Run: must run examples/functions.must -e 'is_even(76)'             (=> true)
+// Run: must run examples/functions.must -e 'is_odd(76)'              (=> false)
+// Run: must run examples/functions.must -e 'apply_twice(double, 5)'  (=> 20)
+// Run: must run examples/functions.must                              (=> FizzBuzz 1..15, then the checks below)
 
 // Tree recursion: two recursive calls combined, depth O(n) — comfortably
 // below the interpreter's stack limit.

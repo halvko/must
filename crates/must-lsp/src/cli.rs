@@ -1,4 +1,4 @@
-//! Top-level argument dispatch for the `must-lsp` binary.
+//! Top-level argument dispatch for the `must` binary.
 //!
 //! Deliberately hand-rolled over `std`: the surface is four subcommands and
 //! two flags, and a CLI dependency would buy nothing a `match` doesn't.
@@ -24,15 +24,15 @@ pub enum Command<'a> {
 }
 
 pub const HELP: &str = "\
-must-lsp — the language server and toolchain for Must
+must — the language server and toolchain for Must
 
 USAGE:
-    must-lsp                              Serve LSP over stdio (the default)
-    must-lsp run <file.must> [-e <expr>]  Evaluate an expression in a file's scope
-    must-lsp check <file.must>...         Check files, printing diagnostics as text
-    must-lsp compile <file.must> -o <out.wasm>
+    must                                  Serve LSP over stdio (the default)
+    must run <file.must> [-e <expr>]      Evaluate an expression in a file's scope
+    must check <file.must>...             Check files, printing diagnostics as text
+    must compile <file.must> -o <out.wasm>
                                           Compile to a self-contained WebAssembly module
-    must-lsp dap                          Speak the Debug Adapter Protocol over stdio
+    must dap                              Speak the Debug Adapter Protocol over stdio
 
 OPTIONS:
     -h, --help                            Print this help and exit
@@ -83,7 +83,7 @@ pub fn parse(args: &[String]) -> Command<'_> {
             code: 0,
         },
         "-V" | "--version" => Command::Message {
-            text: format!("must-lsp {}\n", env!("CARGO_PKG_VERSION")),
+            text: format!("must {}\n", env!("CARGO_PKG_VERSION")),
             code: 0,
         },
         // Anything else would previously have started the language server
@@ -96,7 +96,7 @@ pub fn parse(args: &[String]) -> Command<'_> {
                 "unknown subcommand"
             };
             Command::Message {
-                text: format!("error: {what} `{other}`\ntry `must-lsp --help`\n"),
+                text: format!("error: {what} `{other}`\ntry `must --help`\n"),
                 code: 2,
             }
         }
@@ -130,10 +130,10 @@ mod tests {
         };
         assert_eq!(code, 0);
         for expected in [
-            "must-lsp run <file.must>",
-            "must-lsp check <file.must>...",
-            "must-lsp compile <file.must> -o <out.wasm>",
-            "must-lsp dap",
+            "must run <file.must>",
+            "must check <file.must>...",
+            "must compile <file.must> -o <out.wasm>",
+            "must dap",
             "MUST_LSP_LOG",
             "-e, --entry",
             "-o, --output",
@@ -152,7 +152,7 @@ mod tests {
             panic!("--version prints a message");
         };
         assert_eq!(code, 0);
-        assert!(text.starts_with("must-lsp "), "{text}");
+        assert!(text.starts_with("must "), "{text}");
     }
 
     #[test]
@@ -163,7 +163,9 @@ mod tests {
         assert_eq!(code, 2);
         assert_eq!(
             text,
-            "error: unknown subcommand `frobnicate`\ntry `must-lsp --help`\n"
+            r#"error: unknown subcommand `frobnicate`
+try `must --help`
+"#
         );
     }
 
@@ -175,7 +177,9 @@ mod tests {
         assert_eq!(code, 2);
         assert_eq!(
             text,
-            "error: unknown option `--serve-harder`\ntry `must-lsp --help`\n"
+            r#"error: unknown option `--serve-harder`
+try `must --help`
+"#
         );
     }
 

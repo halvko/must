@@ -5,7 +5,7 @@
 //! under the COMPILED WASM, and insist they agree.
 //!
 //! This is not a unit test of the backend's opinion of itself: the
-//! interpreter is the specification (it is what `must-lsp run`, the
+//! interpreter is the specification (it is what `must run`, the
 //! debugger and const eval all execute), so agreement here is the only
 //! evidence that compiling a Must program without a runtime preserves its
 //! meaning.
@@ -56,7 +56,7 @@ pub struct Run {
 }
 
 /// The entry item the runner injects — mirrored here so the harness runs
-/// exactly what `must-lsp run` runs.
+/// exactly what `must run` runs.
 const ENTRY: &str = "__must_entry";
 
 pub fn prepare(db: &RootDatabase, source: &str, entry: &str) -> hir::ItemLoc {
