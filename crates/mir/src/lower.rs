@@ -1724,6 +1724,11 @@ impl LowerCtx<'_> {
             dispatch_on = referent.clone();
         }
 
+        let head = MatchHead {
+            expr,
+            scrut: &scrut,
+            lens,
+        };
         match dispatch_on {
             // The dispatch is keyed on the DECLARATION alone: variant
             // indices (and so tags) are identical across instantiations of
@@ -1731,7 +1736,7 @@ impl LowerCtx<'_> {
             Ty::Named(named)
                 if hir::enum_variants(self.db, named.decl.to_id(self.db)).is_some() =>
             {
-                self.lower_match_switch(b, expr, &scrut, named.decl, arms, lens)
+                self.lower_match_switch(b, &head, named.decl, arms)
             }
             scrut_ty => {
                 let fallback = move || {
@@ -1752,12 +1757,12 @@ impl LowerCtx<'_> {
                     .iter()
                     .any(|arm| matches!(self.arm_kind(arm.pat, None), ArmKind::Literal(_)))
                 {
-                    return self.lower_match_literals(b, expr, &scrut, arms, fallback, lens);
+                    return self.lower_match_literals(b, &head, arms, fallback);
                 }
                 let covering = arms
                     .iter()
                     .position(|arm| matches!(self.arm_kind(arm.pat, None), ArmKind::CatchAll));
-                self.lower_match_straight(b, expr, &scrut, arms, covering, fallback, lens)
+                self.lower_match_straight(b, &head, arms, covering, fallback)
             }
         }
     }
@@ -1770,12 +1775,11 @@ impl LowerCtx<'_> {
     fn lower_match_switch(
         &mut self,
         b: &mut BodyBuilder,
-        expr: ExprId,
-        scrut: &Operand,
+        head: &MatchHead<'_>,
         decl: ItemLoc,
         arms: &[MatchArm],
-        lens: Option<BorrowedScrutinee>,
     ) -> Operand {
+        let MatchHead { expr, scrut, lens } = *head;
         let dest = b.temp(self.ty(expr));
         let arm_blocks: Vec<BlockId> = arms.iter().map(|_| b.new_block()).collect();
         let mut switch_arms: Vec<(u32, BlockId)> = Vec::new();
@@ -1868,7 +1872,7 @@ impl LowerCtx<'_> {
         let join = b.new_block();
         for (arm, &block) in arms.iter().zip(&arm_blocks) {
             b.current = block;
-            self.lower_arm(b, arm, scrut, lens, dest, join, expr);
+            self.lower_arm(b, head, arm, dest, join);
         }
         match edge {
             Otherwise::Arm => {}
@@ -1909,12 +1913,11 @@ impl LowerCtx<'_> {
     fn lower_match_literals(
         &mut self,
         b: &mut BodyBuilder,
-        expr: ExprId,
-        scrut: &Operand,
+        head: &MatchHead<'_>,
         arms: &[MatchArm],
         fallback: impl FnOnce() -> String,
-        lens: Option<BorrowedScrutinee>,
     ) -> Operand {
+        let MatchHead { expr, scrut, lens } = *head;
         let dest = b.temp(self.ty(expr));
         let join = b.new_block();
         // The value the tests compare against, and where to blame the read.
@@ -1957,11 +1960,11 @@ impl LowerCtx<'_> {
                         expr,
                     );
                     b.current = then_block;
-                    self.lower_arm(b, arm, scrut, lens, dest, join, expr);
+                    self.lower_arm(b, head, arm, dest, join);
                     b.current = else_block;
                 }
                 ArmKind::CatchAll => {
-                    self.lower_arm(b, arm, scrut, lens, dest, join, expr);
+                    self.lower_arm(b, head, arm, dest, join);
                     covered = true;
                     break;
                 }
@@ -1980,7 +1983,7 @@ impl LowerCtx<'_> {
         orphans.extend(arms);
         for arm in orphans {
             b.current = b.new_block();
-            self.lower_arm(b, arm, scrut, lens, dest, join, expr);
+            self.lower_arm(b, head, arm, dest, join);
         }
         b.current = join;
         Operand::Copy(dest.into())
@@ -1992,17 +1995,16 @@ impl LowerCtx<'_> {
     fn lower_match_straight(
         &mut self,
         b: &mut BodyBuilder,
-        expr: ExprId,
-        scrut: &Operand,
+        head: &MatchHead<'_>,
         arms: &[MatchArm],
         covering: Option<usize>,
         fallback: impl FnOnce() -> String,
-        lens: Option<BorrowedScrutinee>,
     ) -> Operand {
+        let expr = head.expr;
         let dest = b.temp(self.ty(expr));
         let join = b.new_block();
         match covering {
-            Some(covering) => self.lower_arm(b, &arms[covering], scrut, lens, dest, join, expr),
+            Some(covering) => self.lower_arm(b, head, &arms[covering], dest, join),
             None if self.value_traps.contains_key(&expr) => {
                 // A broken-pattern match: the pending value trap (planted
                 // by the `lower_expr` wrapper) is the whole story.
@@ -2016,25 +2018,24 @@ impl LowerCtx<'_> {
                 continue;
             }
             b.current = b.new_block();
-            self.lower_arm(b, arm, scrut, lens, dest, join, expr);
+            self.lower_arm(b, head, arm, dest, join);
         }
         b.current = join;
         Operand::Copy(dest.into())
     }
 
-    /// Lower one arm of the `match` at `expr` into the current block: the
-    /// binders and the body share a storage scope, the value goes to
-    /// `dest`, then the edge to `join`.
+    /// Lower one arm of the `match` described by `head` into the current
+    /// block: the binders and the body share a storage scope, the value
+    /// goes to `dest`, then the edge to `join`.
     fn lower_arm(
         &mut self,
         b: &mut BodyBuilder,
+        head: &MatchHead<'_>,
         arm: &MatchArm,
-        scrut: &Operand,
-        lens: Option<BorrowedScrutinee>,
         dest: LocalId,
         join: BlockId,
-        expr: ExprId,
     ) {
+        let MatchHead { expr, scrut, lens } = *head;
         b.scopes.push((Scope::Arm, Vec::new()));
         self.bind_match_pattern(b, arm.pat, scrut, arm.body, lens);
         let value = self.lower_expr(b, arm.body);
@@ -3681,6 +3682,16 @@ enum DerefRoot {
     /// An `{error}`-typed receiver: nothing rooted here is ever
     /// observable, so the place is dropped and lowering stays total.
     Silent,
+}
+
+/// The `match` being lowered, as every one of its arms sees it: the
+/// expression to blame, the pinned scrutinee, and the lens when the
+/// scrutinee is a borrow.
+#[derive(Clone, Copy)]
+struct MatchHead<'a> {
+    expr: ExprId,
+    scrut: &'a Operand,
+    lens: Option<BorrowedScrutinee>,
 }
 
 /// A `match` whose scrutinee is a BORROW of the matched enum: the local
