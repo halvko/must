@@ -33,7 +33,7 @@ use rustc_hash::FxHashMap;
 use crate::layout::{self, EqSlot, Unsupported};
 use crate::mono::{CallTarget, InstanceKey, Mono, Refusal};
 use crate::wasm::{FuncBody, ValType};
-use crate::{Strings, TrapKind, Traps};
+use crate::{Strings, TrapKey, TrapKind, Traps};
 
 /// Where a value's slots come from.
 enum Src {
@@ -523,11 +523,9 @@ impl<'a, 'db> Emitter<'a, 'db> {
             if value >= u128::from(len) {
                 // The checker squiggles this; MIR still lowers it, so the
                 // compiled program traps with the same message.
-                let trap = self.traps.intern(
-                    TrapKind::IndexOutOfBounds,
-                    hir::diag::index_out_of_bounds(u128::from(len), value),
-                    true,
-                );
+                let trap = self
+                    .traps
+                    .intern_key(TrapKey::IndexConstant { len, index: value });
                 self.trap(ctx, trap);
                 return Ok(match src {
                     Src::Locals(base) => *base,
@@ -572,11 +570,7 @@ impl<'a, 'db> Emitter<'a, 'db> {
         ctx.body.i64_ge_u();
         ctx.body.if_void();
         ctx.depth += 1;
-        let trap = self.traps.intern(
-            TrapKind::IndexOutOfBounds,
-            format!("index out of bounds: the length is {len} but the index is "),
-            false,
-        );
+        let trap = self.traps.intern_key(TrapKey::IndexDynamic { len });
         self.trap(ctx, trap);
         ctx.depth -= 1;
         ctx.body.end();
@@ -623,11 +617,9 @@ impl<'a, 'db> Emitter<'a, 'db> {
                         .map_err(|err| self.refuse(ctx, err, origin))?;
                     if let Some(value) = self.const_int(ctx, index)? {
                         if value >= u128::from(len) {
-                            let trap = self.traps.intern(
-                                TrapKind::IndexOutOfBounds,
-                                hir::diag::index_out_of_bounds(u128::from(len), value),
-                                true,
-                            );
+                            let trap = self
+                                .traps
+                                .intern_key(TrapKey::IndexConstant { len, index: value });
                             self.trap(ctx, trap);
                             return Ok(());
                         }
@@ -718,11 +710,7 @@ impl<'a, 'db> Emitter<'a, 'db> {
         ctx.body.i64_ge_u();
         ctx.body.if_void();
         ctx.depth += 1;
-        let trap = self.traps.intern(
-            TrapKind::IndexOutOfBounds,
-            format!("index out of bounds: the length is {len} but the index is "),
-            false,
-        );
+        let trap = self.traps.intern_key(TrapKey::IndexDynamic { len });
         self.trap(ctx, trap);
         ctx.depth -= 1;
         ctx.body.end();
@@ -985,11 +973,7 @@ impl<'a, 'db> Emitter<'a, 'db> {
                 Ok(())
             }
             BinOp::Div => {
-                let zero = self.traps.intern(
-                    TrapKind::DivideByZero,
-                    "attempt to divide by zero".to_owned(),
-                    true,
-                );
+                let zero = self.traps.intern_key(TrapKey::DivideByZero);
                 ctx.body.local_get(rhs);
                 ctx.body.i64_eqz();
                 ctx.body.if_void();
@@ -1162,7 +1146,7 @@ impl<'a, 'db> Emitter<'a, 'db> {
     /// Range-check a result computed in the wide carrier against the
     /// narrow type it must fit — the shape every `i/u 8/16/32` operation
     /// takes.
-    fn range_check(&mut self, ctx: &mut Ctx<'db>, kind: IntKind, symbol: &str) {
+    fn range_check(&mut self, ctx: &mut Ctx<'db>, kind: IntKind, symbol: &'static str) {
         if width_of(kind) == 64 {
             return;
         }
@@ -1184,17 +1168,8 @@ impl<'a, 'db> Emitter<'a, 'db> {
         ctx.body.local_get(result);
     }
 
-    /// The interpreter's overflow message names the operand VALUES
-    /// (`\`255 + 1\` does not fit in \`u8\``), which only exist at
-    /// runtime — so the trap entry carries the prefix a compiled trap can
-    /// promise, and the operation it came from as detail.
-    fn overflow_trap(&mut self, kind: IntKind, symbol: &str) -> u32 {
-        self.traps.intern_detailed(
-            TrapKind::Overflow,
-            "arithmetic overflow: ".to_owned(),
-            false,
-            format!("`{symbol}` on `{}`", kind.name()),
-        )
+    fn overflow_trap(&mut self, kind: IntKind, symbol: &'static str) -> u32 {
+        self.traps.intern_key(TrapKey::Overflow { kind, symbol })
     }
 
     /// `-x`: negate in the wide carrier and range-check — on an unsigned
@@ -1364,7 +1339,7 @@ impl<'a, 'db> Emitter<'a, 'db> {
                         // after the trap.
                         match args.first() {
                             Some(Operand::Const(Const::Str(text))) => {
-                                let trap = self.traps.intern(TrapKind::Panic, text.clone(), true);
+                                let trap = self.traps.intern_text(TrapKind::Panic, text);
                                 self.trap(ctx, trap);
                             }
                             Some(op) => {
@@ -1373,14 +1348,7 @@ impl<'a, 'db> Emitter<'a, 'db> {
                                 ctx.body.global_set(self.panic_offset);
                                 self.push_range(ctx, &src, 1, 1, origin)?;
                                 ctx.body.global_set(self.panic_len);
-                                let trap = self.traps.intern_detailed(
-                                    TrapKind::Panic,
-                                    String::new(),
-                                    false,
-                                    "the message is computed at runtime; read it from \
-                                     the `panic_message` globals"
-                                        .to_owned(),
-                                );
+                                let trap = self.traps.intern_key(TrapKey::PanicRuntime);
                                 self.trap(ctx, trap);
                             }
                             None => {
@@ -1474,9 +1442,7 @@ impl<'a, 'db> Emitter<'a, 'db> {
             // exactly the message the editor shows and the interpreter
             // prints.
             TerminatorKind::Trap { message, .. } => {
-                let trap = self
-                    .traps
-                    .intern(TrapKind::Diagnostic, message.clone(), true);
+                let trap = self.traps.intern_text(TrapKind::Diagnostic, message);
                 self.trap(ctx, trap);
                 Ok(())
             }
@@ -1488,11 +1454,7 @@ impl<'a, 'db> Emitter<'a, 'db> {
                 Ok(())
             }
             TerminatorKind::Unreachable => {
-                let trap = self.traps.intern(
-                    TrapKind::Internal,
-                    "entered an unreachable block".to_owned(),
-                    true,
-                );
+                let trap = self.traps.intern_key(TrapKey::Unreachable);
                 self.trap(ctx, trap);
                 Ok(())
             }
