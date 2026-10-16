@@ -192,10 +192,10 @@ fn an_item_with_an_error_is_not_judged() {
     );
 }
 
-/// A capture's read traps in the nested body, so the whole item, `b`
-/// included, gets no warning.
+/// A closure's outer place is used where the closure is bound (#175), so
+/// `a` is used and `b` is not.
 #[test]
-fn an_item_with_a_capture_is_not_judged() {
+fn a_place_a_closure_reaches_is_used() {
     check(
         r#"
 static f = fn () -> usize {
@@ -205,7 +205,9 @@ static f = fn () -> usize {
     g()
 };
 "#,
-        expect![""],
+        expect![[r#"
+            `b`: unused binding `b`
+        "#]],
     );
 }
 

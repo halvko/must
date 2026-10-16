@@ -891,6 +891,79 @@ impl Ty {
         }
     }
 
+    /// Every region a type mentions in a value position, joins split into
+    /// their parts. A `fn` type's parameter and result regions are its own
+    /// binder's and bind nothing here; its OWN region (`fn @a (..)`, a
+    /// closure's) is the value's.
+    pub fn for_each_region(&self, found: &mut impl FnMut(&Region)) {
+        fn one(region: &Region, found: &mut impl FnMut(&Region)) {
+            match region {
+                Region::Join(parts) => parts.iter().for_each(|part| one(part, found)),
+                _ => found(region),
+            }
+        }
+        fn args(args: &[GenericArg], found: &mut impl FnMut(&Region)) {
+            for arg in args {
+                match arg {
+                    GenericArg::Ty(ty) => ty.for_each_region(found),
+                    GenericArg::Region(region) => one(region, found),
+                    _ => {}
+                }
+            }
+        }
+        match self {
+            Ty::Borrow {
+                region, referent, ..
+            } => {
+                one(region, found);
+                referent.for_each_region(found);
+            }
+            Ty::RawPtr { pointee, .. } => pointee.for_each_region(found),
+            Ty::Record(record) => record
+                .fields
+                .iter()
+                .for_each(|(_, field)| field.for_each_region(found)),
+            Ty::Array { elem, .. } => elem.for_each_region(found),
+            Ty::Named(named) => args(&named.args, found),
+            Ty::Fn(f) => {
+                if let Some(region) = &f.region {
+                    one(region, found);
+                }
+            }
+            Ty::Param(_)
+            | Ty::Infer(_)
+            | Ty::UnresolvedNumber
+            | Ty::Unit
+            | Ty::Never
+            | Ty::Int(_)
+            | Ty::Str
+            | Ty::Bool
+            | Ty::Char
+            | Ty::Error => {}
+        }
+    }
+
+    /// Whether a value of this type may hold a closure (`fn @a (..)`,
+    /// #175): one directly, or behind a borrow, a pointer, a field or an
+    /// element. A named type may hold one through its arguments, and
+    /// through a field of a type it declares with a region parameter, so
+    /// a region argument counts.
+    pub fn may_hold_closure(&self) -> bool {
+        match self {
+            Ty::Fn(f) => f.region.is_some(),
+            Ty::Borrow { referent, .. } => referent.may_hold_closure(),
+            Ty::RawPtr { pointee, .. } => pointee.may_hold_closure(),
+            Ty::Array { elem, .. } => elem.may_hold_closure(),
+            Ty::Record(record) => record.fields.iter().any(|(_, f)| f.may_hold_closure()),
+            Ty::Named(named) => named.args.iter().any(|arg| match arg {
+                GenericArg::Ty(ty) => ty.may_hold_closure(),
+                GenericArg::Region(_) => true,
+                _ => false,
+            }),
+            _ => false,
+        }
+    }
+
     pub fn array(elem: Ty, len: ConstArgValue) -> Ty {
         Ty::Array {
             elem: Arc::new(elem),

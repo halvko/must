@@ -16,12 +16,12 @@
 // Run: must run examples/option.must -e '{ let o: Option::<usize> = Option::Some(1); o.unwrap() }'      (=> 1)
 // Run: must run examples/option.must -e '{ let o: Option::<usize> = Option::None; o.unwrap() }'         (panics: "unwrap was called on a ::None value")
 // Run: must run examples/option.must -e 'Option::Some(1).flat_map(fn(x: usize) -> Option::<usize> { Option::Some(x + 1) }).unwrap()'  (=> 2)
+// Run: must run examples/option.must -e 'Option::Some(1).map(fn(x: usize) -> usize { x + 1 }).unwrap()'  (=> 2)
 //
-// `map`'s body captures its `f` parameter inside the closure it builds for
-// `flat_map` — `check` is clean, but neither engine can run it yet (the
-// interpreter refuses captures, wasm refuses the resulting indirect call),
-// so it has no `Run:` line of its own; that gap is pre-existing and not
-// this file's to close.
+// `map` hands `flat_map` a closure: a `fn` literal that reaches `map`'s own
+// `f`. So `flat_map` takes `fn @a (T) -> ..`, a fn value good for `@a`,
+// where a plain `fn(T) -> ..` would accept only a fn that reaches nothing.
+// The wasm backend does not compile closures yet.
 
 type Option = enum::<T> {
     Some(T),
@@ -40,7 +40,7 @@ type Option = enum::<T> {
                 ::None => panic("unwrap was called on a ::None value"),
             }
         }
-        flat_map = fn::<U>(f: fn(T) -> Option::<U>, s: Self) -> Option::<U> {
+        flat_map = fn::<@a, U>(f: fn @a (T) -> Option::<U>, s: Self) -> Option::<U> {
             match s {
                 ::Some(v) => { f(v) }
                 ::None => { Option::None }

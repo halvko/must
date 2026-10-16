@@ -619,18 +619,20 @@ fn highlights_character_literals_as_strings() {
 
 #[test]
 fn diagnostics_include_mir_findings() {
-    // Captures are invisible to name resolution and inference — only MIR
-    // lowering notices the binding lives in an enclosing function.
-    let (analysis, file, _pos) =
-        fixture("static f = fn () -> usize { let a = 1; let g = fn () -> usize { a$0 }; g() };");
+    // Which closures a place holds is invisible to name resolution and
+    // inference — only MIR lowering refuses a closure reaching one.
+    let (analysis, file, _pos) = fixture(
+        "static f = fn () -> usize { let a = 1; let g = fn () -> usize { a }; let h = fn () -> usize { g$0() }; h() };",
+    );
     let diagnostics = analysis.diagnostics(file);
     assert_eq!(diagnostics.len(), 1);
     assert_eq!(
         diagnostics[0].message,
-        "`a` is a local of an enclosing function; captures are not supported yet"
+        "this closure reaches `g`, which holds a closure; a closure that reaches another \
+         closure is not supported yet"
     );
-    // On the `a` inside the nested fn literal.
-    assert_eq!(u32::from(diagnostics[0].range.start()), 64);
+    // On the `fn` literal that reaches `g`.
+    assert_eq!(u32::from(diagnostics[0].range.start()), 77);
 }
 
 /// A member's loan findings are reported with the file's diagnostics.
@@ -6794,4 +6796,56 @@ static main = fn { g(h, 1); };
 "#,
         );
     }
+}
+
+/// The fix on a closure passed where a capture-free `fn (..)` parameter
+/// is declared, applied (#175).
+fn apply_closure_param_fix(text: &str) -> (String, String) {
+    let (analysis, file, _pos) = fixture(&format!("{text}$0"));
+    let diagnostics = analysis.diagnostics(file);
+    let fix = diagnostics
+        .iter()
+        .find_map(|it| it.fix.as_ref())
+        .unwrap_or_else(|| panic!("no fix: {diagnostics:#?}"));
+    (fix.label.clone(), apply_fix(text, fix))
+}
+
+#[test]
+fn a_closure_at_a_capture_free_parameter_offers_a_region_on_it() {
+    let (label, fixed) = apply_closure_param_fix(
+        "static apply = fn(f: fn(usize) -> usize, x: usize) -> usize { f(x) };\n\
+         static main = fn() -> usize { let k: usize = 2; apply(fn(x: usize) -> usize { x * k }, 3) };",
+    );
+    assert_eq!(label, "Let this parameter take closures (`fn @a (..)`)");
+    assert_eq!(
+        fixed,
+        "static apply = fn::<@a>(f: fn @a (usize) -> usize, x: usize) -> usize { f(x) };\n\
+         static main = fn() -> usize { let k: usize = 2; apply(fn(x: usize) -> usize { x * k }, 3) };"
+    );
+}
+
+/// A member with a binder of its own gains the region at its front, under
+/// a name the binder does not use; the dot-call finds the member.
+#[test]
+fn a_closure_at_a_members_parameter_extends_its_binder() {
+    let (_, fixed) = apply_closure_param_fix(
+        "type Opt = enum::<T> { Some(T), None } with {\n\
+         \x20   impl Self {\n\
+         \x20       flat_map = fn::<@a, U>(f: fn (T) -> Opt::<U>, s: Self) -> Opt::<U> {\n\
+         \x20           match s { ::Some(v) => f(v), ::None => Opt::None }\n\
+         \x20       }\n\
+         \x20   }\n\
+         };\n\
+         static main = fn() -> usize {\n\
+         \x20   let k: usize = 2;\n\
+         \x20   match Opt::Some(1).flat_map(fn(x: usize) -> Opt::<usize> { Opt::Some(x + k) }) {\n\
+         \x20       ::Some(v) => v,\n\
+         \x20       ::None => 0,\n\
+         \x20   }\n\
+         };",
+    );
+    assert!(
+        fixed.contains("flat_map = fn::<@b, @a, U>(f: fn @b (T) -> Opt::<U>, s: Self)"),
+        "{fixed}"
+    );
 }

@@ -71,7 +71,7 @@ impl UnusedDiagnostic {
 
 /// The warnings on every body lowered from one item, each on its own CFG.
 /// An item with a lowering trap gets none: the broken expression's reads
-/// vanish into the trap, a capture's among them.
+/// vanish into the trap.
 #[salsa::tracked(returns(ref))]
 pub fn unused_check<'db>(db: &'db dyn Db, item: ItemId<'db>) -> Vec<UnusedDiagnostic> {
     let lowered = crate::mir_lowered(db, item);

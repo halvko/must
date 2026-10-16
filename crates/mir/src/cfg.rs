@@ -154,7 +154,7 @@ pub(crate) fn value_operands(value: &ValueExpr, f: &mut impl FnMut(&Operand)) {
                 }
             }
         }
-        ValueExpr::Borrow { .. } | ValueExpr::AddrOf { .. } => {}
+        ValueExpr::Borrow { .. } | ValueExpr::AddrOf { .. } | ValueExpr::Closure { .. } => {}
     }
 }
 
@@ -162,6 +162,13 @@ pub(crate) fn value_operands(value: &ValueExpr, f: &mut impl FnMut(&Operand)) {
 pub(crate) fn value_places(value: &ValueExpr, f: &mut impl FnMut(&Place)) {
     match value {
         ValueExpr::AddrOf { place, .. } | ValueExpr::Borrow { place, .. } => place_places(place, f),
+        // Binding a closure to its places reads none of them; the
+        // places are named, as a borrow's is.
+        ValueExpr::Closure { captures, .. } => {
+            for capture in captures {
+                place_places(&capture.place, f);
+            }
+        }
         value => value_operands(value, &mut |op| operand_places(op, f)),
     }
 }
@@ -427,5 +434,93 @@ impl<'a, D> Findings<'a, D> {
                 index: point.index,
                 message,
             })
+    }
+}
+
+/// The closures a body binds (#175), and which locals may hold each.
+///
+/// The closures a body binds are its own, so this is a question about the
+/// body alone: a closure's value flows by assignment, through a call
+/// (whatever is passed in may come back out, or be stored through a
+/// borrow passed beside it) and by borrowing. Every local whose type may
+/// hold a closure is unified with what it is computed from, and each class
+/// holds the closures bound into it — flow-insensitive and coarse on
+/// purpose: a class only ever widens what a call is judged to touch.
+pub(crate) struct ClosureFlow<'b> {
+    /// Each bound closure: its [`ValueExpr::Closure`]'s origin and places.
+    closures: Vec<(ExprId, &'b [crate::Capture])>,
+    /// Per local: indexes into `closures`.
+    held: Vec<Vec<usize>>,
+}
+
+impl<'b> ClosureFlow<'b> {
+    pub(crate) fn of(body: &'b MirBody) -> ClosureFlow<'b> {
+        fn find(parent: &mut [usize], mut x: usize) -> usize {
+            while parent[x] != x {
+                parent[x] = parent[parent[x]];
+                x = parent[x];
+            }
+            x
+        }
+        let count = body.locals.len();
+        let mut parent: Vec<usize> = (0..count).collect();
+        let holds = |local: LocalId| body.locals[local].ty.may_hold_closure();
+        let union = |parent: &mut Vec<usize>, a: LocalId, b: LocalId| {
+            if holds(a) && holds(b) {
+                let a = find(parent, local_index(a));
+                let b = find(parent, local_index(b));
+                parent[a] = b;
+            }
+        };
+        let mut closures = Vec::new();
+        let mut bound_into = Vec::new();
+        for (_, data) in body.blocks.iter() {
+            for stmt in &data.statements {
+                let StatementKind::Assign { dest, value } = &stmt.kind else {
+                    continue;
+                };
+                if let ValueExpr::Closure { captures, .. } = value {
+                    bound_into.push((dest.local, closures.len()));
+                    closures.push((stmt.origin, captures.as_slice()));
+                    continue;
+                }
+                value_places(value, &mut |place| {
+                    union(&mut parent, dest.local, place.local)
+                });
+            }
+            if let TerminatorKind::Call {
+                callee, args, dest, ..
+            } = &data.terminator.kind
+            {
+                for op in std::iter::once(callee).chain(args) {
+                    operand_places(op, &mut |place| union(&mut parent, *dest, place.local));
+                }
+            }
+        }
+        let mut by_root: Vec<Vec<usize>> = vec![Vec::new(); count];
+        for (local, closure) in bound_into {
+            let root = find(&mut parent, local_index(local));
+            by_root[root].push(closure);
+        }
+        let held = (0..count)
+            .map(|index| by_root[find(&mut parent, index)].clone())
+            .collect();
+        ClosureFlow { closures, held }
+    }
+
+    /// The closures an operand may hold.
+    pub(crate) fn held_by(&self, op: &Operand) -> &[usize] {
+        match op {
+            Operand::Copy(place) | Operand::Move(place) => &self.held[local_index(place.local)],
+            Operand::Const(_) => &[],
+        }
+    }
+
+    pub(crate) fn captures(&self, closure: usize) -> &'b [crate::Capture] {
+        self.closures[closure].1
+    }
+
+    pub(crate) fn origin(&self, closure: usize) -> ExprId {
+        self.closures[closure].0
     }
 }

@@ -1944,7 +1944,7 @@ const OPTION_MEMBERS: &str = r#"    impl Self {
                 ::None => panic("unwrap was called on a ::None value"),
             }
         }
-        flat_map = fn::<U>(f: fn(T) -> Option::<U>, s: Self) -> Option::<U> {
+        flat_map = fn::<@a, U>(f: fn @a (T) -> Option::<U>, s: Self) -> Option::<U> {
             match s {
                 ::Some(v) => { f(v) }
                 ::None => { Option::None }

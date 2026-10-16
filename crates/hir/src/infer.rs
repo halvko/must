@@ -2699,6 +2699,9 @@ pub(crate) struct InferCtx<'db> {
     /// bound-carrying generic mention must be in (its VALUE would need a
     /// captured dictionary, which is reserved).
     direct_callees: rustc_hash::FxHashSet<ExprId>,
+    /// The `fn` literals that reach a local of an enclosing function
+    /// (closures, #175): their type carries a region.
+    capturing: crate::captures::Captures,
     /// Every expression standing in PLACE position: the receiver of a
     /// field, deref or index step, the place under `.&`/`.&mut`/`.&raw`,
     /// and an assignment target. A `.*` there is a projection STEP, not a
@@ -2895,6 +2898,7 @@ impl<'db> InferCtx<'db> {
                 })
                 .collect(),
             place_positions: place_positions(body),
+            capturing: crate::captures::compute(body, resolutions),
             value_receivers: rustc_hash::FxHashSet::default(),
             deref_reads: Vec::new(),
             borrow_projections: rustc_hash::FxHashSet::default(),
@@ -3712,6 +3716,29 @@ impl<'db> InferCtx<'db> {
         }
         for (_, variant) in result.variant_of_pat.iter_mut() {
             variant.args = resolve_args_fully(&mut self.table, &variant.args);
+        }
+        // A closure reads its outer places through their types' regions
+        // at every call, so each of those outlives the closure (#175).
+        let capturing = std::mem::take(&mut self.capturing);
+        for (literal, captures) in capturing.iter() {
+            let Some(closure) = result.loan_regions.get(literal).cloned() else {
+                continue;
+            };
+            for capture in captures {
+                let Some(ty) = result.type_of_binding.get(capture.binding) else {
+                    continue;
+                };
+                let mut regions = Vec::new();
+                ty.for_each_region(&mut |region| regions.push(region.clone()));
+                for region in regions {
+                    self.push_outlives(
+                        region,
+                        closure.clone(),
+                        literal,
+                        RegionConstraintReason::ClosureCapture,
+                    );
+                }
+            }
         }
         result.region_count = self.constraints.region_count();
         result.region_constraints = self.constraints.take_region_edges();
@@ -5263,7 +5290,17 @@ impl<'db> InferCtx<'db> {
                 // part, so a literal that disagrees with the slot inherits
                 // nothing and its body is checked on its own. `Ty::Error` is
                 // infectious and silent there for the same reason.
-                let own_sig = Ty::fn_type(param_tys.clone(), ret.clone());
+                // A closure — a literal reaching a local of an enclosing
+                // function — is good only while the places it reaches
+                // are: its type carries a region, minted here and recorded
+                // as the loan region of its creation, which MIR's loan
+                // check pins those places with (#175).
+                let region = self.capturing.captures(expr).then(|| {
+                    let region = self.fresh_region();
+                    self.result.loan_regions.insert(expr, region.clone());
+                    region
+                });
+                let own_sig = Ty::fn_type_in(false, region, param_tys.clone(), ret.clone());
                 let reported = self.result.diagnostics.len();
                 let fn_ty = self.check(expr, own_sig.clone(), expected, cause);
                 // `check` poisons the unresolved numbers in what it was

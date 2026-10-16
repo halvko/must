@@ -78,6 +78,22 @@ pub struct MirBody {
     /// Parameter locals, in order. Empty for const bodies.
     pub params: Vec<LocalId>,
     pub entry: BlockId,
+    /// A closure's outer places (#175), in capture order: each is a
+    /// hidden parameter, at the end of `params`, holding a borrow of the
+    /// place for the length of one call. Empty for every other body.
+    pub outer: Vec<OuterPlace>,
+}
+
+/// One outer place of a closure body: the hidden parameter its mentions
+/// lower through (as `(*local)`), and the binding of the enclosing
+/// function it stands for.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OuterPlace {
+    pub local: LocalId,
+    pub binding: hir::BindingId,
+    /// Whether the closure writes the place or borrows it mutably: the
+    /// borrow each call hands it is then `.&mut`.
+    pub mutable: bool,
 }
 
 impl MirBody {
@@ -340,6 +356,23 @@ pub enum ValueExpr {
         /// through a pointer temp instead).
         projection: Vec<ProjElem>,
     },
+    /// A closure (#175): `body`'s fn value, bound to the places of THIS
+    /// frame its outer places stand for, one per [`MirBody::outer`] entry
+    /// of `body` and in that order. Each call borrows every place afresh
+    /// (`.&mut` when `mutable`), so the value holds no loan between calls
+    /// — only a claim that the places' storage outlives it, which the loan
+    /// check enforces as a pin minted here.
+    Closure {
+        body: BodyId,
+        captures: Vec<Capture>,
+    },
+}
+
+/// One place a [`ValueExpr::Closure`] is bound to.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Capture {
+    pub place: Place,
+    pub mutable: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -510,6 +543,15 @@ pub enum MirDiagnostic {
     /// captures need a designed capture story (capture lists, by-value vs
     /// by-reference); until then this is an honest "not yet".
     UnsupportedCapture { expr: ExprId, name: String },
+    /// A closure reads an outer place of a type that cannot be duplicated
+    /// out of it by name: the closure is handed a borrow of the place
+    /// for each call, and a move out of a borrow is not one (#175).
+    MoveOutOfOuterPlace { expr: ExprId, name: String },
+    /// A closure reaches an outer place that holds a closure (#175). The
+    /// held closure's own places are not visible from here, so its calls
+    /// could not be checked; refused until closures carry their places in
+    /// their type.
+    ReachesClosure { expr: ExprId, name: String },
 }
 
 impl MirDiagnostic {
@@ -521,12 +563,22 @@ impl MirDiagnostic {
                 "`{name}` is a local of an enclosing function; \
                  captures are not supported yet"
             ),
+            MirDiagnostic::MoveOutOfOuterPlace { name, .. } => format!(
+                "cannot move `{name}` out of the enclosing function: a closure only \
+                 borrows the places it reaches, for the length of each call"
+            ),
+            MirDiagnostic::ReachesClosure { name, .. } => format!(
+                "this closure reaches `{name}`, which holds a closure; a closure that \
+                 reaches another closure is not supported yet"
+            ),
         }
     }
 
     pub fn expr(&self) -> ExprId {
         match self {
-            MirDiagnostic::UnsupportedCapture { expr, .. } => *expr,
+            MirDiagnostic::UnsupportedCapture { expr, .. }
+            | MirDiagnostic::MoveOutOfOuterPlace { expr, .. }
+            | MirDiagnostic::ReachesClosure { expr, .. } => *expr,
         }
     }
 }

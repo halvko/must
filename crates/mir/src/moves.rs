@@ -345,6 +345,9 @@ struct Holds {
     /// On every path to here, it holds a trap's value or one computed from
     /// it, and nothing else is set: the code reading it never runs.
     halted: bool,
+    /// Its storage ended: a closure reaching it is the loan check's to
+    /// refuse, not a read of nothing (#175).
+    ended: bool,
 }
 
 impl Holds {
@@ -353,6 +356,7 @@ impl Holds {
         value: true,
         moved: false,
         halted: false,
+        ended: false,
     };
 
     const HALTED: Holds = Holds {
@@ -360,6 +364,7 @@ impl Holds {
         value: false,
         moved: false,
         halted: true,
+        ended: false,
     };
 
     fn join(&mut self, other: Holds) -> bool {
@@ -368,6 +373,7 @@ impl Holds {
         self.value |= other.value;
         self.moved |= other.moved;
         self.halted &= other.halted;
+        self.ended |= other.ended;
         *self != before
     }
 }
@@ -397,6 +403,9 @@ struct BodyCheck<'a> {
     rpo: OnceCell<Vec<Option<usize>>>,
     /// The state [`Self::effect`] steps one point on.
     scratch: RefCell<State>,
+    /// The closures this body binds, and which locals may hold them: a
+    /// call through one, or handed one, uses the places it reaches.
+    closures: cfg::ClosureFlow<'a>,
 }
 
 impl<'a> BodyCheck<'a> {
@@ -436,6 +445,7 @@ impl<'a> BodyCheck<'a> {
             preds: OnceCell::new(),
             rpo: OnceCell::new(),
             scratch: RefCell::new(Vec::new()),
+            closures: cfg::ClosureFlow::of(body),
         }
     }
 
@@ -533,6 +543,7 @@ impl<'a> BodyCheck<'a> {
                     if self.tracked(*local).is_some() {
                         state[cfg::local_index(*local)] = Holds {
                             unassigned: true,
+                            ended: true,
                             ..Holds::default()
                         };
                     }
@@ -552,6 +563,26 @@ impl<'a> BodyCheck<'a> {
                     self.operand(point, origin, callee, state, &mut out);
                     for arg in args {
                         self.operand(point, origin, arg, state, &mut out);
+                    }
+                    // A closure called or handed on reads, or writes
+                    // through, every place it reaches: each must hold its
+                    // value (#175).
+                    for op in std::iter::once(callee).chain(args) {
+                        for &closure in self.closures.held_by(op) {
+                            for capture in self.closures.captures(closure) {
+                                if state[cfg::local_index(capture.place.local)].ended {
+                                    continue;
+                                }
+                                self.place_use(
+                                    point,
+                                    origin,
+                                    &capture.place,
+                                    false,
+                                    state,
+                                    &mut out,
+                                );
+                            }
+                        }
                     }
                     match halted {
                         true => self.halt(*dest, state),
@@ -893,6 +924,7 @@ impl<'a> BodyCheck<'a> {
             value: true,
             moved: true,
             halted: false,
+            ended: false,
         };
         let mut state = self.scratch.borrow_mut();
         state.clear();
@@ -906,6 +938,7 @@ impl<'a> BodyCheck<'a> {
                 unassigned: false,
                 value: false,
                 halted: false,
+                ..
             } => Effect::Takes,
             _ => Effect::Ends,
         }

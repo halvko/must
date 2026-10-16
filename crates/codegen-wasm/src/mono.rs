@@ -421,6 +421,23 @@ impl<'db> Mono<'db> {
         }
 
         // --- call resolution, on the settled values ------------------
+        //
+        // A body that binds a closure does not compile (#175), and its
+        // calls are refused by that name: resolving them would instance
+        // the callee on a fn value this backend cannot know, and refuse
+        // there under the wrong name.
+        let closure = body.blocks.iter().find_map(|(_, block)| {
+            block
+                .statements
+                .iter()
+                .find_map(|statement| match &statement.kind {
+                    mir::StatementKind::Assign {
+                        value: ValueExpr::Closure { .. },
+                        ..
+                    } => Some(statement.origin),
+                    _ => None,
+                })
+        });
         let mut calls = FxHashMap::default();
         let mut return_static = StaticVal::Unknown;
         let mut first_return = true;
@@ -430,8 +447,14 @@ impl<'db> Mono<'db> {
                 TerminatorKind::Call {
                     callee, args, dest, ..
                 } => {
-                    let target =
-                        self.resolve_call(key, &locals, &statics, callee, args, *dest, origin);
+                    let target = match closure {
+                        Some(at) => {
+                            CallTarget::Refused(Refusal::new(crate::emit::CLOSURE, &loc, at))
+                        }
+                        None => {
+                            self.resolve_call(key, &locals, &statics, callee, args, *dest, origin)
+                        }
+                    };
                     // A call's result may itself be a function value (the
                     // `fn { print }()` shape): fold the callee's return
                     // value back into the caller's local.
@@ -538,6 +561,7 @@ impl<'db> Mono<'db> {
                     item: key.func.value.item.clone(),
                     body: *body,
                     const_args: key.func.value.const_args.clone(),
+                    captures: None,
                 },
                 type_args: key.func.type_args.clone(),
             }),

@@ -121,6 +121,14 @@ const UNSUPPORTED: &[(&str, &str, &str)] = &[
         "{ let o: Option::<usize> = Option::Some(1); o.&.is_some() }",
         "a safe borrow (`.&` / `.&mut`) is not supported by the wasm backend yet",
     ),
+    // `map` hands `flat_map` a closure (#175): a frame pointer and an
+    // addressable local, which wasm locals are not. Refused by name.
+    (
+        "option.must",
+        "Option::Some(1).map(fn(x: usize) -> usize { x + 1 }).unwrap()",
+        "a closure (a `fn` literal that reaches a local of an enclosing function) is not \
+         supported by the wasm backend yet",
+    ),
     (
         "heap.must",
         "main()",

@@ -76,7 +76,10 @@
   fenced, with one crack: asm-jump-compilable effects maybe; runtime continuation capture
   never. Fn items and capture-free fn values keep structural fn types; a blanket "every
   `fn(A) -> B` satisfies `Fn(A) -> B`" is needed when traits land, or the two families split
-  the ecosystem.
+  the ecosystem. The first closures (#175) are non-nominal and non-escaping: a literal that
+  reaches outer locals has type `fn @a (A) -> B`, holds nothing between calls and borrows
+  its outer places per call; the blanket rule extends to `fn @a (A) -> B` satisfying
+  `Fn(A) -> B + @a`. Nominal per-literal types are for closures that are stored or returned.
 - **TR09** Send-ness is derived from structure: a value fails to cross iff its type
   transitively contains a fn value with captures at non-portable, a raw mutable pointer to
   shared mutable state, or a field of a type that opted out. Everything else crosses silently.

@@ -296,6 +296,7 @@ pub fn compile(db: &dyn Db, entry: &ItemLoc) -> Result<Artifact, CompileError> {
                 item: entry.clone(),
                 body: root,
                 const_args: Vec::new(),
+                captures: None,
             },
             type_args: Vec::new(),
         },

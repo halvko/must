@@ -189,6 +189,11 @@ pub struct FnValue {
     /// generic body inherit the enclosing frame's values at construction,
     /// so const params behave like auto-captured constants.
     pub const_args: Vec<Value>,
+    /// A closure's places (#175): one pointer per outer place of `body`
+    /// (in [`mir::MirBody::outer`] order) into the frame that bound it,
+    /// with whether each call borrows it `.&mut`. `None` for a fn value
+    /// that reaches nothing.
+    pub captures: Option<std::sync::Arc<[(Value, bool)]>>,
 }
 
 /// Identity of one instantiation of a generic item — TR06's applicative

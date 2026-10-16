@@ -123,6 +123,7 @@ impl OutlivesDiagnostic {
                     RegionConstraintReason::ClosureNarrowing => {
                         "using this closure where a longer-lived one is expected"
                     }
+                    RegionConstraintReason::ClosureCapture => "a place this closure reaches",
                 };
                 // A MEET on the shorter side needs only ONE member
                 // covered — it is the overlap of its members, so covering

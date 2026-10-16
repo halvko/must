@@ -291,6 +291,10 @@ pub enum RegionConstraintReason {
     /// shorter-lived one. The same single directed edge as `Reborrow`: a
     /// closure good for a region is good for any region it outlives.
     ClosureNarrowing,
+    /// A closure reaches an outer place: every region the place's type
+    /// mentions has to outlive the closure's own, since each call reads
+    /// the place through them (#175).
+    ClosureCapture,
 }
 
 impl Constraints {

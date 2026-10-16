@@ -12560,7 +12560,7 @@ static apply = fn(g: fn(usize) -> usize, n: usize) -> usize { g(n) };
 static main = fn(n: usize) -> usize { apply(fn(a, b) { n }, n) };
 "#,
         expect![[r#"
-            115..129: type mismatch: expected `fn(usize) -> usize`, found `fn(_, _) -> usize`
+            115..129: type mismatch: expected `fn(usize) -> usize`, found `fn @_ (_, _) -> usize`
         "#]],
     );
 }

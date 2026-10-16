@@ -612,7 +612,7 @@ impl LowerCtx<'_> {
     }
 
     fn lower_fn(&mut self, params: &[hir::body::Param], body_expr: ExprId, ret_ty: Ty) -> BodyId {
-        self.lower_fn_inner(params, body_expr, ret_ty, false)
+        self.lower_fn_inner(params, body_expr, ret_ty, false, &[])
     }
 
     /// [`Self::lower_fn`], optionally appending the hidden dictionary
@@ -626,6 +626,7 @@ impl LowerCtx<'_> {
         body_expr: ExprId,
         ret_ty: Ty,
         with_dicts: bool,
+        captures: &[hir::captures::Capture],
     ) -> BodyId {
         let mut b = BodyBuilder::new(ret_ty, body_expr);
         // An error in a parameter pattern traps before anything destructures;
@@ -639,6 +640,33 @@ impl LowerCtx<'_> {
         for param in params {
             let local = self.alloc_pat_slot_local(&mut b, param.pat, body_expr);
             b.params.push(local);
+        }
+        // A closure's outer places: one hidden borrow parameter each, after
+        // the written ones (#175). Named as the place, so the debugger and
+        // the loan check's messages show what the user wrote.
+        let mut outer = Vec::with_capacity(captures.len());
+        for capture in captures {
+            let referent = self
+                .infer
+                .type_of_binding
+                .get(capture.binding)
+                .map(Ty::erase_regions)
+                .unwrap_or(Ty::Error);
+            let local = b.alloc_local(LocalData {
+                ty: Ty::borrow(capture.mutable, hir::ty::Region::Erased, referent),
+                name: self.body.bindings[capture.binding]
+                    .written_name()
+                    .map(str::to_owned),
+                binding: None,
+                addressable: false,
+            });
+            b.params.push(local);
+            b.outer.insert(capture.binding, local);
+            outer.push(crate::OuterPlace {
+                local,
+                binding: capture.binding,
+                mutable: capture.mutable,
+            });
         }
         if with_dicts {
             let file = self.loc.file;
@@ -684,6 +712,7 @@ impl LowerCtx<'_> {
             blocks: b.blocks,
             params: b.params,
             entry: b.entry,
+            outer,
         })
     }
 
@@ -1584,10 +1613,72 @@ impl LowerCtx<'_> {
                 // of its binder's bounds.
                 let with_dicts = Some(expr) == self.body.root
                     && hir::dict_param_count(self.db, self.loc.file, self.own_generics) > 0;
+                // A closure's outer places (#175). One that holds a closure
+                // itself is refused: its captures are not this body's to
+                // see, so a call of it could not be checked against the
+                // loans this body holds.
+                let captures = hir::captures::closure_captures(self.db, self.item)
+                    .of(expr)
+                    .to_vec();
+                if let Some(capture) = captures.iter().find(|capture| {
+                    self.infer
+                        .type_of_binding
+                        .get(capture.binding)
+                        .is_some_and(Ty::may_hold_closure)
+                }) {
+                    let name = self.body.bindings[capture.binding]
+                        .written_name()
+                        .unwrap_or_default()
+                        .to_owned();
+                    let diag = MirDiagnostic::ReachesClosure { expr, name };
+                    let message = diag.message();
+                    self.diagnostics.push(diag);
+                    return self.trap(b, expr, message);
+                }
                 let saved = std::mem::replace(&mut self.initializer_context, false);
-                let body_id = self.lower_fn_inner(params, *fn_body, ret_ty, with_dicts);
+                let body_id = self.lower_fn_inner(params, *fn_body, ret_ty, with_dicts, &captures);
                 self.initializer_context = saved;
-                Operand::Const(Const::Fn(body_id))
+                if captures.is_empty() {
+                    return Operand::Const(Const::Fn(body_id));
+                }
+                // Bound to this frame's places: a local of this body is
+                // addressed (each call borrows it), an outer place of
+                // this body is passed on through its own borrow.
+                let mut bound = Vec::with_capacity(captures.len());
+                for capture in &captures {
+                    let Some((local, lead)) = b.binding_root(capture.binding) else {
+                        let diag = MirDiagnostic::UnsupportedCapture {
+                            expr,
+                            name: self.body.bindings[capture.binding]
+                                .written_name()
+                                .unwrap_or_default()
+                                .to_owned(),
+                        };
+                        let message = diag.message();
+                        self.diagnostics.push(diag);
+                        return self.trap(b, expr, message);
+                    };
+                    if lead.is_none() {
+                        b.locals[local].addressable = true;
+                    }
+                    bound.push(crate::Capture {
+                        place: Place {
+                            local,
+                            projection: lead.into_iter().collect(),
+                        },
+                        mutable: capture.mutable,
+                    });
+                }
+                let dest = b.temp(self.ty(expr));
+                b.push_assign(
+                    dest,
+                    ValueExpr::Closure {
+                        body: body_id,
+                        captures: bound,
+                    },
+                    expr,
+                );
+                Operand::Copy(dest.into())
             }
             ExprData::Match { scrutinee, arms } => self.lower_match(b, expr, *scrutinee, arms),
             // The first cyclic CFGs: a header block the body re-enters (the
@@ -2489,9 +2580,13 @@ impl LowerCtx<'_> {
         }
         if let ExprData::NameRef(name) = &self.body.exprs[target] {
             match self.resolutions.get(target) {
-                Some(Resolution::Local(binding)) => match b.local_for_binding.get(binding) {
-                    Some(&local) => {
-                        b.push_assign(local, ValueExpr::Use(value_op), value);
+                Some(Resolution::Local(binding)) => match b.binding_root(*binding) {
+                    Some((local, lead)) => {
+                        let place = Place {
+                            local,
+                            projection: lead.into_iter().collect(),
+                        };
+                        b.push_assign(place, ValueExpr::Use(value_op), value);
                     }
                     // A local of an enclosing function: the same unsupported
                     // capture the read path (`lower_name_ref`) reports.
@@ -2683,14 +2778,15 @@ impl LowerCtx<'_> {
             return;
         };
         match self.resolutions.get(root) {
-            Some(Resolution::Local(binding)) => match b.local_for_binding.get(binding) {
-                Some(&local) => {
+            Some(Resolution::Local(binding)) => match b.binding_root(*binding) {
+                Some((local, lead)) => {
                     // Innermost projection first: `p.a.b` writes through
                     // `a`'s index in `p`, then `b`'s index in `p.a`.
                     // Element indices evaluate here, innermost first too —
                     // after the RHS (which the caller lowered), a fixed,
                     // deterministic order.
-                    let mut projection = Vec::with_capacity(chain.len());
+                    let mut projection = Vec::with_capacity(chain.len() + 1);
+                    projection.extend(lead);
                     for &link in chain.iter().rev() {
                         match &self.body.exprs[link] {
                             ExprData::Field { receiver, name, .. } => {
@@ -2831,11 +2927,11 @@ impl LowerCtx<'_> {
         // the POINTER (the read goes through it, path extended — nothing
         // materialized, the original allocation's identity preserved), a
         // name roots it in the binding's own storage.
-        let local = match &self.body.exprs[root] {
+        let (local, lead) = match &self.body.exprs[root] {
             ExprData::Deref { receiver } => {
                 let receiver = *receiver;
                 match self.lower_deref_root(b, root, receiver) {
-                    DerefRoot::Local(local) => local,
+                    DerefRoot::Local(local) => (local, Some(crate::ProjElem::Deref)),
                     DerefRoot::Trap(messages) => return Some(self.trap(b, root, messages)),
                     // Never observable: read the placeholder instead.
                     DerefRoot::Silent => return Some(Operand::Const(Const::Unit)),
@@ -2845,9 +2941,9 @@ impl LowerCtx<'_> {
                 let Some(Resolution::Local(binding)) = self.resolutions.get(root) else {
                     return None;
                 };
-                // A local of an enclosing function has no local here; the
-                // general path reports the unsupported capture.
-                *b.local_for_binding.get(binding)?
+                // A binding with no local here: the general path reports
+                // it.
+                b.binding_root(*binding)?
             }
             _ => return None,
         };
@@ -2864,8 +2960,26 @@ impl LowerCtx<'_> {
         if let Some((link, messages)) = self.first_link_trap(inner) {
             return Some(self.trap(b, link, messages));
         }
-        let lead = matches!(&self.body.exprs[root], ExprData::Deref { .. })
-            .then_some(crate::ProjElem::Deref);
+        // An outer place is read through the borrow its closure is handed,
+        // and a closure only borrows: what cannot be duplicated cannot be
+        // taken out (#175). An inserted reborrow reads nothing out.
+        let ty = self.ty(expr);
+        if lead.is_some()
+            && matches!(&self.body.exprs[root], ExprData::NameRef(_))
+            && !self.infer.reborrows.contains_idx(expr)
+            && !hir::capability::is_copyable(self.db, &ty)
+        {
+            let ExprData::NameRef(name) = &self.body.exprs[root] else {
+                unreachable!("checked above");
+            };
+            let diag = MirDiagnostic::MoveOutOfOuterPlace {
+                expr,
+                name: name.clone(),
+            };
+            let message = diag.message();
+            self.diagnostics.push(diag);
+            return Some(self.trap(b, expr, message));
+        }
         // `{error}`-typed links read as the never-observed placeholder,
         // like the general path's missing-field-index case.
         let Some(projection) = self.lower_place_projection(b, &chain, lead) else {
@@ -2877,7 +2991,6 @@ impl LowerCtx<'_> {
         // The read happens HERE, not wherever the operand is consumed:
         // its effects (bounds checks, deref liveness, the aliasing check)
         // belong at this point in the CFG.
-        let ty = self.ty(expr);
         // A whole local of a type with no `forget` capability cannot be
         // duplicated, so its read is the last one: a MOVE (see
         // `Operand::Move`).
@@ -2980,8 +3093,25 @@ impl LowerCtx<'_> {
             return Operand::Const(Const::Unit);
         };
         match self.resolutions.get(root) {
-            Some(Resolution::Local(binding)) => match b.local_for_binding.get(binding) {
-                Some(&local) => self.address_of_local(b, flavor, mutable, local, &chain, expr),
+            Some(Resolution::Local(binding)) => match b.binding_root(*binding) {
+                Some((local, None)) => {
+                    self.address_of_local(b, flavor, mutable, local, &chain, expr)
+                }
+                // An outer place: an address through the borrow the
+                // closure was handed, like a deref-rooted place's.
+                Some((local, Some(lead))) => {
+                    let Some(projection) = self.lower_place_projection(b, &chain, Some(lead))
+                    else {
+                        return Operand::Const(Const::Unit);
+                    };
+                    let dest = b.temp(self.ty(expr));
+                    b.push_assign(
+                        dest,
+                        flavor.address_of(mutable, Place { local, projection }),
+                        expr,
+                    );
+                    Operand::Copy(dest.into())
+                }
                 // A local of an enclosing function: the same unsupported
                 // capture the read path reports.
                 None => {
@@ -3328,6 +3458,7 @@ impl LowerCtx<'_> {
             blocks: b.blocks,
             params: b.params,
             entry: b.entry,
+            outer: Vec::new(),
         })
     }
 
@@ -3757,6 +3888,9 @@ struct BodyBuilder {
     blocks: Arena<BlockData>,
     params: Vec<LocalId>,
     local_for_binding: FxHashMap<BindingId, LocalId>,
+    /// A closure body's outer places (#175): the hidden parameter each
+    /// binding of an enclosing function is reached through, as `(*param)`.
+    outer: FxHashMap<BindingId, LocalId>,
     ret: LocalId,
     entry: BlockId,
     current: BlockId,
@@ -3813,6 +3947,19 @@ fn variant_aggregate(variant: &hir::ResolvedVariant, ops: Vec<Operand>) -> Value
 }
 
 impl BodyBuilder {
+    /// The root a mention of `binding` lowers through: its own local, or,
+    /// for an outer place of a closure, the hidden borrow parameter read
+    /// through — the deref that leads the place's projection. `None` for a
+    /// binding with no local here (not yet declared, or a broken program).
+    fn binding_root(&self, binding: BindingId) -> Option<(LocalId, Option<crate::ProjElem>)> {
+        if let Some(&local) = self.local_for_binding.get(&binding) {
+            return Some((local, None));
+        }
+        self.outer
+            .get(&binding)
+            .map(|&param| (param, Some(crate::ProjElem::Deref)))
+    }
+
     fn new(ret_ty: Ty, origin: ExprId) -> BodyBuilder {
         let mut locals = Arena::default();
         let ret = locals.alloc(LocalData {
@@ -3834,6 +3981,7 @@ impl BodyBuilder {
             blocks,
             params: Vec::new(),
             local_for_binding: FxHashMap::default(),
+            outer: FxHashMap::default(),
             ret,
             entry,
             current: entry,

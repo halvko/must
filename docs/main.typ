@@ -1663,8 +1663,59 @@ the program runs, so it fits a `fn @a` position too — `apply(double, 21)`
 needs nothing written — and the conversion only goes that way, like safe
 `fn` into `unsafe fn`. A `fn @a` value used where a shorter-lived one is
 expected narrows, exactly as a borrow does, and the other direction needs
-an outlives clause. This is the type a closure will have; until closures
-land, every value that reaches one is capture-free.
+an outlives clause. This is the type a closure has.
+
+=== Closures
+
+A `fn` literal may mention locals of the functions around it. Such a literal
+is a *closure*, and the locals it mentions are its *outer places*:
+
+```must
+static each = fn::<@a>(xs: [usize; 4], f: fn @a (usize) -> ()) -> () {
+    let mut i = 0;
+    loop { if i == 4 { break; } f(xs[i]); i = i + 1; }
+};
+
+static sum_big = fn (xs: [usize; 4]) -> usize {
+    let mut total = 0;
+    each(xs, fn (x) { if x > 10 { total = total + x; } });
+    total
+};
+```
+
+A closure holds nothing between calls. Each call hands it a borrow of every
+outer place it mentions: `.&mut` when it writes the place or borrows it
+mutably, `.&` otherwise, and only for that call. So a closure reads an outer
+place's current value, not a copy taken when it was made, and the place is
+free to use between calls:
+
+```must
+let mut n = 0;
+let bump = fn { n = n + 1; };
+bump();
+let seen = n;
+bump();
+```
+
+Calling a closure is a use of its outer places at the call, and handing one
+to a function is the same use for the length of that call. A live borrow of
+a place the closure writes is invalidated there, as by any other write. Two
+closures handed to one call cannot both reach a place one of them writes,
+because the callee could run one inside the other.
+
+A closure's type is `fn @a (..) -> ..`: it is good while the places it
+reaches are, and it may not outlive any of them. Keeping one past the block
+that declares a place it reaches, or returning it from the function that
+declares one, is refused. A function that takes closures says so with a
+region, as `each` does above. A plain `fn (..)` parameter takes only
+capture-free functions; passing a closure to one offers a quick fix that
+writes the region in.
+
+A closure only borrows its outer places, so it cannot move one out, and a
+borrow of one does not outlive the call it was taken in. Not yet supported:
+a closure reaching a place that holds another closure, keeping a closure
+for later (escaping closures, which will name what they capture), and
+closures in the wasm backend.
 
 === Outlives clauses
 
