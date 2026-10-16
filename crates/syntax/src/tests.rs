@@ -16758,3 +16758,46 @@ trait Min = {
         "#]],
     );
 }
+
+/// Each parser error is blamed on the innermost node that was open when it
+/// was reported and began before it: inside nested nodes, after a sibling
+/// finished, and for two errors reported with no node started between them.
+#[test]
+fn errors_blame_the_innermost_open_node_begun_before_them() {
+    let input = r#"
+static f = fn() -> () {
+    let x = (1 + );
+    g(h(1) 2);
+    let = ;
+};
+"#;
+    let parse = crate::parse(input);
+    let root = parse.syntax_node();
+    let text: String = parse
+        .errors()
+        .iter()
+        .enumerate()
+        .map(|(index, err)| {
+            let blame = parse.blame(index);
+            let kinds: Vec<_> = root
+                .descendants()
+                .filter(|node| node.text_range() == blame)
+                .map(|node| format!("{:?}", node.kind()))
+                .collect();
+            format!(
+                "{:?}: {} => {} {:?}\n",
+                err.range,
+                err.message,
+                kinds.join("/"),
+                blame
+            )
+        })
+        .collect();
+    expect![[r#"
+        42..43: expected an expression => BIN_EXPR 38..41
+        56..57: expected `,` or `)` => ARG_LIST 50..58
+        68..69: expected a binding name => LET_STMT 64..71
+        70..71: expected an expression => LET_STMT 64..71
+    "#]]
+    .assert_eq(&text);
+}

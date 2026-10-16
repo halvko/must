@@ -4,7 +4,7 @@
 use crate::SyntaxKind::{self, *};
 use crate::lexer::Token;
 use crate::parser::{Event, TokenFix};
-use crate::{Fix, SyntaxError, TextEdit};
+use crate::{Fix, SyntaxError, SyntaxNode, TextEdit};
 use rowan::{GreenNode, GreenNodeBuilder};
 use text_size::{TextRange, TextSize};
 
@@ -25,10 +25,9 @@ pub(crate) fn build(
         offset: TextSize::new(0),
         prev_token_range: TextRange::empty(TextSize::new(0)),
         depth: 0,
+        started: 0,
         errors: &mut errors,
-        open_starts: Vec::new(),
-        owners: Vec::new(),
-        unowned: Vec::new(),
+        sites: Vec::new(),
     };
 
     const CONSUMED: Event = Event::Start {
@@ -79,9 +78,31 @@ pub(crate) fn build(
         }
     }
 
+    let sites = builder.sites;
     let green = builder.inner.finish();
     let mut owners = vec![None; lexer_errors];
-    owners.extend(builder.owners.into_iter().map(Some));
+    if !sites.is_empty() {
+        let root = SyntaxNode::new_root(green.clone());
+        // `sites` never goes back in preorder, so one walk reaches them all.
+        let mut preorder = root.descendants();
+        let (mut walked, mut newest) = (0, root.clone());
+        for (&(started, depth), error) in sites.iter().zip(&errors[lexer_errors..]) {
+            debug_assert!(depth > 0, "`source_file` opens the root before any error");
+            if started > walked {
+                newest = preorder
+                    .nth(started - 1 - walked)
+                    .expect("every started node is in the tree");
+                walked = started;
+            }
+            let outer = newest.ancestors().count() - depth;
+            let owner = newest
+                .ancestors()
+                .skip(outer)
+                .find(|node| node.text_range().start() < error.range.start())
+                .unwrap_or_else(|| root.clone());
+            owners.push(Some(owner.text_range()));
+        }
+    }
     (green, errors, owners)
 }
 
@@ -96,15 +117,14 @@ struct Builder<'a> {
     /// and insert at its end.
     prev_token_range: TextRange,
     depth: usize,
+    /// Nodes started so far; the newest is the `started`-th in the finished
+    /// tree's preorder.
+    started: usize,
     errors: &'a mut Vec<SyntaxError>,
-    /// Where each open node begins, innermost last.
-    open_starts: Vec<TextSize>,
-    /// For each error this builder pushed, the range of the node it was
-    /// reported in, filled in when that node finishes.
-    owners: Vec<TextRange>,
-    /// The errors whose node is open: the node's index in
-    /// `open_starts` and the error's index in `owners`.
-    unowned: Vec<(usize, usize)>,
+    /// For each error this builder pushed, `started` and `depth` at the
+    /// push. The nodes open then are the outermost `depth` ancestors (self
+    /// included) of the `started`-th node in preorder.
+    sites: Vec<(usize, usize)>,
 }
 
 impl Builder<'_> {
@@ -117,7 +137,7 @@ impl Builder<'_> {
         }
         self.inner.start_node(kind.into());
         self.depth += 1;
-        self.open_starts.push(self.offset);
+        self.started += 1;
     }
 
     fn finish_node(&mut self) {
@@ -127,18 +147,6 @@ impl Builder<'_> {
             self.eat_trivia();
         }
         self.inner.finish_node();
-        let start = self.open_starts.pop().unwrap_or_default();
-        if !self.unowned.is_empty() {
-            let open = self.open_starts.len();
-            let range = TextRange::new(start, self.offset);
-            let owners = &mut self.owners;
-            self.unowned.retain(|&(node, error)| {
-                if node == open {
-                    owners[error] = range;
-                }
-                node != open
-            });
-        }
     }
 
     fn token(&mut self) {
@@ -204,17 +212,11 @@ impl Builder<'_> {
         });
     }
 
-    /// Record `error` with its owner: the innermost open node that began
-    /// before it, since one begun AT the offending token may be the next
-    /// construct.
+    /// Record `error`; its owner is the innermost open node that began
+    /// before it (one begun AT the offending token may be the next
+    /// construct), resolved in [`build`].
     fn push_error(&mut self, error: SyntaxError) {
-        let node = self
-            .open_starts
-            .iter()
-            .rposition(|&start| start < error.range.start())
-            .unwrap_or(0);
-        self.unowned.push((node, self.owners.len()));
-        self.owners.push(error.range);
+        self.sites.push((self.started, self.depth));
         self.errors.push(error);
     }
 
