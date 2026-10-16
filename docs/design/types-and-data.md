@@ -14,7 +14,12 @@
 - **T03** `type Foo =` always mints. No transparent aliases; two identical spellings are
   two types. Records are exact structural types; a structural record has no declaration,
   so it has no owner, and the newtype line is what gives it one. Nominal and structural
-  never coerce.
+  never coerce. Because records are exact, a field name never determines its receiver's
+  type: a field access or index on a receiver that is still undetermined waits until
+  something else determines it (a later use in the body, or a caller in its inference group,
+  T11), and asks for an annotation only if nothing does. A deref (halvko/must#161) and a
+  dot-call (halvko/must#162) ask on the spot. Calling such a field commits it to a safe `fn`,
+  so an `unsafe fn` field is a mismatch there (TODO: halvko/must#162).
 - **T04** A variant is a value, never a type. A variant constructor — `Shape::Point`,
   `Option::<usize>::Some(11)`, the elided `::Some(x)` — has its enum's type, and a
   payload-carrying one is the constructor function `fn(payload...) -> Enum`; every enum value
@@ -64,7 +69,12 @@
   and the second reports the mismatch (TODO: halvko/must#146: blame both). The firewall covers
   the item's signature, not its body: editing a fully typed body re-infers the groups it feeds,
   and can change its callees' signatures. A generic body stays a hard firewall: its rigid
-  params must not fill a monotype. There is no cross-file inference.
+  params must not fill a monotype. There is no cross-file inference. A member's own check
+  (its diagnostics and expression types) runs its body alone first, joins included, then fills
+  what the body left open from the signature its group solved, so a caller's use is a defining
+  use for the member's literals without ever overriding what the body concluded. A bound the
+  filled type doesn't satisfy is reported where the body uses it, like any other. (TODO:
+  halvko/must#161: a part with a borrow in it is not filled.)
 - **T12** An unconstrained join resolves by a family-aware plurality vote over concrete branch
   types: unresolved branches abstain, all-free ties tie together, a family tie recovers with
   the first witness.

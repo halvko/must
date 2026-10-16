@@ -36,7 +36,7 @@ use ena::unify::InPlaceUnificationTable;
 use rustc_hash::FxHashMap;
 
 use crate::constraint::resolve_fully;
-use crate::infer::InferCtx;
+use crate::infer::{DeferredProjection, InferCtx};
 use crate::item_tree::item_tree;
 use crate::ty::{ParamScope, Ty, TyVar, TyVarValue, erase_infer, lower_type_ref_in};
 use crate::{ItemLoc, file_item_ids, item_loc};
@@ -68,26 +68,7 @@ pub struct InferenceGroups {
 pub fn inference_groups(db: &dyn Db, file: SourceFile) -> InferenceGroups {
     let tree = item_tree(db, file);
     let ids = file_item_ids(db, file);
-    let group_inferrable: Vec<bool> = tree
-        .items
-        .iter()
-        .map(|it| {
-            // Type items declare no value: they have no signature to infer,
-            // so they never join a binding group. Generic items NEVER join
-            // one either (TR06, load-bearing): a group's shared signature
-            // variable is a monotype, so membership would pin every
-            // instantiation of the scheme to one type. The fully-annotated
-            // rule makes them firewall items — their scheme is complete
-            // from the binder (and when the rule is violated the signature
-            // is `{error}` with the definition carrying the diagnostic),
-            // so there is nothing group inference could add; the explicit
-            // `generics.is_empty()` guard keeps rule-violating generics
-            // (whose `type_ref` is `None`) out too.
-            matches!(it.kind, crate::item_tree::ItemKind::Value(_))
-                && it.generics.is_empty()
-                && it.type_ref.as_ref().is_none_or(|tr| !tr.is_fully_typed())
-        })
-        .collect();
+    let group_inferrable: Vec<bool> = tree.items.iter().map(is_group_inferrable).collect();
 
     // Item identity → index, the same (name, disambiguator) scheme ids use.
     let mut index_of: FxHashMap<(&str, u32), usize> = FxHashMap::default();
@@ -196,6 +177,25 @@ pub fn inference_groups(db: &dyn Db, file: SourceFile) -> InferenceGroups {
         groups: state.groups,
         sources,
     }
+}
+
+/// Whether a top-level item joins a binding group: a value item with no
+/// generic binder and no fully typed contract.
+pub(crate) fn is_group_inferrable(data: &crate::item_tree::ItemData) -> bool {
+    // Type items declare no value: they have no signature to infer,
+    // so they never join a binding group. Generic items NEVER join
+    // one either (TR06, load-bearing): a group's shared signature
+    // variable is a monotype, so membership would pin every
+    // instantiation of the scheme to one type. The fully-annotated
+    // rule makes them firewall items — their scheme is complete
+    // from the binder (and when the rule is violated the signature
+    // is `{error}` with the definition carrying the diagnostic),
+    // so there is nothing group inference could add; the explicit
+    // `generics.is_empty()` guard keeps rule-violating generics
+    // (whose `type_ref` is `None`) out too.
+    matches!(data.kind, crate::item_tree::ItemKind::Value(_))
+        && data.generics.is_empty()
+        && data.type_ref.as_ref().is_none_or(|tr| !tr.is_fully_typed())
 }
 
 /// Whether `item`'s body feeds the groups of the unannotated items it
@@ -398,6 +398,9 @@ pub fn infer_group<'db>(db: &'db dyn Db, group: GroupId<'db>) -> GroupSignatures
 
     // Each member's recorded variables, for the walk after the loop.
     let mut recorded = Vec::new();
+    // Each member's field accesses and indexes whose receiver its own body
+    // left undetermined; retried after every body has run.
+    let mut deferred = Vec::new();
     // One pass, in this order, no fixpoint: whichever body is processed
     // first constrains the shared variables — its signature, another
     // member's signature via a call, or an annotation hole — and that
@@ -441,6 +444,10 @@ pub fn infer_group<'db>(db: &'db dyn Db, group: GroupId<'db>) -> GroupSignatures
         // `g`'s return type to `str` while its branches say `usize` — and
         // the mismatch would be visible from no single item.
         ctx.solve();
+        let waiting = ctx.take_deferred_projections();
+        if !waiting.is_empty() {
+            deferred.push((loc, item, waiting));
+        }
         let left_unbound = ctx.left_unbound().to_vec();
         let mut own_error = false;
         if !left_unbound.is_empty() || root_ty.contains_error() {
@@ -469,6 +476,10 @@ pub fn infer_group<'db>(db: &'db dyn Db, group: GroupId<'db>) -> GroupSignatures
         // query's business; only the signatures leave this query.
     }
 
+    // The members' bodies and uses have run: project what they determined.
+    // A projection's error counts as its member's own, like any other.
+    recorded.extend(retry_projections(db, &mut table, &in_group, &mut deferred));
+
     // A variable a body met an error on that is open in what its member
     // produces (the return of `fn () { missing }`) becomes `{error}`, so no
     // fully typed body decides what the body got wrong. Parameters stay
@@ -486,6 +497,9 @@ pub fn infer_group<'db>(db: &'db dyn Db, group: GroupId<'db>) -> GroupSignatures
     for source in &groups.sources[group.index(db) as usize] {
         crate::infer::check_item_body(db, source.to_id(db), &mut table, &in_group, true).solve();
     }
+    // What the sources determined, last; a projection whose receiver they
+    // left undetermined stays open and erases to `{error}` below.
+    retry_projections(db, &mut table, &in_group, &mut deferred);
 
     GroupSignatures {
         signatures: member_locs
@@ -497,6 +511,46 @@ pub fn infer_group<'db>(db: &'db dyn Db, group: GroupId<'db>) -> GroupSignatures
             // `Ty::Error` and pass through unchanged.)
             .map(|loc| erase_infer(&resolve_fully(&mut table, &in_group[loc])))
             .collect(),
+    }
+}
+
+/// Retry each member's deferred projections against the group's table,
+/// repeating while any resolves: one member's projection can determine
+/// another's receiver, whatever order the members run in. Leaves in
+/// `deferred` the ones whose receiver is undetermined, and returns, per
+/// member, the variables a retry left unbound on an error.
+fn retry_projections<'db, 'l>(
+    db: &'db dyn Db,
+    table: &mut InPlaceUnificationTable<TyVar>,
+    in_group: &FxHashMap<ItemLoc, Ty>,
+    deferred: &mut [(&'l ItemLoc, crate::ItemId<'db>, Vec<DeferredProjection>)],
+) -> Vec<(&'l ItemLoc, Vec<TyVar>)> {
+    let mut left_unbound = Vec::new();
+    loop {
+        let mut progressed = false;
+        for (loc, item, waiting) in deferred.iter_mut() {
+            if waiting.is_empty() {
+                continue;
+            }
+            let before = waiting.len();
+            let mut ctx = InferCtx::new(
+                db,
+                item.file(db),
+                crate::body::body(db, *item),
+                crate::resolutions(db, *item),
+                table,
+                in_group,
+                true,
+            );
+            *waiting = ctx.retry_projections(std::mem::take(waiting));
+            progressed |= waiting.len() < before;
+            if !ctx.left_unbound().is_empty() {
+                left_unbound.push((*loc, ctx.left_unbound().to_vec()));
+            }
+        }
+        if !progressed {
+            return left_unbound;
+        }
     }
 }
 
