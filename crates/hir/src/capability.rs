@@ -197,10 +197,10 @@ fn find_component<T>(
     // component of anything: what it stands for is decided at the MENTION,
     // by the argument in its place, and [`decl_flows`] is what says whether
     // this position is one that argument reaches.
-    if let Ty::Param(param) = ty {
-        if owner == Some(&param.item) {
-            return None;
-        }
+    if let Ty::Param(param) = ty
+        && owner == Some(&param.item)
+    {
+        return None;
     }
     if let Some(found) = leaf(db, ty) {
         return Some(found);
@@ -593,10 +593,10 @@ fn blame(
     search: &mut Search,
     path: &mut Vec<String>,
 ) -> Option<Blame> {
-    if let Ty::Param(param) = ty {
-        if owner == Some(&param.item) {
-            return None;
-        }
+    if let Ty::Param(param) = ty
+        && owner == Some(&param.item)
+    {
+        return None;
     }
     match ty {
         Ty::Named(named) => {

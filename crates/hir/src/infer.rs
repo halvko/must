@@ -6211,6 +6211,7 @@ impl<'a, 'db> InferCtx<'a, 'db> {
     /// [`Self::infer_member_call`]'s shape with none of the instantiation
     /// (a builtin member has no binder, no owner and no regions), so it is
     /// just the signature and the shared receiver-appending tail.
+    #[allow(clippy::too_many_arguments)]
     fn infer_builtin_member_call(
         &mut self,
         expr: ExprId,
@@ -6662,6 +6663,7 @@ impl<'a, 'db> InferCtx<'a, 'db> {
     /// the bound-directed one so a rigid receiver never gets different
     /// advice from a nominal one; `member` is what the diagnostic points at
     /// (the member itself concretely, the trait for a bound-directed call).
+    #[allow(clippy::too_many_arguments)]
     fn receiver_shape_refusal(
         &self,
         expr: ExprId,

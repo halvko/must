@@ -2044,15 +2044,10 @@ impl<'db, M: Mode> Machine<'db, M> {
             // pairing (deferred-error mode) traps ill-typed, never silently
             // unequal.
             Eq | Ne => {
-                if let (Value::Int(l), Value::Int(r)) = (&l, &r) {
-                    if l.kind() != r.kind() {
-                        return Err(self.ill_typed(
-                            "integer operands",
-                            &Value::Int(*r),
-                            loc,
-                            origin,
-                        ));
-                    }
+                if let (Value::Int(l), Value::Int(r)) = (&l, &r)
+                    && l.kind() != r.kind()
+                {
+                    return Err(self.ill_typed("integer operands", &Value::Int(*r), loc, origin));
                 }
                 Ok(Value::Bool(if matches!(op, Eq) { l == r } else { l != r }))
             }
@@ -4054,6 +4049,7 @@ impl<M> Machine<'_, M> {
     /// this are [`Machine::read_range`]'s and [`Machine::judge_write_range`]'s
     /// own aliasing step, so every range primitive built on them — present
     /// or future — is covered by construction, not by a list of names.
+    #[allow(clippy::too_many_arguments)]
     fn aliasing_access_range(
         &mut self,
         tag: Provenance,
