@@ -4,6 +4,8 @@
 //! green tree lives in `builder.rs`.
 
 use crate::SyntaxKind::{self, *};
+use crate::lexer::Token;
+use rowan::{TextRange, TextSize};
 
 #[derive(Debug)]
 pub(crate) enum Event {
@@ -38,51 +40,88 @@ pub(crate) struct TokenFix {
 }
 
 pub(crate) struct Parser<'t> {
-    tokens: &'t [SyntaxKind],
-    /// The source text of each token in [`Self::tokens`], same indexing.
-    /// Read only where kinds can't tell: a retired spelling
-    /// ([`Parser::at_word`]) and `,` digit groups ([`Parser::nth_joined`]).
-    texts: &'t [&'t str],
+    /// The kinds of `lexed`'s non-trivia tokens: what the grammar sees.
+    tokens: Vec<SyntaxKind>,
     pos: usize,
+    source: &'t str,
+    /// The lexer's tokens over `source`, trivia included. Read only where
+    /// kinds can't tell: a retired spelling ([`Parser::at_word`]) and `,`
+    /// digit groups ([`Parser::eat_digit_group_commas`]).
+    lexed: &'t [Token],
+    /// Index in `lexed` and start offset of the current token `tokens[pos]`;
+    /// kept in step with `pos` by [`Parser::bump_any`] and `skip_trivia`.
+    lexed_pos: usize,
+    offset: TextSize,
     events: Vec<Event>,
 }
 
 impl<'t> Parser<'t> {
-    pub(crate) fn new(tokens: &'t [SyntaxKind], texts: &'t [&'t str]) -> Parser<'t> {
-        debug_assert_eq!(tokens.len(), texts.len());
-        Parser {
+    pub(crate) fn new(source: &'t str, lexed: &'t [Token]) -> Parser<'t> {
+        let tokens = lexed
+            .iter()
+            .map(|token| token.kind)
+            .filter(|kind| !kind.is_trivia())
+            .collect();
+        let mut p = Parser {
             tokens,
-            texts,
             pos: 0,
+            source,
+            lexed,
+            lexed_pos: 0,
+            offset: TextSize::new(0),
             events: Vec::new(),
+        };
+        p.skip_trivia();
+        p
+    }
+
+    fn skip_trivia(&mut self) {
+        while let Some(token) = self.lexed.get(self.lexed_pos)
+            && token.kind.is_trivia()
+        {
+            self.offset += token.len;
+            self.lexed_pos += 1;
         }
     }
 
-    /// Whether the current token is an identifier spelling `word` — the
-    /// contextual test, for retired spellings only. Everything the language
-    /// still HAS is a kind; nothing here should ever grow a second user
-    /// without a keyword to go with it.
+    /// Whether the current token is an identifier spelling `word`. Every
+    /// `word` asked about is a retired spelling: a spelling the language has
+    /// is a kind.
     pub(crate) fn at_word(&self, word: &str) -> bool {
-        self.at(IDENT) && self.texts.get(self.pos).is_some_and(|t| *t == word)
+        self.at(IDENT)
+            && self.source[TextRange::at(self.offset, self.lexed[self.lexed_pos].len)] == *word
     }
 
-    /// The source text of the `n`th token ahead; empty at the end.
-    fn nth_text(&self, n: usize) -> &'t str {
-        self.texts.get(self.pos + n).copied().unwrap_or("")
-    }
-
-    /// Whether the `n`th token ahead touches the token before it, with no
-    /// trivia between. Every text is a slice of the one source, so two
-    /// tokens touch exactly when one's end address is the other's start.
-    fn nth_joined(&self, n: usize) -> bool {
-        let i = self.pos + n;
-        match (
-            i.checked_sub(1).and_then(|j| self.texts.get(j)),
-            self.texts.get(i),
-        ) {
-            (Some(a), Some(b)) => a.as_ptr().wrapping_add(a.len()) == b.as_ptr(),
-            _ => false,
+    /// The non-trivia tokens from the one before the current token onwards,
+    /// each as its kind, its text and whether it touches the token before
+    /// it with no trivia between. Empty when no token precedes the current.
+    fn tokens_from_prev(&self) -> impl Iterator<Item = (SyntaxKind, &'t str, bool)> + use<'t> {
+        let (source, lexed) = (self.source, self.lexed);
+        let (mut i, mut offset) = (self.lexed_pos, self.offset);
+        loop {
+            let Some(j) = i.checked_sub(1) else {
+                i = lexed.len();
+                break;
+            };
+            i = j;
+            offset -= lexed[i].len;
+            if !lexed[i].kind.is_trivia() {
+                break;
+            }
         }
+        std::iter::from_fn(move || {
+            let mut joined = true;
+            while let Some(token) = lexed.get(i) {
+                let range = TextRange::at(offset, token.len);
+                i += 1;
+                offset = range.end();
+                if !token.kind.is_trivia() {
+                    return Some((token.kind, &source[range], joined));
+                }
+                joined = false;
+            }
+            None
+        })
     }
 
     pub(crate) fn finish(self) -> Vec<Event> {
@@ -114,6 +153,9 @@ impl<'t> Parser<'t> {
     pub(crate) fn bump_any(&mut self) {
         if !self.at(EOF) {
             self.pos += 1;
+            self.offset += self.lexed[self.lexed_pos].len;
+            self.lexed_pos += 1;
+            self.skip_trivia();
             self.events.push(Event::Token);
         }
     }
@@ -203,18 +245,20 @@ impl<'t> Parser<'t> {
         let digits = |text: &str, len: std::ops::RangeInclusive<usize>| {
             len.contains(&text.len()) && text.bytes().all(|b| b.is_ascii_digit())
         };
-        let Some(lit) = self.pos.checked_sub(1).map(|i| self.texts[i]) else {
+        if !self.at(COMMA) {
             return false;
-        };
-        if self.nth(0) != COMMA || self.prev() != Some(INT_NUMBER) || !digits(lit, 1..=3) {
+        }
+        let mut tokens = self.tokens_from_prev();
+        if !tokens
+            .next()
+            .is_some_and(|(kind, lit, _)| kind == INT_NUMBER && digits(lit, 1..=3))
+        {
             return false;
         }
         let mut n = 0;
-        while self.nth(n) == COMMA
-            && self.nth(n + 1) == INT_NUMBER
-            && self.nth_joined(n)
-            && self.nth_joined(n + 1)
-            && digits(self.nth_text(n + 1), 3..=3)
+        while let (Some((COMMA, _, true)), Some((INT_NUMBER, group, true))) =
+            (tokens.next(), tokens.next())
+            && digits(group, 3..=3)
         {
             n += 2;
         }
