@@ -103,6 +103,15 @@ pub struct ItemLoc {
 }
 
 impl ItemLoc {
+    /// The item's name, or `this item` when it has none.
+    pub fn name_or_this_item(&self) -> &str {
+        if self.name.is_empty() {
+            "this item"
+        } else {
+            &self.name
+        }
+    }
+
     /// A top-level (non-member) location.
     pub fn top_level(file: SourceFile, name: std::sync::Arc<str>, disambiguator: u32) -> ItemLoc {
         ItemLoc {
@@ -593,6 +602,13 @@ pub fn file_diagnostics(db: &dyn Db, file: SourceFile) -> Vec<Diagnostic> {
         .collect();
     diagnostics.extend(range_diagnostics(db, file).iter().cloned());
     let item_name = |loc: &ItemLoc| item_source(db, loc.to_id(db)).and_then(|it| it.name());
+    let defined_here = |loc: &ItemLoc| {
+        item_name(loc).map(|n| RelatedInfo {
+            file: loc.file,
+            range: n.syntax().text_range(),
+            message: format!("`{}` is defined here", loc.name),
+        })
+    };
 
     let syntax_root = parse(db, file).syntax_node();
     for item in all_checkable_items(db, file) {
@@ -726,8 +742,30 @@ pub fn file_diagnostics(db: &dyn Db, file: SourceFile) -> Vec<Diagnostic> {
             // MIR's traps); only ranges and related locations attach here.
             let mut enum_note = None;
             let mut related = match diag {
-                InferenceDiagnostic::NeedsAnnotation { item, .. }
-                | InferenceDiagnostic::CannotInferGenericParam { item, .. } => item_name(item)
+                // The definition, then each disagreeing caller.
+                InferenceDiagnostic::NeedsAnnotation {
+                    item, disagreement, ..
+                } => {
+                    let defined = item_name(item).map(|n| RelatedInfo {
+                        file: item.file,
+                        range: n.syntax().text_range(),
+                        message: "defined here".to_owned(),
+                    });
+                    let others = disagreement
+                        .iter()
+                        .flat_map(|d| d.named())
+                        .filter(|other| *other != item)
+                        .filter_map(defined_here);
+                    defined.into_iter().chain(others).collect()
+                }
+                // Each body that decided the member's type, else the member.
+                InferenceDiagnostic::OutvotedUse { item, outvoted, .. } => {
+                    match &outvoted.deciders[..] {
+                        [] => defined_here(item).into_iter().collect(),
+                        deciders => deciders.iter().filter_map(defined_here).collect(),
+                    }
+                }
+                InferenceDiagnostic::CannotInferGenericParam { item, .. } => item_name(item)
                     .map(|n| {
                         vec![RelatedInfo {
                             file: item.file,
