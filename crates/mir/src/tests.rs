@@ -794,6 +794,73 @@ static main = fn { let f = id; };
 }
 
 #[test]
+fn use_of_an_item_its_callers_disagree_on_traps_naming_them() {
+    check_mir(
+        r#"
+static id = fn (x) { x }
+static a = fn () -> usize { id(1) };
+static b = fn () -> bool { id(true) };
+"#,
+        expect![[r#"
+            item id:
+            fn b0(_1: _) -> _ {
+              _0: _  // return
+              _1: _  // param x
+              _2: _
+              bb0:
+                _2 = _1
+                _0 = _2
+                return
+            }
+            fn b1() -> fn(_) -> _ {
+              _0: fn(_) -> _  // return
+              bb0:
+                _0 = fn b0
+                return
+            }
+            item a:
+            fn b0() -> usize {
+              _0: usize  // return
+              _1: {error}
+              _2: {error}
+              bb0:
+                _1 = trap "callers disagree on the type of `id`: `a` makes it `fn(usize) -> usize`, `b` makes it `fn(bool) -> bool`; add a type annotation to its definition" -> bb1
+              bb1:
+                _2 = call _1(()) -> bb2
+              bb2:
+                _0 = _2
+                return
+            }
+            fn b1() -> fn() -> usize {
+              _0: fn() -> usize  // return
+              bb0:
+                _0 = fn b0
+                return
+            }
+            item b:
+            fn b0() -> bool {
+              _0: bool  // return
+              _1: {error}
+              _2: {error}
+              bb0:
+                _1 = trap "callers disagree on the type of `id`: `a` makes it `fn(usize) -> usize`, `b` makes it `fn(bool) -> bool`; add a type annotation to its definition" -> bb1
+              bb1:
+                _2 = call _1(true) -> bb2
+              bb2:
+                _0 = _2
+                return
+            }
+            fn b1() -> fn() -> bool {
+              _0: fn() -> bool  // return
+              bb0:
+                _0 = fn b0
+                return
+            }
+        "#]],
+    );
+}
+
+#[test]
 fn wildcard_patterns_bind_nothing_but_still_evaluate() {
     // `_` binds nothing (no ` // <name>` comment), but the initializer and
     // the argument are still lowered and evaluated for their effects.

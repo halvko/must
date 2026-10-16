@@ -841,6 +841,44 @@ impl Ty {
         }
     }
 
+    /// This type with each inference variable replaced by `f`'s answer
+    /// for it. Regions are carried through untouched.
+    pub(crate) fn map_infer(&self, f: &mut impl FnMut(TyVar) -> Ty) -> Ty {
+        match self {
+            Ty::Infer(var) => f(*var),
+            Ty::Fn(fn_ty) => {
+                let params = fn_ty.params.iter().map(|p| p.map_infer(f)).collect();
+                let ret = fn_ty.ret.map_infer(f);
+                fn_ty.rebuilt(params, ret)
+            }
+            Ty::RawPtr { mutable, pointee } => Ty::raw_ptr(*mutable, pointee.map_infer(f)),
+            Ty::Borrow {
+                mutable,
+                region,
+                referent,
+            } => Ty::borrow(*mutable, region.clone(), referent.map_infer(f)),
+            Ty::Array { elem, len } => Ty::array(elem.map_infer(f), len.clone()),
+            Ty::Record(rec) => Ty::record(
+                rec.fields
+                    .iter()
+                    .map(|(name, ty)| (name.clone(), ty.map_infer(f)))
+                    .collect(),
+            ),
+            Ty::Named(named) => Ty::Named(NamedTy {
+                decl: named.decl.clone(),
+                args: named
+                    .args
+                    .iter()
+                    .map(|arg| match arg {
+                        GenericArg::Ty(ty) => GenericArg::Ty(ty.map_infer(f)),
+                        other => other.clone(),
+                    })
+                    .collect(),
+            }),
+            other => other.clone(),
+        }
+    }
+
     /// Whether an fn type appears anywhere in the type. Same traversal
     /// shape (and the same declared-shape blind spot on `Named`, whose args
     /// are visited) as [`Ty::contains_infer`]. Used by the
@@ -2088,23 +2126,43 @@ pub fn signature<'db>(db: &'db dyn Db, item: ItemId<'db>) -> Ty {
             &ParamScope::default(),
         );
     }
-    let Some(index) = crate::item_index(db, item) else {
+    let Some((group, position)) = group_position(db, item) else {
         return Ty::Error;
     };
-    let file = item.file(db);
-    let groups = crate::groups::inference_groups(db, file);
-    let Some(Some(group)) = groups.group_of.get(index).copied() else {
-        return Ty::Error;
-    };
-    let members = &groups.groups[group as usize];
-    let Some(position) = members.iter().position(|&member| member == index) else {
-        return Ty::Error;
-    };
-    crate::groups::infer_group(db, crate::groups::GroupId::new(db, file, group))
+    crate::groups::infer_group(db, group)
         .signatures
         .get(position)
         .cloned()
         .unwrap_or(Ty::Error)
+}
+
+/// `item`'s inference group and its position among the members.
+fn group_position<'db>(
+    db: &'db dyn Db,
+    item: ItemId<'db>,
+) -> Option<(crate::groups::GroupId<'db>, usize)> {
+    let index = crate::item_index(db, item)?;
+    let file = item.file(db);
+    let groups = crate::groups::inference_groups(db, file);
+    let group = (*groups.group_of.get(index)?)?;
+    let position = groups.groups[group as usize]
+        .iter()
+        .position(|&member| member == index)?;
+    Some((crate::groups::GroupId::new(db, file, group), position))
+}
+
+/// What the fully typed callers that disagree on `item`'s type disagree
+/// on, if they do.
+pub fn disagreement<'db>(
+    db: &'db dyn Db,
+    item: ItemId<'db>,
+) -> Option<crate::groups::Disagreement> {
+    let (group, position) = group_position(db, item)?;
+    crate::groups::infer_group(db, group)
+        .disagreements
+        .iter()
+        .find(|(member, _)| *member as usize == position)
+        .map(|(_, disagreement)| disagreement.clone())
 }
 
 /// Whether uses of `item` should say "add a type annotation": inference

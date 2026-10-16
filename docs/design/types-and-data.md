@@ -60,11 +60,16 @@
   too: one returning `f()` for a broken `f`, or a callee `h` returning its argument when a
   broken caller returns `h(x)`. A variable that is only in a function's parameters, at any
   depth, is not poisoned, and the rest of the signature (its arity, for one) stays as written.
-  The sources run in source order, so when two disagree on a hole, the first one's fill stands
-  and the second reports the mismatch (TODO: halvko/must#146: blame both). The firewall covers
-  the item's signature, not its body: editing a fully typed body re-infers the groups it feeds,
-  and can change its callees' signatures. A generic body stays a hard firewall: its rigid
-  params must not fill a monotype. There is no cross-file inference.
+  Each source runs alone from the members' state, and their fills are merged after: when sources
+  disagree on a member, it becomes `{error}` and every use of it names each source with the type
+  it makes it, whatever their order. Members whose signatures or fills share a variable are
+  merged as one, and all of them become `{error}` when that fails. A use of a member whose own
+  fills conflict names its sources with their types; a use of any other linked member names
+  all the linked members and their sources. A source that contradicts what a member's body
+  decided fills nothing and reports the mismatch itself. The firewall covers the item's
+  signature, not its body: editing a fully typed body re-infers the groups it feeds, and can
+  change its callees' signatures. A generic body stays a hard firewall: its rigid params must
+  not fill a monotype. There is no cross-file inference.
 - **T12** An unconstrained join resolves by a family-aware plurality vote over concrete branch
   types: unresolved branches abstain, all-free ties tie together, a family tie recovers with
   the first witness.

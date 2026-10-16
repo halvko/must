@@ -555,8 +555,30 @@ pub fn file_diagnostics(db: &dyn Db, file: SourceFile) -> Vec<Diagnostic> {
             // MIR's traps); only ranges and related locations attach here.
             let mut enum_note = None;
             let mut related = match diag {
-                InferenceDiagnostic::NeedsAnnotation { item, .. }
-                | InferenceDiagnostic::CannotInferGenericParam { item, .. } => item_name(item)
+                // The definition, then each linked member and disagreeing
+                // caller.
+                InferenceDiagnostic::NeedsAnnotation {
+                    item, disagreement, ..
+                } => {
+                    let defined = item_name(item).map(|n| RelatedInfo {
+                        file: item.file,
+                        range: n.syntax().text_range(),
+                        message: "defined here".to_owned(),
+                    });
+                    let others = disagreement
+                        .iter()
+                        .flat_map(|d| d.named())
+                        .filter(|other| *other != item);
+                    let others = others.filter_map(|other| {
+                        item_name(other).map(|n| RelatedInfo {
+                            file: other.file,
+                            range: n.syntax().text_range(),
+                            message: format!("`{}` is defined here", other.name),
+                        })
+                    });
+                    defined.into_iter().chain(others).collect()
+                }
+                InferenceDiagnostic::CannotInferGenericParam { item, .. } => item_name(item)
                     .map(|n| {
                         vec![RelatedInfo {
                             file: item.file,

@@ -3008,15 +3008,15 @@ impl LowerCtx<'_> {
                 if hir::signature(self.db, target).contains_error() {
                     // Same reconciliation as `lower_name_ref`'s
                     // broken-annotation arm.
-                    let message = if hir::ty::signature_needs_annotation(self.db, target) {
-                        InferenceDiagnostic::NeedsAnnotation {
-                            expr: root,
-                            item: loc.clone(),
-                            generic_caller: hir::is_generic_body(self.db, self.item),
-                        }
-                        .message()
-                    } else {
-                        format!("cannot use `{name}`: its type annotation has errors")
+                    let generic_caller = hir::is_generic_body(self.db, self.item);
+                    let message = match InferenceDiagnostic::needs_annotation(
+                        self.db,
+                        root,
+                        &loc,
+                        generic_caller,
+                    ) {
+                        Some(diag) => diag.message(),
+                        None => format!("cannot use `{name}`: its type annotation has errors"),
                     };
                     return self.trap(b, root, message);
                 }

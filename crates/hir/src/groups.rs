@@ -32,10 +32,10 @@
 //! items. Today every item counts as internal.
 
 use base_db::{Db, SourceFile};
-use ena::unify::InPlaceUnificationTable;
+use ena::unify::{InPlaceUnificationTable, UnifyKey};
 use rustc_hash::FxHashMap;
 
-use crate::constraint::resolve_fully;
+use crate::constraint::{Constraints, resolve_finished, resolve_fully};
 use crate::infer::InferCtx;
 use crate::item_tree::item_tree;
 use crate::ty::{ParamScope, Ty, TyVar, TyVarValue, erase_infer, lower_type_ref_in};
@@ -372,6 +372,23 @@ impl Tarjan<'_> {
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct GroupSignatures {
     pub signatures: Vec<Ty>,
+    /// The members whose fully typed callers disagree on their type, by
+    /// position.
+    pub disagreements: Vec<(u32, Disagreement)>,
+}
+
+/// What fully typed callers disagree on.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Disagreement {
+    /// The member's own fills conflict: each caller, in source order, with
+    /// the type it makes it, rendered.
+    Member(Vec<(ItemLoc, String)>),
+    /// The conflict shows only across members the callers' fills link: all
+    /// of them, and every caller that filled one, in source order.
+    Linked {
+        members: Vec<ItemLoc>,
+        callers: Vec<ItemLoc>,
+    },
 }
 
 #[salsa::tracked(returns(ref))]
@@ -479,13 +496,67 @@ pub fn infer_group<'db>(db: &'db dyn Db, group: GroupId<'db>) -> GroupSignatures
     }
 
     // Fully typed bodies last, so they fill only what the members' own
-    // bodies left open (T11). One that disagrees changes nothing here; its
-    // own `infer` reports the mismatch. Its own errors (an unknown type in
-    // its signature, say) fill nothing either, so they aren't repeated at
-    // every use of its callees.
+    // bodies left open (T11). Each runs alone and its fills are kept aside,
+    // so no caller wins by coming first. A caller that contradicts a
+    // determined part fills nothing; its own `infer` reports it, as it does
+    // its own errors.
+    let open: Vec<(usize, Ty)> = member_locs
+        .iter()
+        .enumerate()
+        .map(|(i, loc)| (i, resolve_finished(&mut table, &in_group[loc])))
+        .filter(|(_, ty)| ty.contains_infer())
+        .collect();
+    // Per member, each caller that filled it and the type it filled in.
+    let mut fills: Vec<Vec<(ItemLoc, Ty)>> = vec![Vec::new(); member_locs.len()];
     for source in &groups.sources[group.index(db) as usize] {
+        let snapshot = table.snapshot();
         crate::infer::check_item_body(db, source.to_id(db), &mut table, &in_group, true).solve();
+        let made = table.vars_since_snapshot(&snapshot).start.index();
+        let filled: Vec<(usize, Ty)> = open
+            .iter()
+            .filter_map(|(i, before)| {
+                let sig = &in_group[&member_locs[*i]];
+                // Compared after `resolve_finished`, so a caller that only
+                // narrows a variable to a number counts as a fill.
+                let changed = resolve_finished(&mut table, sig) != *before;
+                changed.then(|| (*i, resolve_fully(&mut table, sig)))
+            })
+            .collect();
+        // The rollback drops the variables the body made and the number
+        // kind it gave older ones. Each such variable in a fill gets a fresh
+        // one of its kind; merging into the signature joins it back to the
+        // older variable.
+        let mut kinds: FxHashMap<TyVar, TyVarValue> = FxHashMap::default();
+        for (_, ty) in &filled {
+            let mut vars = rustc_hash::FxHashSet::default();
+            ty.open_vars(&mut vars);
+            for var in vars {
+                let kind = table.probe_value(var);
+                if var.index() >= made || matches!(kind, TyVarValue::UnknownNumber) {
+                    kinds.insert(var, kind);
+                }
+            }
+        }
+        table.rollback_to(snapshot);
+        let mut fresh: FxHashMap<TyVar, Ty> = FxHashMap::default();
+        for (i, ty) in filled {
+            let ty = ty.map_infer(&mut |var| match kinds.get(&var) {
+                Some(kind) => fresh
+                    .entry(var)
+                    .or_insert_with(|| Ty::Infer(table.new_key(kind.clone())))
+                    .clone(),
+                None => Ty::Infer(var),
+            });
+            fills[i].push((source.clone(), ty));
+        }
     }
+    let disagreements = merge_fills(
+        &mut table,
+        &member_locs,
+        &in_group,
+        &groups.sources[group.index(db) as usize],
+        &fills,
+    );
 
     GroupSignatures {
         signatures: member_locs
@@ -497,7 +568,152 @@ pub fn infer_group<'db>(db: &'db dyn Db, group: GroupId<'db>) -> GroupSignatures
             // `Ty::Error` and pass through unchanged.)
             .map(|loc| erase_infer(&resolve_fully(&mut table, &in_group[loc])))
             .collect(),
+        disagreements,
     }
+}
+
+impl Disagreement {
+    /// The message at a use of the member `name`.
+    pub fn message(&self, name: &str) -> String {
+        let quoted = |locs: &[ItemLoc]| {
+            let names: Vec<String> = locs.iter().map(|loc| format!("`{}`", loc.name)).collect();
+            names.join(", ")
+        };
+        match self {
+            Disagreement::Member(callers) => {
+                let makes: Vec<String> = callers
+                    .iter()
+                    .map(|(caller, ty)| format!("`{}` makes it `{ty}`", caller.name))
+                    .collect();
+                format!(
+                    "callers disagree on the type of `{name}`: {}; \
+                     add a type annotation to its definition",
+                    makes.join(", ")
+                )
+            }
+            Disagreement::Linked { members, callers } => format!(
+                "callers {} disagree on the types of {}, which they link; \
+                 add type annotations to their definitions",
+                quoted(callers),
+                quoted(members),
+            ),
+        }
+    }
+
+    /// The members and callers the message names.
+    pub fn named(&self) -> Vec<&ItemLoc> {
+        match self {
+            Disagreement::Member(callers) => callers.iter().map(|(caller, _)| caller).collect(),
+            Disagreement::Linked { members, callers } => members.iter().chain(callers).collect(),
+        }
+    }
+}
+
+/// Merge each member's fills into its signature, and poison the members
+/// their callers disagree on. Returns each poisoned member's position with
+/// what its callers disagree on.
+///
+/// Members whose signatures or fills share a variable are merged as one
+/// unit, and all of them are poisoned when it fails, so the outcome is the
+/// same whatever order the members and their callers come in.
+fn merge_fills(
+    table: &mut InPlaceUnificationTable<TyVar>,
+    member_locs: &[ItemLoc],
+    in_group: &FxHashMap<ItemLoc, Ty>,
+    sources: &[ItemLoc],
+    fills: &[Vec<(ItemLoc, Ty)>],
+) -> Vec<(u32, Disagreement)> {
+    let filled: Vec<usize> = (0..fills.len()).filter(|&i| !fills[i].is_empty()).collect();
+    // Link the filled members through the variables they share.
+    let mut unit: Vec<usize> = (0..fills.len()).collect();
+    fn root(unit: &mut [usize], i: usize) -> usize {
+        if unit[i] != i {
+            unit[i] = root(unit, unit[i]);
+        }
+        unit[i]
+    }
+    let mut owner: FxHashMap<TyVar, usize> = FxHashMap::default();
+    for &i in &filled {
+        let mut vars = rustc_hash::FxHashSet::default();
+        resolve_fully(table, &in_group[&member_locs[i]]).open_vars(&mut vars);
+        for (_, ty) in &fills[i] {
+            resolve_fully(table, ty).open_vars(&mut vars);
+        }
+        for var in vars {
+            let other = *owner.entry(var).or_insert(i);
+            let (a, b) = (root(&mut unit, i), root(&mut unit, other));
+            unit[a] = b;
+        }
+    }
+    // The region obligations `adopt` cannot keep don't matter here: region
+    // variables never leave the group (`erase_infer`).
+    let mut constraints = Constraints::new(true);
+    let mut unify_fills = |table: &mut InPlaceUnificationTable<TyVar>, i: usize| {
+        let sig = &in_group[&member_locs[i]];
+        fills[i]
+            .iter()
+            .all(|(_, ty)| constraints.unify_in_group(table, sig, ty))
+    };
+    let mut disagreements = Vec::new();
+    let mut done = vec![false; fills.len()];
+    for &first in &filled {
+        let head = root(&mut unit, first);
+        if done[head] {
+            continue;
+        }
+        done[head] = true;
+        let members: Vec<usize> = filled
+            .iter()
+            .copied()
+            .filter(|&i| root(&mut unit, i) == head)
+            .collect();
+        let snapshot = table.snapshot();
+        if members.iter().all(|&i| unify_fills(table, i)) {
+            table.commit(snapshot);
+            continue;
+        }
+        table.rollback_to(snapshot);
+        let linked = Disagreement::Linked {
+            members: members.iter().map(|&i| member_locs[i].clone()).collect(),
+            callers: sources
+                .iter()
+                .filter(|source| {
+                    members
+                        .iter()
+                        .any(|&i| fills[i].iter().any(|(caller, _)| caller == *source))
+                })
+                .cloned()
+                .collect(),
+        };
+        // A member whose own fills conflict names them with their types;
+        // the others name the whole set.
+        let typed: Vec<Option<Disagreement>> = members
+            .iter()
+            .map(|&i| {
+                let snapshot = table.snapshot();
+                let agree = unify_fills(table, i);
+                table.rollback_to(snapshot);
+                // Rendered: an unpinned literal reads `{number}`, a hole the
+                // caller left open `_`.
+                (!agree).then(|| {
+                    Disagreement::Member(
+                        fills[i]
+                            .iter()
+                            .map(|(caller, ty)| {
+                                (caller.clone(), resolve_finished(table, ty).display())
+                            })
+                            .collect(),
+                    )
+                })
+            })
+            .collect();
+        for (&i, typed) in members.iter().zip(typed) {
+            poison(table, &in_group[&member_locs[i]]);
+            disagreements.push((i as u32, typed.unwrap_or_else(|| linked.clone())));
+        }
+    }
+    disagreements.sort_unstable_by_key(|(i, _)| *i);
+    disagreements
 }
 
 /// Poison each of `recorded` that is open in what `own` produces.

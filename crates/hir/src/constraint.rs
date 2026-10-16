@@ -784,6 +784,18 @@ impl Constraints {
         self.unify(table, a, b, cause)
     }
 
+    /// Unify two types inside an inference group's own bookkeeping, where
+    /// no region obligation survives: the group's signatures leave it with
+    /// their region variables erased (`erase_infer`).
+    pub(crate) fn unify_in_group(
+        &mut self,
+        table: &mut InPlaceUnificationTable<TyVar>,
+        a: &Ty,
+        b: &Ty,
+    ) -> bool {
+        self.unify(table, a, b, None)
+    }
+
     /// RELATION: a value meeting a CONTEXT that already has a type. Unifies
     /// AND relates their regions — the second half is what `adopt` cannot
     /// do and must never be asked to.
@@ -1454,41 +1466,16 @@ fn unresolved_numbers(
 }
 
 pub(crate) fn resolve_fully(table: &mut InPlaceUnificationTable<TyVar>, ty: &Ty) -> Ty {
-    match ty {
-        Ty::Infer(var) => match table.probe_value(*var) {
-            TyVarValue::Known(known) => resolve_fully(table, &known),
-            // Canonicalize so equal results stay equal across runs. The
-            // number flavor stays in the table here — `resolve_finished`
-            // is the one place it becomes a rendered `{number}`.
-            TyVarValue::Unknown | TyVarValue::UnknownNumber => Ty::Infer(table.find(*var)),
-        },
-        Ty::Fn(f) => {
-            let params = f.params.iter().map(|p| resolve_fully(table, p)).collect();
-            let ret = resolve_fully(table, &f.ret);
-            f.rebuilt(params, ret)
-        }
-        Ty::RawPtr { mutable, pointee } => Ty::raw_ptr(*mutable, resolve_fully(table, pointee)),
-        // The REGION is carried through untouched: it is not this table's
-        // to resolve — regions are solved by the outlives module, over
-        // constraints, not by unification.
-        Ty::Borrow {
-            mutable,
-            region,
-            referent,
-        } => Ty::borrow(*mutable, region.clone(), resolve_fully(table, referent)),
-        Ty::Array { elem, len } => Ty::array(resolve_fully(table, elem), len.clone()),
-        Ty::Record(rec) => Ty::record(
-            rec.fields
-                .iter()
-                .map(|(name, ty)| (name.clone(), resolve_fully(table, ty)))
-                .collect(),
-        ),
-        Ty::Named(named) => Ty::Named(NamedTy {
-            decl: named.decl.clone(),
-            args: resolve_args_fully(table, &named.args),
-        }),
-        other => other.clone(),
-    }
+    // The REGION is carried through untouched: it is not this table's to
+    // resolve — regions are solved by the outlives module, over
+    // constraints, not by unification.
+    ty.map_infer(&mut |var| match table.probe_value(var) {
+        TyVarValue::Known(known) => resolve_fully(table, &known),
+        // Canonicalize so equal results stay equal across runs. The number
+        // flavor stays in the table here — `resolve_finished` is the one
+        // place it becomes a rendered `{number}`.
+        TyVarValue::Unknown | TyVarValue::UnknownNumber => Ty::Infer(table.find(var)),
+    })
 }
 
 /// [`resolve_fully`], additionally rendering still-unbound NUMBER-CLASS
@@ -1504,50 +1491,10 @@ pub(crate) fn resolve_finished(table: &mut InPlaceUnificationTable<TyVar>, ty: &
 }
 
 fn render_unresolved_numbers(table: &mut InPlaceUnificationTable<TyVar>, ty: &Ty) -> Ty {
-    match ty {
-        Ty::Infer(var) => match table.probe_value(*var) {
-            TyVarValue::UnknownNumber => Ty::UnresolvedNumber,
-            _ => ty.clone(),
-        },
-        Ty::Fn(f) => f.rebuilt(
-            f.params
-                .iter()
-                .map(|p| render_unresolved_numbers(table, p))
-                .collect(),
-            render_unresolved_numbers(table, &f.ret),
-        ),
-        Ty::Borrow {
-            mutable,
-            region,
-            referent,
-        } => Ty::borrow(
-            *mutable,
-            region.clone(),
-            render_unresolved_numbers(table, referent),
-        ),
-        Ty::RawPtr { mutable, pointee } => {
-            Ty::raw_ptr(*mutable, render_unresolved_numbers(table, pointee))
-        }
-        Ty::Array { elem, len } => Ty::array(render_unresolved_numbers(table, elem), len.clone()),
-        Ty::Record(rec) => Ty::record(
-            rec.fields
-                .iter()
-                .map(|(name, ty)| (name.clone(), render_unresolved_numbers(table, ty)))
-                .collect(),
-        ),
-        Ty::Named(named) => Ty::Named(NamedTy {
-            decl: named.decl.clone(),
-            args: named
-                .args
-                .iter()
-                .map(|arg| match arg {
-                    GenericArg::Ty(ty) => GenericArg::Ty(render_unresolved_numbers(table, ty)),
-                    GenericArg::Region(_) | GenericArg::Const(_) => arg.clone(),
-                })
-                .collect(),
-        }),
-        other => other.clone(),
-    }
+    ty.map_infer(&mut |var| match table.probe_value(var) {
+        TyVarValue::UnknownNumber => Ty::UnresolvedNumber,
+        _ => Ty::Infer(var),
+    })
 }
 
 /// [`resolve_fully`] over a generic-argument list — also used by `infer`'s
