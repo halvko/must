@@ -27,7 +27,7 @@ pub mod mono;
 pub mod wasm;
 
 use base_db::Db;
-use hir::ItemLoc;
+use hir::{IntKind, ItemLoc};
 use rustc_hash::FxHashMap;
 
 pub use mono::Refusal;
@@ -67,7 +67,7 @@ pub struct TrapInfo {
     pub detail: String,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum TrapKind {
     /// `panic("…")`.
     Panic,
@@ -141,35 +141,122 @@ impl Strings {
     }
 }
 
-#[derive(Debug, Default)]
-pub struct Traps {
-    entries: Vec<TrapInfo>,
+/// A trap identified by a few copyable facts, so a site can look up its
+/// entry without building the message.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum TrapKey {
+    Overflow {
+        kind: IntKind,
+        symbol: &'static str,
+    },
+    DivideByZero,
+    /// A constant index the checker already reported.
+    IndexConstant {
+        len: u32,
+        index: u128,
+    },
+    /// A runtime index: the message ends with a value only the run knows.
+    IndexDynamic {
+        len: u32,
+    },
+    /// A `panic` whose message is computed at runtime.
+    PanicRuntime,
+    Unreachable,
 }
 
-impl Traps {
-    pub fn intern(&mut self, kind: TrapKind, message: String, exact: bool) -> u32 {
-        self.intern_detailed(kind, message, exact, String::new())
-    }
-
-    pub fn intern_detailed(
-        &mut self,
-        kind: TrapKind,
-        message: String,
-        exact: bool,
-        detail: String,
-    ) -> u32 {
-        let entry = TrapInfo {
+impl TrapKey {
+    fn render(self) -> TrapInfo {
+        let (kind, message, exact, detail) = match self {
+            // The interpreter's overflow message names the operand values,
+            // so the entry carries the prefix and the operation as detail.
+            TrapKey::Overflow { kind, symbol } => (
+                TrapKind::Overflow,
+                "arithmetic overflow: ".to_owned(),
+                false,
+                format!("`{symbol}` on `{}`", kind.name()),
+            ),
+            TrapKey::DivideByZero => (
+                TrapKind::DivideByZero,
+                "attempt to divide by zero".to_owned(),
+                true,
+                String::new(),
+            ),
+            TrapKey::IndexConstant { len, index } => (
+                TrapKind::IndexOutOfBounds,
+                hir::diag::index_out_of_bounds(u128::from(len), index),
+                true,
+                String::new(),
+            ),
+            TrapKey::IndexDynamic { len } => (
+                TrapKind::IndexOutOfBounds,
+                format!("index out of bounds: the length is {len} but the index is "),
+                false,
+                String::new(),
+            ),
+            TrapKey::PanicRuntime => (
+                TrapKind::Panic,
+                String::new(),
+                false,
+                "the message is computed at runtime; read it from the `panic_message` globals"
+                    .to_owned(),
+            ),
+            TrapKey::Unreachable => (
+                TrapKind::Internal,
+                "entered an unreachable block".to_owned(),
+                true,
+                String::new(),
+            ),
+        };
+        TrapInfo {
             kind,
             message,
             exact,
             detail,
-        };
-        if let Some(index) = self.entries.iter().position(|existing| *existing == entry) {
-            return index as u32;
         }
-        self.entries.push(entry);
-        (self.entries.len() - 1) as u32
     }
+}
+
+#[derive(Debug, Default)]
+pub struct Traps {
+    entries: Vec<TrapInfo>,
+    keyed: FxHashMap<TrapKey, u32>,
+    texts: FxHashMap<TrapKind, FxHashMap<Box<str>, u32>>,
+}
+
+impl Traps {
+    pub fn intern_key(&mut self, key: TrapKey) -> u32 {
+        if let Some(index) = self.keyed.get(&key) {
+            return *index;
+        }
+        let index = push(&mut self.entries, key.render());
+        self.keyed.insert(key, index);
+        index
+    }
+
+    /// An exact message known at compile time: a `panic` literal or a
+    /// planted diagnostic.
+    pub fn intern_text(&mut self, kind: TrapKind, message: &str) -> u32 {
+        let texts = self.texts.entry(kind).or_default();
+        if let Some(index) = texts.get(message) {
+            return *index;
+        }
+        let index = push(
+            &mut self.entries,
+            TrapInfo {
+                kind,
+                message: message.to_owned(),
+                exact: true,
+                detail: String::new(),
+            },
+        );
+        texts.insert(message.into(), index);
+        index
+    }
+}
+
+fn push(entries: &mut Vec<TrapInfo>, entry: TrapInfo) -> u32 {
+    entries.push(entry);
+    (entries.len() - 1) as u32
 }
 
 /// Declare one wasm import per `extern` ITEM the program actually calls, and
@@ -430,4 +517,106 @@ fn encode_traps(entries: &[TrapInfo]) -> Vec<u8> {
         out.extend_from_slice(entry.detail.as_bytes());
     }
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn summary(traps: &Traps) -> Vec<(TrapKind, &str, bool, &str)> {
+        traps
+            .entries
+            .iter()
+            .map(|e| (e.kind, e.message.as_str(), e.exact, e.detail.as_str()))
+            .collect()
+    }
+
+    /// Interning the same key or text twice yields one entry and one index,
+    /// indices follow first use across both paths, and each entry carries
+    /// the message the interpreter reports.
+    #[test]
+    fn traps_dedup_and_keep_first_use_order() {
+        let mut traps = Traps::default();
+        let add = TrapKey::Overflow {
+            kind: IntKind::I32,
+            symbol: "+",
+        };
+        assert_eq!(traps.intern_key(add), 0);
+        assert_eq!(traps.intern_text(TrapKind::Panic, "boom"), 1);
+        assert_eq!(traps.intern_key(TrapKey::PanicRuntime), 2);
+        assert_eq!(traps.intern_text(TrapKind::Panic, ""), 3);
+        assert_eq!(traps.intern_text(TrapKind::Diagnostic, "boom"), 4);
+        assert_eq!(
+            traps.intern_key(TrapKey::IndexConstant { len: 3, index: 5 }),
+            5
+        );
+        assert_eq!(traps.intern_key(TrapKey::IndexDynamic { len: 3 }), 6);
+        assert_eq!(traps.intern_key(TrapKey::DivideByZero), 7);
+        assert_eq!(traps.intern_key(TrapKey::Unreachable), 8);
+        let sub = TrapKey::Overflow {
+            kind: IntKind::I32,
+            symbol: "-",
+        };
+        assert_eq!(traps.intern_key(sub), 9);
+
+        assert_eq!(traps.intern_key(add), 0);
+        assert_eq!(traps.intern_text(TrapKind::Panic, "boom"), 1);
+        assert_eq!(traps.intern_key(TrapKey::PanicRuntime), 2);
+        assert_eq!(traps.intern_text(TrapKind::Diagnostic, "boom"), 4);
+        assert_eq!(
+            traps.intern_key(TrapKey::IndexConstant { len: 3, index: 5 }),
+            5
+        );
+        assert_eq!(traps.intern_key(TrapKey::IndexDynamic { len: 3 }), 6);
+        assert_eq!(traps.intern_key(TrapKey::IndexDynamic { len: 4 }), 10);
+
+        let runtime_panic =
+            "the message is computed at runtime; read it from the `panic_message` globals";
+        assert_eq!(
+            summary(&traps),
+            [
+                (
+                    TrapKind::Overflow,
+                    "arithmetic overflow: ",
+                    false,
+                    "`+` on `i32`"
+                ),
+                (TrapKind::Panic, "boom", true, ""),
+                (TrapKind::Panic, "", false, runtime_panic),
+                (TrapKind::Panic, "", true, ""),
+                (TrapKind::Diagnostic, "boom", true, ""),
+                (
+                    TrapKind::IndexOutOfBounds,
+                    "index out of bounds: the length is 3 but the index is 5",
+                    true,
+                    "",
+                ),
+                (
+                    TrapKind::IndexOutOfBounds,
+                    "index out of bounds: the length is 3 but the index is ",
+                    false,
+                    "",
+                ),
+                (
+                    TrapKind::DivideByZero,
+                    "attempt to divide by zero",
+                    true,
+                    ""
+                ),
+                (TrapKind::Internal, "entered an unreachable block", true, ""),
+                (
+                    TrapKind::Overflow,
+                    "arithmetic overflow: ",
+                    false,
+                    "`-` on `i32`"
+                ),
+                (
+                    TrapKind::IndexOutOfBounds,
+                    "index out of bounds: the length is 4 but the index is ",
+                    false,
+                    "",
+                ),
+            ]
+        );
+    }
 }
