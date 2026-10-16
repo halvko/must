@@ -427,7 +427,7 @@ pub enum Const {
     /// host is asked for, and the declared signature, which the host checks.
     ExternFn {
         decl: ItemLoc,
-        sig: hir::FnTy,
+        sig: std::sync::Arc<hir::FnTy>,
     },
     /// A `const { … }` block — or a turbofish const argument, which is the
     /// same thing (a compile-time expression body; see
