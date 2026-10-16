@@ -53,9 +53,18 @@
   together by their own bodies (what each writes of its type is final in every body), and a caller is checked after its callees, against what their
   bodies decided, so a use that contradicts a determined part is reported at the use. A part a
   callee left open is filled by its uses, all of them together once every member is decided,
-  then by the fully typed bodies the same way; uses that disagree leave the member `{error}` (when the
-  conflict is only through variables members share, the members whose removal lets the rest agree, or all of them if none does), so the result never depends on the
-  order of the items. No body's own error decides anything: a
+  then by the fully typed bodies the same way. In a cycle, a use that contradicts what the
+  member's own body decided loses to it. Where uses disagree, each shared variable (the places
+  one body's uses make the same type) is decided by a plurality vote, as a join's branches vote
+  (T12): each body votes once for the concrete type its uses give it, and a body that leaves it
+  open abstains. Each losing use is reported at the use, naming the bodies that decided; a use
+  the winners still contradict loses too. A tie leaves every member the variable is in
+  `{error}`, and each use names the bodies that tie with the type each makes it (or, across
+  linked members, those members and every body using one); uses that conflict with no vote to
+  settle them leave their members `{error}` the same way. Bodies have no order, so a tie is
+  never broken by one and the vote counts exact types, not T12's families (whose arguments
+  come from the first branch): the result never depends on the order of the items.
+  No body's own error decides anything: a
   variable that meets an erroneous type stays unbound while the group decides, and becomes
   `{error}` in its own body only after. A variable a member's body met an error on that is
   still open in what the member produces (its value, or what its functions return) after the
