@@ -16099,6 +16099,7 @@ static f = fn () -> () {
     let a = [1,234];
     let b = 1, 234;
     let c = 3,14;
+    let d = 1 ,234;
 };
 "#,
         expect![[r#"
@@ -16106,7 +16107,30 @@ static f = fn () -> () {
             74..75: expected an expression
             93..94: expected `;`
             94..95: expected an expression
+            111..112: expected `;`
+            113..114: expected an expression
         "#]],
+    );
+}
+
+#[test]
+fn digit_group_commas_stop_at_a_spaced_group() {
+    // `1,234` is a digit group and the spaced ` ,567` is not. The owed `;`
+    // is not reported: the group's error covers the token it would anchor on.
+    let text = "static f = fn () -> () { let e = 1,234 ,567; };";
+    check_errors(
+        text,
+        expect![[r#"
+            33..38: digit groups cannot be separated by `,`; use `_`
+            39..40: expected an expression
+        "#]],
+    );
+    let parse = crate::parse(text);
+    let fix = parse.errors()[0].fix.as_ref().expect("a fix");
+    assert_eq!(fix.label, "Write `1_234`");
+    assert_eq!(
+        apply_fix(text, fix),
+        "static f = fn () -> () { let e = 1_234 ,567; };"
     );
 }
 
