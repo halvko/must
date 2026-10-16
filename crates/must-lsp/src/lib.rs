@@ -763,9 +763,6 @@ impl Snapshot {
             // its own URI and line index. An edit whose file the client
             // doesn't have open drops the whole action — applying half a
             // fix is worse than offering none.
-            // Uri-keyed maps are the shape the LSP protocol mandates; the
-            // interior mutability clippy worries about is never exercised.
-            #[allow(clippy::mutable_key_type)]
             let mut changes: HashMap<lsp_types::Uri, Vec<lsp_types::TextEdit>> = HashMap::new();
             let mut all_resolved = true;
             for file_edit in &fix.edits {

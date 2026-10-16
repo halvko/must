@@ -1,0 +1,3 @@
+# `lsp_types::Uri` hashes and compares by its string; its interior `Cell` is
+# a parse cache, so it is safe as a map key.
+ignore-interior-mutability = ["lsp_types::Uri"]

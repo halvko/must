@@ -278,8 +278,6 @@ fn quick_fix_wraps_fn_body_in_braces() {
     };
     assert_eq!(action.title, "Wrap in `{ }`");
 
-    // Uri-keyed maps are the shape the LSP protocol mandates.
-    #[allow(clippy::mutable_key_type)]
     let changes = action
         .edit
         .as_ref()
@@ -334,8 +332,6 @@ fn code_action_inserts_the_inferred_signature() {
         Some(lsp_types::CodeActionKind::REFACTOR_REWRITE)
     );
     assert_eq!(action.diagnostics, None);
-    // Uri-keyed maps are the shape the LSP protocol mandates.
-    #[allow(clippy::mutable_key_type)]
     let changes = action
         .edit
         .as_ref()
@@ -486,8 +482,6 @@ fn quick_fix_makes_an_immutable_binding_mutable() {
     };
     assert_eq!(action.title, "Make `x` mutable");
 
-    // Uri-keyed maps are the shape the LSP protocol mandates.
-    #[allow(clippy::mutable_key_type)]
     let changes = action
         .edit
         .as_ref()
@@ -547,8 +541,6 @@ fn quick_fix_adds_missing_match_arms_attached_to_the_diagnostic() {
     assert_eq!(attached[0].message, diag.message);
     assert_eq!(attached[0].range, diag.range);
 
-    // Uri-keyed maps are the shape the LSP protocol mandates.
-    #[allow(clippy::mutable_key_type)]
     let changes = action
         .edit
         .as_ref()
