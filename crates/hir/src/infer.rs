@@ -2455,7 +2455,9 @@ fn shared_step(body: &Body, place: ExprId, ty_of: &mut dyn FnMut(ExprId) -> Ty) 
 pub fn infer<'db>(db: &'db dyn Db, item: ItemId<'db>) -> InferenceResult {
     let mut table = InPlaceUnificationTable::new();
     let no_group = FxHashMap::default();
-    check_item_body(db, item, &mut table, &no_group, false).finish()
+    let mut ctx = check_item_body(db, item, &mut table, &no_group, false);
+    ctx.solved_signature = crate::ty::group_signature(db, item);
+    ctx.finish()
 }
 
 /// Checks `item`'s own body against its annotation and returns the
@@ -2621,6 +2623,10 @@ pub(crate) struct InferCtx<'a, 'db> {
     /// with its holes as variables, or one variable when there is none.
     /// `None` in group mode.
     own_signature: Option<Ty>,
+    /// For a member of an inference group, the signature the group solved
+    /// for it: [`Self::finish`] fills what the body's own check left open
+    /// from it, after the body's joins are solved.
+    solved_signature: Option<Ty>,
     /// Variables an unresolved bound obligation waits on, filled by
     /// [`Self::resolve_obligation`]: a mention open on one of them reports.
     open_bound_vars: rustc_hash::FxHashSet<TyVar>,
@@ -2823,6 +2829,7 @@ impl<'a, 'db> InferCtx<'a, 'db> {
             own_generics: &[],
             own_item: None,
             own_signature: None,
+            solved_signature: None,
             open_bound_vars: rustc_hash::FxHashSet::default(),
             pending_instantiations: Vec::new(),
             pending_empty_arrays: Vec::new(),
@@ -3312,6 +3319,56 @@ impl<'a, 'db> InferCtx<'a, 'db> {
             .collect()
     }
 
+    /// Fill the variables `own` leaves open from `solved`, the signature
+    /// the item's inference group solved, walking both in step. An
+    /// `{error}` or a borrow in `solved` fills nothing; where the shapes
+    /// differ, `own` stands.
+    fn fill_from_solved(&mut self, own: &Ty, solved: &Ty) {
+        match (self.resolve_shallow(own), solved) {
+            (Ty::Infer(_), solved) => {
+                // A borrow's regions belong to the group's table, not this
+                // body's. TODO: halvko/must#161: fill it with fresh
+                // regions.
+                if !solved.contains_error() && !solved.contains_infer() && !solved.contains_borrow()
+                {
+                    self.adopt(own, solved);
+                }
+            }
+            (Ty::Fn(own), Ty::Fn(solved)) if own.params.len() == solved.params.len() => {
+                for (own, solved) in own.params.iter().zip(&solved.params) {
+                    self.fill_from_solved(own, solved);
+                }
+                self.fill_from_solved(&own.ret, &solved.ret);
+            }
+            (Ty::Record(own), Ty::Record(solved)) if own.fields.len() == solved.fields.len() => {
+                for ((own_name, own), (solved_name, solved)) in
+                    own.fields.iter().zip(&solved.fields)
+                {
+                    if own_name == solved_name {
+                        self.fill_from_solved(own, solved);
+                    }
+                }
+            }
+            (Ty::Array { elem: own, .. }, Ty::Array { elem: solved, .. })
+            | (
+                Ty::RawPtr { pointee: own, .. },
+                Ty::RawPtr {
+                    pointee: solved, ..
+                },
+            ) => {
+                self.fill_from_solved(&own, solved);
+            }
+            (Ty::Named(own), Ty::Named(solved)) if own.decl == solved.decl => {
+                for (own, solved) in own.args.iter().zip(&solved.args) {
+                    if let (GenericArg::Ty(own), GenericArg::Ty(solved)) = (own, solved) {
+                        self.fill_from_solved(own, solved);
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
     /// See [`Constraints::left_unbound`].
     pub(crate) fn left_unbound(&self) -> &[TyVar] {
         self.constraints.left_unbound()
@@ -3328,6 +3385,11 @@ impl<'a, 'db> InferCtx<'a, 'db> {
 
     fn finish(mut self) -> InferenceResult {
         self.solve();
+        if let (Some(own), Some(solved)) =
+            (self.own_signature.clone(), self.solved_signature.take())
+        {
+            self.fill_from_solved(&own, &solved);
+        }
         // Bound obligations, after every join and axiom has spoken: each
         // resolves into a dictionary entry — a concrete impl's member set,
         // a forward of the enclosing binder's own dictionary, or an error

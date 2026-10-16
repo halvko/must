@@ -68,26 +68,7 @@ pub struct InferenceGroups {
 pub fn inference_groups(db: &dyn Db, file: SourceFile) -> InferenceGroups {
     let tree = item_tree(db, file);
     let ids = file_item_ids(db, file);
-    let group_inferrable: Vec<bool> = tree
-        .items
-        .iter()
-        .map(|it| {
-            // Type items declare no value: they have no signature to infer,
-            // so they never join a binding group. Generic items NEVER join
-            // one either (TR06, load-bearing): a group's shared signature
-            // variable is a monotype, so membership would pin every
-            // instantiation of the scheme to one type. The fully-annotated
-            // rule makes them firewall items — their scheme is complete
-            // from the binder (and when the rule is violated the signature
-            // is `{error}` with the definition carrying the diagnostic),
-            // so there is nothing group inference could add; the explicit
-            // `generics.is_empty()` guard keeps rule-violating generics
-            // (whose `type_ref` is `None`) out too.
-            matches!(it.kind, crate::item_tree::ItemKind::Value(_))
-                && it.generics.is_empty()
-                && it.type_ref.as_ref().is_none_or(|tr| !tr.is_fully_typed())
-        })
-        .collect();
+    let group_inferrable: Vec<bool> = tree.items.iter().map(is_group_inferrable).collect();
 
     // Item identity → index, the same (name, disambiguator) scheme ids use.
     let mut index_of: FxHashMap<(&str, u32), usize> = FxHashMap::default();
@@ -196,6 +177,25 @@ pub fn inference_groups(db: &dyn Db, file: SourceFile) -> InferenceGroups {
         groups: state.groups,
         sources,
     }
+}
+
+/// Whether a top-level item joins a binding group: a value item with no
+/// generic binder and no fully typed contract.
+pub(crate) fn is_group_inferrable(data: &crate::item_tree::ItemData) -> bool {
+    // Type items declare no value: they have no signature to infer,
+    // so they never join a binding group. Generic items NEVER join
+    // one either (TR06, load-bearing): a group's shared signature
+    // variable is a monotype, so membership would pin every
+    // instantiation of the scheme to one type. The fully-annotated
+    // rule makes them firewall items — their scheme is complete
+    // from the binder (and when the rule is violated the signature
+    // is `{error}` with the definition carrying the diagnostic),
+    // so there is nothing group inference could add; the explicit
+    // `generics.is_empty()` guard keeps rule-violating generics
+    // (whose `type_ref` is `None`) out too.
+    matches!(data.kind, crate::item_tree::ItemKind::Value(_))
+        && data.generics.is_empty()
+        && data.type_ref.as_ref().is_none_or(|tr| !tr.is_fully_typed())
 }
 
 /// Whether `item`'s body feeds the groups of the unannotated items it

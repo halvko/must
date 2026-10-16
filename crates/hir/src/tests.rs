@@ -704,13 +704,13 @@ static main = fn { apply(double, 2) };
             33..34 'n': usize
             33..38 'n + n': usize
             37..38 'n': usize
-            57..75 'fn (f, a) { f(a) }': fn(fn(_) -> _, _) -> _
-            61..62 'f': fn(_) -> _
-            64..65 'a': _
-            67..75 '{ f(a) }': _
-            69..70 'f': fn(_) -> _
-            69..73 'f(a)': _
-            71..72 'a': _
+            57..75 'fn (f, a) { f(a) }': fn(fn(usize) -> usize, usize) -> usize
+            61..62 'f': fn(usize) -> usize
+            64..65 'a': usize
+            67..75 '{ f(a) }': usize
+            69..70 'f': fn(usize) -> usize
+            69..73 'f(a)': usize
+            71..72 'a': usize
             91..114 'fn { apply(double...': fn() -> usize
             94..114 '{ apply(double, 2) }': usize
             96..101 'apply': fn(fn(usize) -> usize, usize) -> usize
@@ -6169,10 +6169,27 @@ fn trait_bound_left_open_by_the_signature_still_reports() {
 trait D = requires { m: fn(Self) -> usize; };
 static d = fn::<T: D>(x: T) -> usize { x.m() };
 static f = fn (x) -> usize { d(x) };
-static g = fn () { f(true) };
 "#,
         expect![[r#"
             124..125: cannot infer the type parameter `T` of `d`; write `d::<...>` to specify it (defined here at 54..55)
+        "#]],
+    );
+}
+
+/// A caller that decides the bounded parameter's type gets it checked at
+/// the same mention: `g`'s `f(true)` makes `x` a `bool`, which the body
+/// passes to `d`.
+#[test]
+fn trait_bound_decided_by_a_caller_reports_at_the_mention() {
+    check_diagnostics(
+        r#"
+trait D = requires { m: fn(Self) -> usize; };
+static d = fn::<T: D>(x: T) -> usize { x.m() };
+static f = fn (x) -> usize { d(x) };
+static g = fn () { f(true) };
+"#,
+        expect![[r#"
+            124..125: the bound `T: D` is not satisfied here: `bool` does not implement `D`
         "#]],
     );
 }
@@ -10270,13 +10287,10 @@ static main = fn () -> usize { let n: usize = 1; f()(n) };
             main: fn() -> usize
         "#]],
     );
-    // TODO: halvko/must#152: `f`'s own body doesn't see that its group
-    // made the `0` a `usize`.
     check_diagnostics(
         curried,
         expect![[r#"
             34..41: unresolved name `missing`
-            43..44: cannot infer the type of this number: it has no defining use — add a type annotation
         "#]],
     );
 }
@@ -10709,7 +10723,7 @@ static main = fn () -> usize { f(1) };
     check_diagnostics(
         text,
         expect![[r#"
-            35..38: type mismatch: expected `bool`, found `_.&` (expected `bool` because of this annotation at 28..32)
+            35..38: type mismatch: expected `bool`, found `usize.&` (expected `bool` because of this annotation at 28..32)
         "#]],
     );
 }
@@ -10732,13 +10746,38 @@ static other = fn () -> usize { five };
         other: fn() -> usize
     "#]],
     );
-    // TODO: halvko/must#152: `five`'s own body does not see the type its
-    // group solved, so its `5` reports no defining use.
     check_diagnostics(
         text,
         expect![[r#"
-        15..16: cannot infer the type of this number: it has no defining use — add a type annotation
-        49..53: expression of type `usize` is not callable
+            49..53: expression of type `usize` is not callable
+        "#]],
+    );
+}
+
+/// A member's own check fills what its body left open from the signature
+/// its group solved: a typed caller's use is a defining use for `inc`'s
+/// `1`.
+#[test]
+fn members_own_check_sees_its_group_solved_signature() {
+    let text = r#"
+static inc = fn (x) { x + 1 };
+static main = fn () -> usize { inc(1) };
+"#;
+    check_diagnostics(text, expect![[r#""#]]);
+    check_infer(
+        text,
+        expect![[r#"
+        14..30 'fn (x) { x + 1 }': fn(usize) -> usize
+        18..19 'x': usize
+        21..30 '{ x + 1 }': usize
+        23..24 'x': usize
+        23..28 'x + 1': usize
+        27..28 '1': usize
+        46..71 'fn () -> usize { ...': fn() -> usize
+        61..71 '{ inc(1) }': usize
+        63..66 'inc': fn(usize) -> usize
+        63..69 'inc(1)': usize
+        67..68 '1': usize
     "#]],
     );
 }
@@ -10761,14 +10800,11 @@ static other = fn () -> usize { five };
             other: fn() -> usize
         "#]],
     );
-    // TODO: halvko/must#152: `five`'s own body does not see the type its
-    // group solved, so its `5` reports no defining use.
     check_diagnostics(
         main_first,
         expect![[r#"
-        15..16: cannot infer the type of this number: it has no defining use — add a type annotation
-        48..52: type mismatch: expected `bool`, found `usize` (expected `bool` because of this return type at 38..45)
-    "#]],
+            48..52: type mismatch: expected `bool`, found `usize` (expected `bool` because of this return type at 38..45)
+        "#]],
     );
     let other_first = r#"
 static five = 5;
@@ -10783,14 +10819,11 @@ static main = fn () -> bool { five };
             main: fn() -> bool
         "#]],
     );
-    // TODO: halvko/must#152: `five`'s own body does not see the type its
-    // group solved, so its `5` reports no defining use.
     check_diagnostics(
         other_first,
         expect![[r#"
-        15..16: cannot infer the type of this number: it has no defining use — add a type annotation
-        88..92: type mismatch: expected `bool`, found `usize` (expected `bool` because of this return type at 78..85)
-    "#]],
+            88..92: type mismatch: expected `bool`, found `usize` (expected `bool` because of this return type at 78..85)
+        "#]],
     );
 }
 

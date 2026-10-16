@@ -2088,23 +2088,30 @@ pub fn signature<'db>(db: &'db dyn Db, item: ItemId<'db>) -> Ty {
             &ParamScope::default(),
         );
     }
-    let Some(index) = crate::item_index(db, item) else {
-        return Ty::Error;
-    };
+    group_signature(db, item).unwrap_or(Ty::Error)
+}
+
+/// The signature `item`'s inference group solved for it, or `None` when
+/// `item` is not a group member (members of a `type`, generic items and
+/// fully typed items never are).
+pub(crate) fn group_signature<'db>(db: &'db dyn Db, item: ItemId<'db>) -> Option<Ty> {
+    // Decided from the item alone where it can be, so a firewall item
+    // never reads its file's groups (an edit elsewhere must not re-run it).
+    if item.member(db).is_some()
+        || !crate::groups::is_group_inferrable(crate::item_data(db, item).as_ref()?)
+    {
+        return None;
+    }
+    let index = crate::item_index(db, item)?;
     let file = item.file(db);
     let groups = crate::groups::inference_groups(db, file);
-    let Some(Some(group)) = groups.group_of.get(index).copied() else {
-        return Ty::Error;
-    };
+    let group = groups.group_of.get(index).copied()??;
     let members = &groups.groups[group as usize];
-    let Some(position) = members.iter().position(|&member| member == index) else {
-        return Ty::Error;
-    };
+    let position = members.iter().position(|&member| member == index)?;
     crate::groups::infer_group(db, crate::groups::GroupId::new(db, file, group))
         .signatures
         .get(position)
         .cloned()
-        .unwrap_or(Ty::Error)
 }
 
 /// Whether uses of `item` should say "add a type annotation": inference

@@ -64,7 +64,12 @@
   and the second reports the mismatch (TODO: halvko/must#146: blame both). The firewall covers
   the item's signature, not its body: editing a fully typed body re-infers the groups it feeds,
   and can change its callees' signatures. A generic body stays a hard firewall: its rigid
-  params must not fill a monotype. There is no cross-file inference.
+  params must not fill a monotype. There is no cross-file inference. A member's own check
+  (its diagnostics and expression types) runs its body alone first, joins included, then fills
+  what the body left open from the signature its group solved, so a caller's use is a defining
+  use for the member's literals without ever overriding what the body concluded. A bound the
+  filled type doesn't satisfy is reported where the body uses it, like any other. (TODO:
+  halvko/must#161: a part with a borrow in it is not filled.)
 - **T12** An unconstrained join resolves by a family-aware plurality vote over concrete branch
   types: unresolved branches abstain, all-free ties tie together, a family tie recovers with
   the first witness.
