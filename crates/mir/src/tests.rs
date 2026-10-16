@@ -765,6 +765,158 @@ static main = fn { let f = id; };
     );
 }
 
+/// An outvoted use traps with its own message, naming the bodies that
+/// decided.
+#[test]
+fn outvoted_use_traps_naming_the_deciders() {
+    check_mir(
+        r#"
+static id = fn (x) { x };
+static a = fn () -> usize { id(1) };
+static b = fn () -> bool { id(true) };
+static c = fn () -> usize { id(2) };
+"#,
+        expect![[r#"
+            item id:
+            fn b0(_1: usize) -> usize {
+              _0: usize  // return
+              _1: usize  // param x
+              _2: usize
+              bb0:
+                _2 = _1
+                _0 = _2
+                return
+            }
+            fn b1() -> fn(usize) -> usize {
+              _0: fn(usize) -> usize  // return
+              bb0:
+                _0 = fn b0
+                return
+            }
+            item a:
+            fn b0() -> usize {
+              _0: usize  // return
+              _1: usize
+              bb0:
+                _1 = call item id(1) -> bb1
+              bb1:
+                _0 = _1
+                return
+            }
+            fn b1() -> fn() -> usize {
+              _0: fn() -> usize  // return
+              bb0:
+                _0 = fn b0
+                return
+            }
+            item b:
+            fn b0() -> bool {
+              _0: bool  // return
+              _1: fn(bool) -> bool
+              _2: bool
+              bb0:
+                _1 = trap "`id` is `fn(usize) -> usize` here, as `a` and `c` make it, but this use makes it `fn(bool) -> bool`" -> bb1
+              bb1:
+                _2 = call _1(true) -> bb2
+              bb2:
+                _0 = _2
+                return
+            }
+            fn b1() -> fn() -> bool {
+              _0: fn() -> bool  // return
+              bb0:
+                _0 = fn b0
+                return
+            }
+            item c:
+            fn b0() -> usize {
+              _0: usize  // return
+              _1: usize
+              bb0:
+                _1 = call item id(2) -> bb1
+              bb1:
+                _0 = _1
+                return
+            }
+            fn b1() -> fn() -> usize {
+              _0: fn() -> usize  // return
+              bb0:
+                _0 = fn b0
+                return
+            }
+        "#]],
+    );
+}
+
+/// A use of an item its callers tie on traps with the tie's message,
+/// naming the callers.
+#[test]
+fn use_of_an_item_its_callers_disagree_on_traps_naming_them() {
+    check_mir(
+        r#"
+static id = fn (x) { x };
+static a = fn () -> usize { id(1) };
+static b = fn () -> bool { id(true) };
+"#,
+        expect![[r#"
+            item id:
+            fn b0(_1: {error}) -> {error} {
+              _0: {error}  // return
+              _1: {error}  // param x
+              _2: {error}
+              bb0:
+                _2 = _1
+                _0 = _2
+                return
+            }
+            fn b1() -> fn({error}) -> {error} {
+              _0: fn({error}) -> {error}  // return
+              bb0:
+                _0 = fn b0
+                return
+            }
+            item a:
+            fn b0() -> usize {
+              _0: usize  // return
+              _1: fn(usize) -> usize
+              _2: usize
+              bb0:
+                _1 = trap "callers disagree on the type of `id`: `a` makes it `fn(usize) -> usize`, `b` makes it `fn(bool) -> bool`; add a type annotation to its definition" -> bb1
+              bb1:
+                _2 = call _1(1) -> bb2
+              bb2:
+                _0 = _2
+                return
+            }
+            fn b1() -> fn() -> usize {
+              _0: fn() -> usize  // return
+              bb0:
+                _0 = fn b0
+                return
+            }
+            item b:
+            fn b0() -> bool {
+              _0: bool  // return
+              _1: fn(bool) -> bool
+              _2: bool
+              bb0:
+                _1 = trap "callers disagree on the type of `id`: `a` makes it `fn(usize) -> usize`, `b` makes it `fn(bool) -> bool`; add a type annotation to its definition" -> bb1
+              bb1:
+                _2 = call _1(true) -> bb2
+              bb2:
+                _0 = _2
+                return
+            }
+            fn b1() -> fn() -> bool {
+              _0: fn() -> bool  // return
+              bb0:
+                _0 = fn b0
+                return
+            }
+        "#]],
+    );
+}
+
 #[test]
 fn wildcard_patterns_bind_nothing_but_still_evaluate() {
     // `_` binds nothing (no ` // <name>` comment), but the initializer and

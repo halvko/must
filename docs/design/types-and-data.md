@@ -52,12 +52,48 @@
   included. Information flows from callee to caller: members that call each other are decided
   together by their own bodies (what each writes of its type is final in every body), and a caller is checked after its callees, against what their
   bodies decided, so a use that contradicts a determined part is reported at the use. A part a
-  callee left open is filled by its uses, all of them together once every member is decided,
-  then by the fully typed bodies the same way; uses that disagree leave the member `{error}` (when the
-  conflict is only through variables members share, the members whose removal lets the rest agree, or all of them if none does), so the result never depends on the
-  order of the items. No body's own error decides anything: a
-  variable that meets an erroneous type stays unbound while the group decides, and becomes
-  `{error}` in its own body only after. A variable a member's body met an error on that is
+  callee left open is filled by the members' uses, all of them together once every member is
+  decided. The fully typed bodies are checked only then, against what the members' uses decided,
+  as a caller is against its callee's body: a use of theirs that contradicts it is a type
+  mismatch in that body, and they fill, voting among themselves the same way, only what the
+  members' uses left open. A stage's decision is final for the later ones, so one unannotated
+  caller outranks any number of annotated ones. In a cycle, a use that contradicts what the
+  member's own body decided loses to it. Where a stage's uses don't all agree, each member is
+  decided by a plurality vote among its uses, ruled for callers and a join's branches (T12) alike
+  so that one rule settles every disagreement among one stage's uses: a count of shapes does not
+  prove which caller is wrong, it picks where to report. A use votes for the member's whole
+  signature as that use alone makes it, weighing as many as its body's mentions of the member; a
+  use that leaves part of the signature open abstains, except that a literal's unsuffixed number
+  votes as any number type. One use, one vote matches T12's one branch, one vote; a use is a
+  mention of the member, whatever that mention constrains. A body with many uses can outvote
+  several callers with one each; the count only moves where the errors are reported, and the
+  messages name the bodies, not the count. Votes count shapes; the member takes each winning vote
+  as a join takes a branch (T12), so one `unsafe fn` among the winners makes the member's place
+  `unsafe fn`, whatever the count. A winner whose own use contradicts the result (calling an
+  `unsafe fn` as a safe fn) loses that use to the other winners. Every other use is then unified
+  with the result; one that contradicts it loses, reported at the use and naming the winners that
+  decided. Callers that agree on part of a signature still tie on all of it (finer diagnostics:
+  halvko/must#233). A tie leaves the member `{error}`, and each use names the bodies that tie with
+  the type each makes it; a use that lost to what was decided before lost to nothing, so it is one
+  of them. So is a use whose winners' result the group leaves `{error}` in any part: the message
+  names it and the winners, without types. Winners that a place can't take are a real conflict and
+  tie the same way: below the top a safety is invariant (T13), so winners differing there don't fit,
+  and neither does a result that contradicts every winner. So do uses that leave the member open and
+  contradict each other. Every member votes against what was decided before any vote. Members whose
+  types a body ties together (it passes a value from one to another, or one member's body uses
+  another) are one group. When the callers of different members of a group conflict through that
+  link, every member of the group ties, each use naming the winners of the whole group (or, when
+  only the members' own bodies conflict, the members); otherwise the group's results commit. A
+  member tied in only through a type everyone agrees on ties with the rest (halvko/must#234). A
+  member whose own callers tie leaves the members linked to it open: nothing fills the part they
+  share with it (halvko/must#233). Bodies have no order, so a tie is never broken by one, and the
+  vote counts exact shapes (but for a literal's number), not T12's families (whose arguments come
+  from the first branch): the result never depends on the order of the items.
+  No body's own error decides a type: a variable that meets an erroneous type stays unbound
+  while the group decides, and becomes `{error}` in its own body only after. A body's mentions
+  of a member all vote with its one copy, though, so a mention that errors in its own body still
+  counts for the type the body gives the member; the program has an error there already, and the
+  count only moves where the others are reported. A variable a member's body met an error on that is
   still open in what the member produces (its value, or what its functions return) after the
   members' uses becomes `{error}`, so no fully typed body decides what the body got wrong;
   every signature sharing the variable gets `{error}` too. A variable only in a function's
@@ -69,7 +105,7 @@
   params must not fill a monotype. A group spans its library's files (M05).
 - **T12** An unconstrained join resolves by a family-aware plurality vote over concrete branch
   types: unresolved branches abstain, all-free ties tie together, a family tie recovers with
-  the first witness.
+  the first witness. Ruled together with T11's vote among callers.
 - **T13** All generic positions are invariant; no subtyping anywhere.
 - **T14** An unannotated fn body that diverges concludes `!` — the body's own conclusion, the
   same way `let x = panic(..)` makes `x: !`. A written slot the literal is checked against
@@ -303,9 +339,16 @@
 - **Traits gate `==`** — everything-is-comparable fell out of reusing unification, and
   narrowing it later is a breaking change. `==` on function values additionally rests on an
   identity nobody trusts. **T09**
-- **Libraries depend on each other** — the join plurality vote is an observable rule that was
-  never ruled, and inference stops at the library boundary, which imports across libraries
-  make visible. **T11 T12**
+- **Libraries depend on each other** — inference stops at the library boundary, which imports
+  across libraries make visible. **T11**
+- **Members' uses decide before fully typed bodies'** — the fully typed bodies are checked
+  against what the members' uses decided, so one unannotated caller's use, which may go through
+  its own holes, outranks any number of annotated ones, and those report type mismatches.
+  Tallying both stages in one vote, or reversing their order (halvko/must#194), is unruled.
+  **T11**
+- **Linked members tie as one group** — a correct member can become `{error}` because it is
+  linked to another member's conflicting callers; tying only the members that conflict is
+  halvko/must#234. **T11**
 - **Integer conversions** land when a customer names itself; `char ↔ u32` arrives fallible
   in the integer-to-char direction. **Variadic generics** stay parked; the first customer is
   interpolation. **T01 T15 T16**

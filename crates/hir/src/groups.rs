@@ -31,11 +31,11 @@
 //! items. Today every item counts as internal.
 
 use base_db::{Db, SourceFile};
-use ena::unify::InPlaceUnificationTable;
+use ena::unify::{InPlaceUnificationTable, UnifyKey};
 use rustc_hash::FxHashMap;
 
-use crate::constraint::{Constraints, resolve_fully};
-use crate::infer::{InferCtx, InferenceResult};
+use crate::constraint::{Constraints, resolve_finished, resolve_fully};
+use crate::infer::{InferCtx, InferenceDiagnostic, InferenceResult};
 use crate::library::{LibraryId, library_item_ids, library_of};
 use crate::ty::{ParamScope, Ty, TyVar, TyVarValue, erase_infer, export_ty, lower_type_ref_in};
 use crate::{ItemLoc, item_loc};
@@ -409,10 +409,206 @@ pub struct GroupSignatures {
     /// decide, and its own body isn't broken where it produces a value
     /// (that body already carries the error, so its uses say nothing).
     pub needs_annotation: Vec<bool>,
+    /// By member position: why the member is `{error}`, when its uses
+    /// disagree.
+    pub disagreements: FxHashMap<usize, Disagreement>,
     /// Each body's inference result: the members in member order, then the
     /// fully typed bodies feeding the group in [`InferenceGroups::sources`]
     /// order.
     pub results: Vec<std::sync::Arc<InferenceResult>>,
+}
+
+/// A use of a member that lost to its own body or to the other uses (T11).
+/// `B` names a body: an [`ItemLoc`] once published, before that an index
+/// into the group's bodies.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Outvoted<B = ItemLoc> {
+    /// The member's type as this use gives it; a solver type until
+    /// `locate` resolves it.
+    pub use_ty: Ty,
+    /// The bodies whose uses decided the member's type, in body order: the
+    /// member alone when its own body did, none when no vote did.
+    pub deciders: Vec<B>,
+}
+
+impl<B> Outvoted<B> {
+    fn locate<C>(
+        &self,
+        locate: impl FnMut(&B) -> C,
+        resolve: impl FnOnce(&Ty) -> Ty,
+    ) -> Outvoted<C> {
+        Outvoted {
+            use_ty: resolve(&self.use_ty),
+            deciders: self.deciders.iter().map(locate).collect(),
+        }
+    }
+}
+
+/// Why a member is `{error}` (T11). `B` names a body, as in [`Outvoted`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Disagreement<B = ItemLoc> {
+    /// The member's uses tie.
+    Tie {
+        /// Each body whose use ties, in body order, with the type it gives
+        /// the member.
+        callers: Vec<(B, Ty)>,
+        /// What contradicts them through a variable the member shares with
+        /// other members: by member and body, the type the body gives that
+        /// member.
+        linked: Vec<(B, B, Ty)>,
+        /// Whether every body named is one of the members: their own
+        /// bodies contradict each other.
+        mutual: bool,
+    },
+    /// A use lost to a decision the group leaves `{error}`, so it lost to
+    /// nothing: it and the winners disagree, without a type to name.
+    Lost {
+        /// The bodies, in body order.
+        bodies: Vec<B>,
+        /// Whether every body named is one of the members.
+        mutual: bool,
+    },
+}
+
+impl<B> Disagreement<B> {
+    fn locate<C>(
+        &self,
+        mut locate: impl FnMut(&B) -> C,
+        mut resolve: impl FnMut(&Ty) -> Ty,
+    ) -> Disagreement<C> {
+        match self {
+            Disagreement::Tie {
+                callers,
+                linked,
+                mutual,
+            } => Disagreement::Tie {
+                callers: callers
+                    .iter()
+                    .map(|(caller, ty)| (locate(caller), resolve(ty)))
+                    .collect(),
+                linked: linked
+                    .iter()
+                    .map(|(member, caller, ty)| (locate(member), locate(caller), resolve(ty)))
+                    .collect(),
+                mutual: *mutual,
+            },
+            Disagreement::Lost { bodies, mutual } => Disagreement::Lost {
+                bodies: bodies.iter().map(locate).collect(),
+                mutual: *mutual,
+            },
+        }
+    }
+}
+
+impl Disagreement {
+    /// The message at a use of the member `name`.
+    pub fn message(&self, name: &str) -> String {
+        use std::fmt::Write as _;
+        let mutual = |others: &str| {
+            format!(
+                "`{name}` and {others} disagree on each other's types; \
+                 add type annotations to their definitions"
+            )
+        };
+        let (callers, linked) = match self {
+            Disagreement::Lost {
+                bodies,
+                mutual: true,
+            } => return mutual(&quoted_names(bodies)),
+            Disagreement::Lost { bodies, .. } => {
+                return format!(
+                    "{} disagree on the type of `{name}`; \
+                     add a type annotation to its definition",
+                    quoted_names(bodies)
+                );
+            }
+            Disagreement::Tie {
+                callers, linked, ..
+            } => (callers, linked),
+        };
+        let mut members: Vec<ItemLoc> = Vec::new();
+        for (member, ..) in linked {
+            if !members.contains(member) {
+                members.push(member.clone());
+            }
+        }
+        if matches!(self, Disagreement::Tie { mutual: true, .. }) {
+            return mutual(&quoted_names(&members));
+        }
+        let mut message = format!("callers disagree on the type of `{name}`");
+        if !members.is_empty() {
+            let _ = write!(
+                message,
+                ", which shares a type with {}",
+                quoted_names(&members)
+            );
+        }
+        let it = if members.is_empty() {
+            "it".to_owned()
+        } else {
+            format!("`{name}`")
+        };
+        let mut separator = ": ";
+        for (caller, ty) in callers {
+            let _ = write!(
+                message,
+                "{separator}`{}` makes {it} `{}`",
+                caller.name,
+                ty.display()
+            );
+            separator = ", ";
+        }
+        for (member, caller, ty) in linked {
+            let _ = write!(
+                message,
+                "{separator}`{}` makes `{}` `{}`",
+                caller.name,
+                member.name,
+                ty.display()
+            );
+            separator = ", ";
+        }
+        message.push_str("; add a type annotation to its definition");
+        message
+    }
+
+    /// The bodies and members the message names, each once.
+    pub fn named(&self) -> Vec<&ItemLoc> {
+        let all: Vec<&ItemLoc> = match self {
+            Disagreement::Tie {
+                callers, linked, ..
+            } => {
+                let linked = linked
+                    .iter()
+                    .flat_map(|(member, caller, _)| [member, caller]);
+                callers
+                    .iter()
+                    .map(|(caller, _)| caller)
+                    .chain(linked)
+                    .collect()
+            }
+            Disagreement::Lost { bodies, .. } => bodies.iter().collect(),
+        };
+        let mut named: Vec<&ItemLoc> = Vec::new();
+        for loc in all {
+            if !named.contains(&loc) {
+                named.push(loc);
+            }
+        }
+        named
+    }
+}
+
+/// `items` for a message: "`a`", "`a` and `b`", "`a`, `b` and `c`".
+pub fn quoted_names(items: &[ItemLoc]) -> String {
+    let names: Vec<String> = items
+        .iter()
+        .map(|item| format!("`{}`", item.name))
+        .collect();
+    match names.split_last() {
+        Some((last, rest)) if !rest.is_empty() => format!("{} and {last}", rest.join(", ")),
+        _ => names.concat(),
+    }
 }
 
 /// The result of `item`'s body when an inference group checked it: a
@@ -487,7 +683,7 @@ pub fn infer_group<'db>(db: &'db dyn Db, group: GroupId<'db>) -> GroupSignatures
         .collect();
     // In [`GroupSignatures::results`] order: the members first, so member
     // `m`'s body is `bodies[m]`, then the fully typed bodies.
-    let bodies: Vec<GroupBody<'db>> = member_items
+    let (bodies, mentions): (Vec<GroupBody<'db>>, Vec<FxHashMap<usize, usize>>) = member_items
         .iter()
         .enumerate()
         .map(|(m, &item)| (item, Some(m)))
@@ -497,23 +693,25 @@ pub fn infer_group<'db>(db: &'db dyn Db, group: GroupId<'db>) -> GroupSignatures
                 .map(|source| (source.to_id(db), None)),
         )
         .map(|(item, own)| {
-            let mut mentioned: Vec<usize> = crate::resolutions(db, item)
-                .values()
-                .filter_map(|resolution| match resolution {
-                    crate::Resolution::Item(loc) => member_of.get(loc).copied(),
-                    _ => None,
-                })
-                .chain(own)
-                .collect();
+            let mut mentions: FxHashMap<usize, usize> = FxHashMap::default();
+            for resolution in crate::resolutions(db, item).values() {
+                if let crate::Resolution::Item(loc) = resolution
+                    && let Some(&m) = member_of.get(loc)
+                {
+                    *mentions.entry(m).or_default() += 1;
+                }
+            }
+            let mut mentioned: Vec<usize> = mentions.keys().copied().chain(own).collect();
             mentioned.sort_unstable();
             mentioned.dedup();
-            GroupBody {
+            let body = GroupBody {
                 item,
                 own,
                 mentioned,
-            }
+            };
+            (body, mentions)
         })
-        .collect();
+        .unzip();
 
     let mut solver = Solver {
         table: InPlaceUnificationTable::new(),
@@ -522,6 +720,9 @@ pub fn infer_group<'db>(db: &'db dyn Db, group: GroupId<'db>) -> GroupSignatures
         own: vec![Ty::Error; member_count],
         met_error: vec![Vec::new(); member_count],
         fills: vec![Vec::new(); bodies.len()],
+        disagreements: FxHashMap::default(),
+        lost: Vec::new(),
+        mentions,
     };
     let mut ctxs: Vec<Option<InferCtx<'db>>> = (0..bodies.len()).map(|_| None).collect();
 
@@ -533,10 +734,13 @@ pub fn infer_group<'db>(db: &'db dyn Db, group: GroupId<'db>) -> GroupSignatures
         })
         .collect();
     for cycle in call_cycles(&calls) {
-        let mut internal: Vec<(usize, Ty)> = Vec::new();
+        let mut internal: Vec<(usize, Vec<(usize, Ty)>)> = Vec::new();
         for &m in &cycle {
             let mut ctx = solver.check(db, &member_items, &member_locs, &bodies[m], &cycle);
-            internal.extend(solver.export(&mut ctx, &member_locs, &bodies[m], &cycle, m));
+            let uses = solver.export(&mut ctx, &member_locs, &bodies[m], &cycle, m);
+            if !uses.is_empty() {
+                internal.push((m, uses));
+            }
             ctxs[m] = Some(ctx);
         }
         for &m in &cycle {
@@ -545,16 +749,11 @@ pub fn infer_group<'db>(db: &'db dyn Db, group: GroupId<'db>) -> GroupSignatures
                 _ => Ty::Error,
             };
         }
-        solver.unify_uses(&internal);
+        solver.unify_uses(&internal, true);
     }
     // The members' uses fill what their callees left open, together.
-    let member_fills: Vec<(usize, Ty)> = bodies
-        .iter()
-        .zip(&mut solver.fills)
-        .filter(|(body, _)| body.own.is_some())
-        .flat_map(|(_, fills)| std::mem::take(fills))
-        .collect();
-    solver.unify_uses(&member_fills);
+    let member_fills = solver.take_fills();
+    solver.unify_uses(&member_fills, false);
 
     let mut own_error = vec![false; member_count];
     for m in 0..member_count {
@@ -590,8 +789,8 @@ pub fn infer_group<'db>(db: &'db dyn Db, group: GroupId<'db>) -> GroupSignatures
             ctxs[b] = Some(ctx);
         }
     }
-    let source_fills: Vec<(usize, Ty)> = solver.fills.drain(..).flatten().collect();
-    solver.unify_uses(&source_fills);
+    let source_fills = solver.take_fills();
+    solver.unify_uses(&source_fills, false);
 
     // The decided signatures, as the group publishes them: what no body
     // determined is `{error}`, which the needs-annotation diagnostic is for.
@@ -604,8 +803,33 @@ pub fn infer_group<'db>(db: &'db dyn Db, group: GroupId<'db>) -> GroupSignatures
         .map(|(sig, &own_error)| !own_error && sig.contains_error())
         .collect();
 
+    // A use that lost, outvoted or in its member's disagreement, gets
+    // `{error}`.
+    let lost = std::mem::take(&mut solver.lost);
+    let lost_uses: rustc_hash::FxHashSet<_> = lost.iter().map(|&(b, m, _)| (b, m)).collect();
+    let outvoted = solver.sort_lost(lost, &needs_annotation);
+
+    // The bodies verdicts name, located only when there are any, and the
+    // types they give as the group finished them.
+    let locate = |&b: &usize| item_loc(db, bodies[b].item);
+    let disagreements: FxHashMap<usize, Disagreement> = solver
+        .disagreements
+        .iter()
+        .map(|(&m, disagreement)| {
+            let resolve = |ty: &Ty| resolve_finished(&mut solver.table, ty);
+            (m, disagreement.locate(locate, resolve))
+        })
+        .collect();
+    let outvoted: FxHashMap<(usize, usize), Outvoted> = outvoted
+        .iter()
+        .map(|(&key, outvoted)| {
+            let resolve = |ty: &Ty| resolve_finished(&mut solver.table, ty);
+            (key, outvoted.locate(locate, resolve))
+        })
+        .collect();
+
     let mut results = Vec::with_capacity(bodies.len());
-    for (body, ctx) in bodies.iter().zip(ctxs) {
+    for (b, (body, ctx)) in bodies.iter().zip(ctxs).enumerate() {
         let mut ctx = ctx.expect("every body of the group is checked");
         // A member's own body sees what its uses filled in, open parts
         // staying open, so its literals report only what nobody determined;
@@ -615,20 +839,41 @@ pub fn infer_group<'db>(db: &'db dyn Db, group: GroupId<'db>) -> GroupSignatures
         for &m in &body.mentioned {
             let exported = if body.own == Some(m) {
                 solver.instance(m, &mut vars, &mut |kind| ctx.new_var(kind))
+            } else if lost_uses.contains(&(b, m)) {
+                // The use's own error: what follows from it is silent.
+                Ty::Error
             } else {
                 signatures[m].clone()
             };
             let copy = ctx.copies()[&member_locs[m]].clone();
-            ctx.adopt_exported(&copy, &exported);
+            // Every copy has its member's shape, and the group decided it
+            // with the uses agreeing (or `{error}`), so this can't fail; if
+            // it did, nothing would report it.
+            let adopted = ctx.adopt_exported(&copy, &exported);
+            debug_assert!(adopted, "a group body's copy disagrees with its decision");
         }
         ctx.poison_left_unbound();
-        ctx.report_undetermined_members(|loc| needs_annotation[member_of[loc]]);
+        ctx.report_undetermined_members(|expr, loc| {
+            let m = member_of[loc];
+            if let Some(outvoted) = outvoted.get(&(b, m)) {
+                return Some(InferenceDiagnostic::OutvotedUse {
+                    expr,
+                    item: loc.clone(),
+                    ty: signatures[m].clone(),
+                    outvoted: outvoted.clone(),
+                });
+            }
+            let needs = needs_annotation[m].then(|| disagreements.get(&m).cloned());
+            // A generic body never joins a group.
+            InferenceDiagnostic::needs_annotation(expr, loc, || false, needs)
+        });
         results.push(std::sync::Arc::new(ctx.finish()));
     }
 
     GroupSignatures {
         signatures,
         needs_annotation,
+        disagreements,
         results,
     }
 }
@@ -735,6 +980,14 @@ struct Solver {
     /// Per body, its uses of members decided before it was checked: what
     /// they fill in, kept apart until all of them fill together.
     fills: Vec<Vec<(usize, Ty)>>,
+    /// By member: what the uses that left it `{error}` disagree on.
+    disagreements: FxHashMap<usize, Disagreement<usize>>,
+    /// Each use that lost, by body and member, kept until the group is
+    /// decided (see [`Self::sort_lost`]).
+    lost: Vec<Lost>,
+    /// Per body, how many times it mentions each member: its uses, each a
+    /// vote.
+    mentions: Vec<FxHashMap<usize, usize>>,
 }
 
 impl Solver {
@@ -840,14 +1093,474 @@ impl Solver {
         internal
     }
 
-    fn unify_uses(&mut self, uses: &[(usize, Ty)]) {
-        unify_uses(
-            &mut self.table,
-            &mut self.constraints,
-            &mut self.decided,
-            uses,
-        );
+    /// The fills of each body that has any, by body.
+    fn take_fills(&mut self) -> Vec<(usize, Vec<(usize, Ty)>)> {
+        self.fills
+            .iter_mut()
+            .enumerate()
+            .filter(|(_, fills)| !fills.is_empty())
+            .map(|(b, fills)| (b, std::mem::take(fills)))
+            .collect()
     }
+
+    /// Unify each body's uses with the members' `decided` signatures
+    /// (T11). Where they don't all agree, every member votes against the
+    /// state before any vote, so the order of the items decides nothing;
+    /// members whose results share a variable commit together, or all tie.
+    /// `uses` pairs each body with its uses, one per member it
+    /// uses. `own_decides`: what is decided of a member is its own body's.
+    fn unify_uses(&mut self, uses: &[(usize, Vec<(usize, Ty)>)], own_decides: bool) {
+        let all = || {
+            uses.iter()
+                .flat_map(|(b, uses)| uses.iter().map(|(m, ty)| (*b, *m, ty)))
+        };
+        if self.agree(all().map(|(_, m, ty)| (m, ty))) {
+            return;
+        }
+        let mut used: Vec<usize> = all().map(|(_, m, _)| m).collect();
+        used.sort_unstable();
+        used.dedup();
+        let mut plans = Vec::new();
+        for m in used {
+            let uses: Vec<(usize, &Ty)> = all()
+                .filter(|&(_, of, _)| of == m)
+                .map(|(b, _, ty)| (b, ty))
+                .collect();
+            let (plan, lost) = self.vote(m, &uses, own_decides);
+            plans.extend(plan);
+            self.lost.extend(lost);
+        }
+        // Plans that share a variable, or are linked by a safety edge, stand
+        // or fall together: each group commits if it fits, and every member
+        // in a group that doesn't ties.
+        // TODO: halvko/must#234: tie only the members that conflict.
+        let snapshot = self.constraints.snapshot(&mut self.table);
+        for &(sub, sup) in self.constraints.safety_edges() {
+            self.table.union(sub, sup);
+        }
+        let mut keys: Vec<Option<TyVar>> = Vec::with_capacity(plans.len());
+        for plan in &plans {
+            let mut vars = rustc_hash::FxHashSet::default();
+            let uses = plan.winners.iter().map(|&(_, ty, _)| ty);
+            let agreeing = plan.agreeing.iter().map(|&(_, ty)| ty);
+            for ty in uses.chain(agreeing).chain([&self.decided[plan.m]]) {
+                resolve_fully(&mut self.table, ty).table_vars(&mut vars);
+            }
+            let mut vars = vars.into_iter();
+            let key = vars.next();
+            if let Some(key) = key {
+                vars.for_each(|var| self.table.union(key, var));
+            }
+            keys.push(key);
+        }
+        let keys: Vec<Option<TyVar>> = keys
+            .into_iter()
+            .map(|key| key.map(|var| self.table.find(var)))
+            .collect();
+        self.constraints.rollback_to(&mut self.table, snapshot);
+        let mut groups: Vec<Vec<usize>> = Vec::new();
+        let mut by_key: FxHashMap<TyVar, usize> = FxHashMap::default();
+        for (i, key) in keys.into_iter().enumerate() {
+            let g = match key {
+                Some(key) => *by_key.entry(key).or_insert(groups.len()),
+                None => groups.len(),
+            };
+            if g == groups.len() {
+                groups.push(Vec::new());
+            }
+            groups[g].push(i);
+        }
+        for at in groups {
+            if self.apply_all(&plans, &at) {
+                continue;
+            }
+            for &i in &at {
+                let linked = without(&at, &[i])
+                    .into_iter()
+                    .flat_map(|j| {
+                        let other = &plans[j];
+                        let winners = other.winners.iter();
+                        winners.map(|&(b, ty, _)| (other.m, b, ty.clone()))
+                    })
+                    .collect();
+                self.undecide(plans[i].m, plans[i].named().collect(), linked);
+            }
+        }
+    }
+
+    /// Member `m`'s vote among its uses, by body, against what is decided
+    /// (T11). A use against what is already decided loses to it; the others
+    /// vote with the signature each makes alone, the plurality winning. A
+    /// tie leaves the member `{error}`; otherwise returns what the vote
+    /// would commit, leaving the table as it was. Returns the uses that
+    /// lost too, tie or not.
+    fn vote<'t>(
+        &mut self,
+        m: usize,
+        uses: &[(usize, &'t Ty)],
+        own_decides: bool,
+    ) -> (Option<Plan<'t>>, Vec<Lost>) {
+        // What is decided of the member leaves these open.
+        let mut holes = rustc_hash::FxHashSet::default();
+        resolve_fully(&mut self.table, &self.decided[m]).open_vars(&mut holes);
+        let mut holes: Vec<TyVar> = holes.into_iter().collect();
+        holes.sort_by_key(|hole| hole.index());
+
+        // Each signature a use makes that is fully typed, but for the
+        // numbers its literals leave, is a vote; one that leaves the member
+        // otherwise open abstains.
+        let mut votes: Vec<Vote<'t>> = Vec::new();
+        let mut abstaining: Vec<(usize, &Ty)> = Vec::new();
+        let mut lost = Vec::new();
+        for &(b, ty) in uses {
+            let snapshot = self.constraints.snapshot(&mut self.table);
+            let agrees = self
+                .constraints
+                .unify_exported(&mut self.table, &self.decided[m], ty);
+            let view = resolve_fully(&mut self.table, &self.decided[m]);
+            let fills: Vec<Ty> = holes
+                .iter()
+                .map(|&hole| resolve_fully(&mut self.table, &Ty::Infer(hole)))
+                .collect();
+            // Read while the use's values are in the table: a variable of
+            // the view can be one the rollback resets.
+            let mut open = rustc_hash::FxHashSet::default();
+            view.open_vars(&mut open);
+            let numbers: Vec<TyVar> = open.into_iter().collect();
+            let all_numbers = numbers
+                .iter()
+                .all(|&var| matches!(self.table.probe_value(var), TyVarValue::UnknownNumber));
+            self.constraints.rollback_to(&mut self.table, snapshot);
+            if !agrees {
+                let deciders = if own_decides { vec![m] } else { Vec::new() };
+                let use_ty = ty.clone();
+                lost.push((b, m, Outvoted { use_ty, deciders }));
+            } else if view.contains_error() || !all_numbers {
+                abstaining.push((b, ty));
+            } else {
+                // TODO: halvko/must#233: a vote is the whole signature, so
+                // callers agreeing on part of it still tie on all of it.
+                votes.push(Vote {
+                    b,
+                    ty,
+                    key: view.erase_regions_and_safety(),
+                    numbers,
+                    fills,
+                    weight: self.mentions[b][&m],
+                });
+            }
+        }
+
+        // A vote counts for each it matches, a literal's number matching
+        // any number type; one that matches a vote without numbers counts
+        // only for those.
+        let matches: Vec<Vec<bool>> = (0..votes.len())
+            .map(|i| {
+                (0..votes.len())
+                    .map(|j| self.matches(&votes[i], &votes[j]))
+                    .collect()
+            })
+            .collect();
+        let candidates: Vec<usize> = (0..votes.len())
+            .filter(|&i| {
+                votes[i].numbers.is_empty()
+                    || (0..votes.len()).all(|j| !votes[j].numbers.is_empty() || !matches[i][j])
+            })
+            .collect();
+        let weights: Vec<usize> = candidates
+            .iter()
+            .map(|&c| {
+                (0..votes.len())
+                    .filter(|&v| matches[c][v])
+                    .map(|v| votes[v].weight)
+                    .sum()
+            })
+            .collect();
+        let most = weights.iter().copied().max();
+        let leaders: Vec<usize> = candidates
+            .iter()
+            .zip(&weights)
+            .filter(|&(_, &weight)| Some(weight) == most)
+            .map(|(&c, _)| c)
+            .collect();
+        if leaders.is_empty() {
+            // No vote: the uses leave the member open, and agree or tie.
+            let snapshot = self.constraints.snapshot(&mut self.table);
+            let agrees = self.agree(abstaining.iter().map(|&(_, ty)| (m, ty)));
+            self.constraints.rollback_to(&mut self.table, snapshot);
+            if !agrees {
+                let tied = abstaining.iter().map(|&(b, ty)| (b, ty.clone())).collect();
+                self.undecide(m, tied, Vec::new());
+                return (None, lost);
+            }
+            let plan = Plan {
+                m,
+                holes,
+                winners: Vec::new(),
+                agreeing: abstaining,
+            };
+            return (Some(plan), lost);
+        }
+        let won = |v: usize| leaders.iter().any(|&l| matches[l][v]);
+        let tied = |votes: &[Vote<'t>]| -> Vec<(usize, Ty)> {
+            (0..votes.len())
+                .filter(|&v| won(v))
+                .map(|v| (votes[v].b, votes[v].ty.clone()))
+                .collect()
+        };
+        if leaders
+            .iter()
+            .any(|&l| leaders.iter().any(|&k| !matches[l][k]))
+        {
+            self.undecide(m, tied(&votes), Vec::new());
+            return (None, lost);
+        }
+
+        // Below the top a safety is invariant (T13): winners that differ
+        // there tie.
+        let snapshot = self.constraints.snapshot(&mut self.table);
+        let joined = (0..votes.len())
+            .filter(|&v| won(v))
+            .all(|v| self.join(&holes, &votes[v].fills));
+        let mut plan = Plan {
+            m,
+            holes,
+            winners: Vec::new(),
+            agreeing: Vec::new(),
+        };
+        let mut rest = abstaining;
+        for (v, vote) in votes.iter_mut().enumerate() {
+            if won(v) && joined && self.agree(std::iter::once((m, vote.ty))) {
+                plan.winners
+                    .push((vote.b, vote.ty, std::mem::take(&mut vote.fills)));
+            } else {
+                rest.push((vote.b, vote.ty));
+            }
+        }
+        if plan.winners.is_empty() {
+            // The join contradicts every winner's use, or doesn't fit them.
+            self.constraints.rollback_to(&mut self.table, snapshot);
+            self.undecide(m, tied(&votes), Vec::new());
+            return (None, lost);
+        }
+        // Every other use folds in, or loses to the winners.
+        rest.sort_by_key(|&(b, _)| b);
+        let deciders: Vec<usize> = plan.winners.iter().map(|&(b, ..)| b).collect();
+        for (b, ty) in rest {
+            if self.agree(std::iter::once((m, ty))) {
+                plan.agreeing.push((b, ty));
+            } else {
+                let (use_ty, deciders) = (ty.clone(), deciders.clone());
+                lost.push((b, m, Outvoted { use_ty, deciders }));
+            }
+        }
+        self.constraints.rollback_to(&mut self.table, snapshot);
+        (Some(plan), lost)
+    }
+
+    /// Fill `holes` with what one winner fills them with, as a join takes
+    /// a branch: a safe and an unsafe fn make `unsafe fn` (T12).
+    fn join(&mut self, holes: &[TyVar], fills: &[Ty]) -> bool {
+        holes.iter().zip(fills).all(|(&hole, fill)| {
+            self.constraints
+                .relate_exported(&mut self.table, fill, &Ty::Infer(hole))
+        })
+    }
+
+    /// Whether the `plans` at `at` fit together; if they do, they stay
+    /// applied, else the table is left as it was.
+    fn apply_all(&mut self, plans: &[Plan<'_>], at: &[usize]) -> bool {
+        let snapshot = self.constraints.snapshot(&mut self.table);
+        let fits = at.iter().all(|&i| self.apply(&plans[i]));
+        if fits {
+            self.constraints.commit(&mut self.table, snapshot);
+        } else {
+            self.constraints.rollback_to(&mut self.table, snapshot);
+        }
+        fits
+    }
+
+    /// Whether `a` and `b` vote for one type, a literal's number matching
+    /// any number type.
+    fn matches(&mut self, a: &Vote<'_>, b: &Vote<'_>) -> bool {
+        if a.numbers.is_empty() && b.numbers.is_empty() {
+            return a.key == b.key;
+        }
+        let snapshot = self.constraints.snapshot(&mut self.table);
+        // The rollback after each use reset its literals' numbers.
+        for &var in a.numbers.iter().chain(&b.numbers) {
+            self.table.union_value(var, TyVarValue::UnknownNumber);
+        }
+        let matches = self
+            .constraints
+            .unify_exported(&mut self.table, &a.key, &b.key);
+        self.constraints.rollback_to(&mut self.table, snapshot);
+        matches
+    }
+
+    /// Commit `plan`'s winners and the uses that agree with them.
+    fn apply(&mut self, plan: &Plan<'_>) -> bool {
+        let joined = plan
+            .winners
+            .iter()
+            .all(|(_, _, fills)| self.join(&plan.holes, fills));
+        let uses = plan.winners.iter().map(|&(b, ty, _)| (b, ty));
+        joined
+            && self.agree(
+                uses.chain(plan.agreeing.iter().copied())
+                    .map(|(_, ty)| (plan.m, ty)),
+            )
+    }
+
+    /// Unify each of `uses` with its member's decided signature, keeping
+    /// the result only if they all agree.
+    fn agree<'t>(&mut self, mut uses: impl Iterator<Item = (usize, &'t Ty)>) -> bool {
+        let snapshot = self.constraints.snapshot(&mut self.table);
+        // Exact, safety included: a body's copy is the member's type, not a
+        // value meeting a position, so its safety is the member's (#168).
+        let agrees = uses.all(|(m, ty)| {
+            self.constraints
+                .unify_exported(&mut self.table, &self.decided[m], ty)
+        });
+        if agrees {
+            self.constraints.commit(&mut self.table, snapshot);
+        } else {
+            self.constraints.rollback_to(&mut self.table, snapshot);
+        }
+        agrees
+    }
+
+    /// Leave member `m` undecided (`{error}`): `callers` give it the types
+    /// that tie, and `linked` gives, by member and body, what contradicts
+    /// them through a shared variable.
+    fn undecide(&mut self, m: usize, callers: Vec<(usize, Ty)>, linked: Vec<(usize, usize, Ty)>) {
+        self.decided[m] = Ty::Error;
+        self.disagreements.entry(m).or_insert(Disagreement::Tie {
+            callers,
+            linked,
+            mutual: false,
+        });
+    }
+
+    /// Sort each use that `lost`, once the group is decided (T11): one on a
+    /// member the group leaves undecided (`{error}`) lost to nothing, so it
+    /// joins that member's disagreement; every other one is outvoted, by
+    /// body and member. `needs_annotation` is by member, as published.
+    fn sort_lost(
+        &mut self,
+        mut lost: Vec<Lost>,
+        needs_annotation: &[bool],
+    ) -> FxHashMap<(usize, usize), Outvoted<usize>> {
+        let members = needs_annotation.len();
+        let mut outvoted = FxHashMap::default();
+        lost.sort_unstable_by_key(|&(b, m, _)| (b, m));
+        for (b, m, loss) in lost {
+            if let Some(Disagreement::Tie { callers, .. }) = self.disagreements.get_mut(&m) {
+                callers.push((b, loss.use_ty));
+                callers.sort_by_key(|&(b, _)| b);
+                continue;
+            }
+            if !needs_annotation[m] {
+                outvoted.insert((b, m), loss);
+                continue;
+            }
+            // What was decided before any vote is the member's own body's.
+            let mut named = match &loss.deciders[..] {
+                [] => vec![m],
+                deciders => deciders.to_vec(),
+            };
+            named.push(b);
+            // A member's body is its own index among the bodies.
+            let mutual = named.iter().all(|&n| n < members);
+            for &n in named.iter().chain([&m]) {
+                let tied = matches!(self.disagreements.get(&n), Some(Disagreement::Tie { .. }));
+                if n != m && (!mutual || !needs_annotation[n] || tied) {
+                    continue;
+                }
+                let entry = self.disagreements.entry(n).or_insert(Disagreement::Lost {
+                    bodies: Vec::new(),
+                    mutual: true,
+                });
+                // A tied `m` was skipped above, and a tied `n` here.
+                let Disagreement::Lost {
+                    bodies,
+                    mutual: all,
+                } = entry
+                else {
+                    unreachable!("a tied member takes no lost bodies")
+                };
+                bodies.extend(named.iter().filter(|&&other| other != n));
+                bodies.sort_unstable();
+                bodies.dedup();
+                *all &= mutual;
+            }
+        }
+        // The members' own bodies contradict each other when every body a
+        // tie names is one of its members.
+        for (&m, disagreement) in &mut self.disagreements {
+            if let Disagreement::Tie {
+                callers,
+                linked,
+                mutual,
+            } = disagreement
+            {
+                let member = |b: usize| b == m || linked.iter().any(|&(of, ..)| of == b);
+                *mutual = !linked.is_empty()
+                    && callers.iter().all(|&(b, _)| member(b))
+                    && linked.iter().all(|&(_, b, _)| member(b));
+            }
+        }
+        outvoted
+    }
+}
+
+/// A body's use of a member that lost, by body and member.
+type Lost = (usize, usize, Outvoted<usize>);
+
+/// A use's vote in [`Solver::vote`].
+struct Vote<'t> {
+    b: usize,
+    ty: &'t Ty,
+    /// The member's signature as the use alone makes it, regions and
+    /// safety erased.
+    key: Ty,
+    /// The literals' numbers `key` leaves open.
+    numbers: Vec<TyVar>,
+    /// What the use fills each hole of the member with.
+    fills: Vec<Ty>,
+    /// The body's mentions of the member.
+    weight: usize,
+}
+
+/// What a member's vote would commit (see [`Solver::vote`]).
+struct Plan<'t> {
+    m: usize,
+    /// What is decided of the member leaves these open.
+    holes: Vec<TyVar>,
+    /// The winning uses, with what each fills `holes` with; empty when no
+    /// use voted and the abstaining uses agree.
+    winners: Vec<(usize, &'t Ty, Vec<Ty>)>,
+    /// Every other use that agrees with the winners.
+    agreeing: Vec<(usize, &'t Ty)>,
+}
+
+impl Plan<'_> {
+    /// The uses a tie names: the winners, or the abstaining uses when none
+    /// voted.
+    fn named(&self) -> impl Iterator<Item = (usize, Ty)> + '_ {
+        let winners = self.winners.iter().map(|&(b, ty, _)| (b, ty.clone()));
+        let abstaining = self.winners.is_empty().then_some(&self.agreeing);
+        let abstaining = abstaining
+            .into_iter()
+            .flatten()
+            .map(|&(b, ty)| (b, ty.clone()));
+        winners.chain(abstaining)
+    }
+}
+
+/// `of` without the entries in `drop`.
+fn without(of: &[usize], drop: &[usize]) -> Vec<usize> {
+    of.iter().copied().filter(|i| !drop.contains(i)).collect()
 }
 
 /// The cycles of `calls` (its strongly connected components), each sorted,
@@ -870,141 +1583,4 @@ fn call_cycles(calls: &[Vec<usize>]) -> Vec<Vec<usize>> {
     }
     // Tarjan finishes a component only after everything it reaches.
     state.groups
-}
-
-/// Unify `uses` (member, type) with the members' `decided` signatures,
-/// together. Members linked by a shared variable succeed or fail as one,
-/// whatever order they come in. When a unit fails, the members whose own
-/// uses disagree are left undecided (`{error}`) and the rest are tried
-/// again; when no member's uses disagree alone, the whole unit is.
-fn unify_uses(
-    table: &mut InPlaceUnificationTable<TyVar>,
-    constraints: &mut Constraints,
-    decided: &mut [Ty],
-    uses: &[(usize, Ty)],
-) {
-    // Each used member's uses; members nobody uses here are untouched.
-    let mut uses_of: FxHashMap<usize, Vec<&Ty>> = FxHashMap::default();
-    for (m, ty) in uses {
-        uses_of.entry(*m).or_default().push(ty);
-    }
-    let mut used: Vec<usize> = uses_of.keys().copied().collect();
-    used.sort_unstable();
-    // Link the used members through the variables their signatures and
-    // uses share.
-    let mut unit: FxHashMap<usize, usize> = used.iter().map(|&m| (m, m)).collect();
-    fn root(unit: &mut FxHashMap<usize, usize>, i: usize) -> usize {
-        let parent = unit[&i];
-        if parent == i {
-            return i;
-        }
-        let r = root(unit, parent);
-        unit.insert(i, r);
-        r
-    }
-    let mut owner: FxHashMap<TyVar, usize> = FxHashMap::default();
-    for &m in &used {
-        let mut vars = rustc_hash::FxHashSet::default();
-        resolve_fully(table, &decided[m]).open_vars(&mut vars);
-        for ty in &uses_of[&m] {
-            resolve_fully(table, ty).open_vars(&mut vars);
-        }
-        for var in vars {
-            let other = *owner.entry(var).or_insert(m);
-            let (a, b) = (root(&mut unit, m), root(&mut unit, other));
-            unit.insert(a, b);
-        }
-    }
-    let mut units: Vec<Vec<usize>> = Vec::new();
-    let mut unit_at: FxHashMap<usize, usize> = FxHashMap::default();
-    for &m in &used {
-        let head = root(&mut unit, m);
-        let at = *unit_at.entry(head).or_insert_with(|| {
-            units.push(Vec::new());
-            units.len() - 1
-        });
-        units[at].push(m);
-    }
-    for mut members in units {
-        while !members.is_empty() {
-            let snapshot = constraints.snapshot(table);
-            if agree(table, constraints, decided, &uses_of, &members) {
-                constraints.commit(table, snapshot);
-                break;
-            }
-            constraints.rollback_to(table, snapshot);
-            let disagreeing: Vec<usize> = members
-                .iter()
-                .copied()
-                .filter(|&m| !probe_agree(table, constraints, decided, &uses_of, &[m]))
-                .collect();
-            let disagreeing = if disagreeing.is_empty() {
-                // The conflict is only through shared variables: blame the
-                // members whose removal lets the rest agree, or all of them
-                // if none does.
-                let needed = in_conflict(table, constraints, decided, &uses_of, &members);
-                if needed.is_empty() {
-                    members.clone()
-                } else {
-                    needed
-                }
-            } else {
-                disagreeing
-            };
-            for &m in &disagreeing {
-                decided[m] = Ty::Error;
-            }
-            members.retain(|m| !disagreeing.contains(m));
-        }
-    }
-}
-
-/// The `members` whose removal lets the rest agree.
-fn in_conflict(
-    table: &mut InPlaceUnificationTable<TyVar>,
-    constraints: &mut Constraints,
-    decided: &[Ty],
-    uses_of: &FxHashMap<usize, Vec<&Ty>>,
-    members: &[usize],
-) -> Vec<usize> {
-    members
-        .iter()
-        .copied()
-        .filter(|&m| {
-            let rest: Vec<usize> = members.iter().copied().filter(|&o| o != m).collect();
-            probe_agree(table, constraints, decided, uses_of, &rest)
-        })
-        .collect()
-}
-
-/// Whether the uses of `members` agree with their decided signatures,
-/// leaving the table as it was.
-fn probe_agree(
-    table: &mut InPlaceUnificationTable<TyVar>,
-    constraints: &mut Constraints,
-    decided: &[Ty],
-    uses_of: &FxHashMap<usize, Vec<&Ty>>,
-    members: &[usize],
-) -> bool {
-    let snapshot = constraints.snapshot(table);
-    let agrees = agree(table, constraints, decided, uses_of, members);
-    constraints.rollback_to(table, snapshot);
-    agrees
-}
-
-/// Unify the uses of each of `members` with its decided signature.
-fn agree(
-    table: &mut InPlaceUnificationTable<TyVar>,
-    constraints: &mut Constraints,
-    decided: &[Ty],
-    uses_of: &FxHashMap<usize, Vec<&Ty>>,
-    members: &[usize],
-) -> bool {
-    // Exact, safety included: a body's copy is the member's type, not a
-    // value meeting a position, so its safety is the member's (#168).
-    members.iter().all(|&m| {
-        uses_of[&m]
-            .iter()
-            .all(|ty| constraints.unify_exported(table, &decided[m], ty))
-    })
 }

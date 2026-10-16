@@ -32,8 +32,8 @@ use crate::ty::{
     ConstArgValue, GenericArg, IntKind, IntValue, NamedTy, ParamScope, ReceiverShape, Region,
     ResolvedVariant, Safety, SelfPosition, Ty, TyVar, TyVarValue, builtin_type_by_name,
     dot_callable, enum_variants, generic_param_scope, lower_type_ref_in, member_self_position,
-    member_self_ty, receiver_takes, self_position_of, signature, signature_needs_annotation,
-    substitute_args, type_underlying_for,
+    member_self_ty, receiver_takes, self_position_of, signature, substitute_args,
+    type_underlying_for,
 };
 use crate::{ItemId, ItemLoc, Severity, TypeRef, item_loc};
 
@@ -283,7 +283,7 @@ pub enum InferenceDiagnostic {
         found: usize,
     },
     /// A use of an item whose signature its group left open (T11). See
-    /// [`signature_needs_annotation`].
+    /// [`crate::ty::signature_needs_annotation`].
     NeedsAnnotation {
         /// The referencing expression.
         expr: ExprId,
@@ -292,6 +292,19 @@ pub enum InferenceDiagnostic {
         /// Whether the use is in a generic body, whose calls never fill a
         /// group's holes.
         generic_caller: bool,
+        /// What the uses that left the item's type `{error}` disagree on
+        /// (see [`crate::ty::needs_annotation`]).
+        disagreement: Option<crate::groups::Disagreement>,
+    },
+    /// A use of a group member whose type its own body, or the plurality
+    /// of the bodies using it, decided otherwise (T11).
+    OutvotedUse {
+        /// The referencing expression.
+        expr: ExprId,
+        item: ItemLoc,
+        /// The member's type as decided.
+        ty: Ty,
+        outvoted: crate::groups::Outvoted,
     },
     /// An assignment whose target is (or is a chain of field accesses
     /// rooted at) a local declared without `mut` — mutability is transitive
@@ -1481,6 +1494,7 @@ impl InferenceDiagnostic {
             | InferenceDiagnostic::NotCallable { expr, .. }
             | InferenceDiagnostic::ArgCountMismatch { expr, .. }
             | InferenceDiagnostic::NeedsAnnotation { expr, .. }
+            | InferenceDiagnostic::OutvotedUse { expr, .. }
             | InferenceDiagnostic::RecordLitMissingFields { expr, .. }
             | InferenceDiagnostic::RecordLitExtraField { expr, .. }
             | InferenceDiagnostic::NoSuchField { expr, .. }
@@ -1621,6 +1635,23 @@ impl InferenceDiagnostic {
         }
     }
 
+    /// [`Self::NeedsAnnotation`] for a use of `item` at `expr`, when
+    /// `needs` (what [`crate::ty::needs_annotation`] says of it) is `Some`.
+    /// `generic_caller` is called only when `needs` is `Some`.
+    pub fn needs_annotation(
+        expr: ExprId,
+        item: &ItemLoc,
+        generic_caller: impl FnOnce() -> bool,
+        needs: Option<Option<crate::groups::Disagreement>>,
+    ) -> Option<Self> {
+        needs.map(|disagreement| InferenceDiagnostic::NeedsAnnotation {
+            expr,
+            item: item.clone(),
+            generic_caller: generic_caller(),
+            disagreement,
+        })
+    }
+
     /// The human-readable message. Shared between editor diagnostics and MIR
     /// trap terminators, so a deferred error crashes at runtime with exactly
     /// the text the squiggle showed.
@@ -1746,13 +1777,13 @@ impl InferenceDiagnostic {
             InferenceDiagnostic::NeedsAnnotation {
                 item,
                 generic_caller,
+                disagreement,
                 ..
             } => {
-                let display = if item.name.is_empty() {
-                    "this item"
-                } else {
-                    &item.name
-                };
+                let display = item.name_or_this_item();
+                if let Some(disagreement) = disagreement {
+                    return disagreement.message(display);
+                }
                 let why = if *generic_caller {
                     " (calls from a generic function don't fill in its holes)"
                 } else {
@@ -1761,6 +1792,22 @@ impl InferenceDiagnostic {
                 format!(
                     "not enough information to infer the type of `{display}`; \
                      add a type annotation to its definition{why}"
+                )
+            }
+            InferenceDiagnostic::OutvotedUse {
+                item, ty, outvoted, ..
+            } => {
+                let why = match &outvoted.deciders[..] {
+                    [] => String::new(),
+                    [own] if own == item => ", as its own body makes it".to_owned(),
+                    [decider] => format!(", as `{}` makes it", decider.name),
+                    deciders => format!(", as {} make it", crate::groups::quoted_names(deciders)),
+                };
+                format!(
+                    "`{}` is `{}` here{why}, but this use makes it `{}`",
+                    item.name_or_this_item(),
+                    ty.display(),
+                    outvoted.use_ty.display()
                 )
             }
             InferenceDiagnostic::AssignToImmutable { name, place, .. } => {
@@ -3403,28 +3450,20 @@ impl<'db> InferCtx<'db> {
         Ty::Infer(self.table.new_key(kind))
     }
 
-    /// Report each use of a group member that `needs_annotation` says its
-    /// group could not determine, in traversal order among the body's
-    /// other diagnostics, as a use of an item outside the group reports it.
+    /// Report each use of a group member that `report` gives a diagnostic
+    /// for, in traversal order among the body's other diagnostics, as a use
+    /// of an item outside the group reports it.
     pub(crate) fn report_undetermined_members(
         &mut self,
-        mut needs_annotation: impl FnMut(&ItemLoc) -> bool,
+        mut report: impl FnMut(ExprId, &ItemLoc) -> Option<InferenceDiagnostic>,
     ) {
         let mentions = std::mem::take(&mut self.group_mentions);
         for (expr, at) in mentions.into_iter().rev() {
             let Some(Resolution::Item(item)) = self.resolutions.get(expr) else {
                 continue;
             };
-            if needs_annotation(item) {
-                self.result.diagnostics.insert(
-                    at,
-                    InferenceDiagnostic::NeedsAnnotation {
-                        expr,
-                        item: item.clone(),
-                        // A generic body never joins a group.
-                        generic_caller: false,
-                    },
-                );
+            if let Some(diag) = report(expr, item) {
+                self.result.diagnostics.insert(at, diag);
             }
         }
     }
@@ -3768,6 +3807,7 @@ impl<'db> InferCtx<'db> {
                 }
                 InferenceDiagnostic::ArgCountMismatch { .. }
                 | InferenceDiagnostic::NeedsAnnotation { .. }
+                | InferenceDiagnostic::OutvotedUse { .. }
                 | InferenceDiagnostic::AssignToImmutable { .. }
                 | InferenceDiagnostic::AssignToItem { .. }
                 | InferenceDiagnostic::AssignToBuiltin { .. }
@@ -4143,16 +4183,19 @@ impl<'db> InferCtx<'db> {
                             // from the definition: that's only visible from
                             // uses (an unused undetermined item is fine),
                             // so the diagnostic lives here.
-                            if signature_needs_annotation(self.db, target) {
-                                self.result.diagnostics.push(
-                                    InferenceDiagnostic::NeedsAnnotation {
-                                        expr,
-                                        item: loc.clone(),
-                                        generic_caller: self.own_item.as_ref().is_some_and(|own| {
-                                            crate::is_generic_body(self.db, own.to_id(self.db))
-                                        }),
-                                    },
-                                );
+                            let generic_caller = || {
+                                self.own_item.as_ref().is_some_and(|own| {
+                                    crate::is_generic_body(self.db, own.to_id(self.db))
+                                })
+                            };
+                            let needs = crate::ty::needs_annotation(self.db, target);
+                            if let Some(diag) = InferenceDiagnostic::needs_annotation(
+                                expr,
+                                loc,
+                                generic_caller,
+                                needs,
+                            ) {
+                                self.result.diagnostics.push(diag);
                             }
                             sig
                         }
