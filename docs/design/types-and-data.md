@@ -14,7 +14,12 @@
 - **T03** `type Foo =` always mints. No transparent aliases; two identical spellings are
   two types. Records are exact structural types; a structural record has no declaration,
   so it has no owner, and the newtype line is what gives it one. Nominal and structural
-  never coerce.
+  never coerce. Because records are exact, a field name never determines its receiver's
+  type: a field access or index on a receiver that is still undetermined waits until
+  something else determines it (a later use in the body, or a caller in its inference group,
+  T11), and asks for an annotation only if nothing does. A deref (halvko/must#161) and a
+  dot-call (halvko/must#162) ask on the spot. Calling such a field commits it to a safe `fn`,
+  so an `unsafe fn` field is a mismatch there (TODO: halvko/must#162).
 - **T04** A variant is a value, never a type. A variant constructor — `Shape::Point`,
   `Option::<usize>::Some(11)`, the elided `::Some(x)` — has its enum's type, and a
   payload-carrying one is the constructor function `fn(payload...) -> Enum`; every enum value
@@ -89,11 +94,14 @@
   share with it (halvko/must#233). Bodies have no order, so a tie is never broken by one, and the
   vote counts exact shapes (but for a literal's number), not T12's families (whose arguments come
   from the first branch): the result never depends on the order of the items.
+  After each round of fills, a field access or index waiting for its receiver (T03) is retried
+  against what the group decided, until none moves, and what it determines fills like any use.
   No body's own error decides a type: a variable that meets an erroneous type stays unbound
   while the group decides, and becomes `{error}` in its own body only after. A body's mentions
   of a member all vote with its one copy, though, so a mention that errors in its own body still
   counts for the type the body gives the member; the program has an error there already, and the
-  count only moves where the others are reported. A variable a member's body met an error on that is
+  count only moves where the others are reported. A variable a member's body met an error on
+  that is
   still open in what the member produces (its value, or what its functions return) after the
   members' uses becomes `{error}`, so no fully typed body decides what the body got wrong;
   every signature sharing the variable gets `{error}` too. A variable only in a function's
