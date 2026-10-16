@@ -3298,7 +3298,19 @@ impl<'db> InferCtx<'db> {
             (TypeRef::Array { elem, .. }, Ty::Array { elem: lowered, len }) => {
                 Ty::array(self.mint_wildcard_regions(elem, lowered), len.clone())
             }
-            (TypeRef::Fn { params, ret, .. }, Ty::Fn(f)) => f.rebuilt(
+            (
+                TypeRef::Fn {
+                    params,
+                    ret,
+                    region: written,
+                    ..
+                },
+                Ty::Fn(f),
+            ) => f.rebuilt_in(
+                match written.as_deref() {
+                    Some(RegionRef::Wildcard) => Some(self.fresh_region()),
+                    _ => f.region.clone(),
+                },
                 params
                     .iter()
                     .zip(&f.params)
@@ -10478,21 +10490,27 @@ impl<'db> InferCtx<'db> {
             if self.try_reborrow(expr, &actual, expected) {
                 return self.resolve_shallow(expected);
             }
+        } else if self
+            .constraints
+            .try_narrow_fn(&mut self.table, &actual, expected, expr)
+        {
+            // A closure meeting a closure position narrows its region —
+            // the reborrow's twin, for the same reason.
+            return self.resolve_shallow(expected);
         } else if let Some(related) =
             self.constraints
                 .relate_fn(&mut self.table, &actual, expected, expr, cause)
         {
-            // SAFE fn → UNSAFE fn, the one directed conversion on function
-            // types and the only one there will be: a value that needs no
-            // vouching is welcome in a position willing to vouch. Nothing is
-            // recorded for MIR — this converts no bits, it only declines a
-            // permission the position was not going to use. The judgement
-            // itself lives in `Constraints`, because the JOIN solver is a
-            // check site too and has to make exactly this call.
+            // SAFE fn → UNSAFE fn, and CAPTURE-FREE fn → `fn @a`: a value
+            // that needs no vouching is welcome in a position willing to
+            // vouch, and one good for the whole program in any shorter
+            // one. Nothing is recorded for MIR — this converts no bits. The
+            // judgement itself lives in `Constraints`, because the JOIN
+            // solver is a check site too and has to make exactly this call.
             //
             // A converted value reads as the EXPECTED type: hover past the
-            // edge shows `unsafe fn(...)`, the type the value has in the
-            // position it landed in.
+            // edge shows `unsafe fn(...)` (or `fn @a (...)`), the type the
+            // value has in the position it landed in.
             if related {
                 if converted(&mut self.table, &actual, expected) {
                     return self.resolve_shallow(expected);
@@ -11123,7 +11141,10 @@ fn substitute_regions(ty: &Ty, item: &ItemLoc, subst: &FxHashMap<u32, Region>) -
             substitute_one_region(region, item, subst),
             substitute_regions(referent, item, subst),
         ),
-        Ty::Fn(f) => f.rebuilt(
+        Ty::Fn(f) => f.rebuilt_in(
+            f.region
+                .as_ref()
+                .map(|region| substitute_one_region(region, item, subst)),
             f.params
                 .iter()
                 .map(|p| substitute_regions(p, item, subst))

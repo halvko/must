@@ -495,6 +495,14 @@ pub struct FnTy {
     /// passing it, returning it and forgetting it are all free, because
     /// none of them runs anything.
     pub safety: Safety,
+    /// `fn @a (...)`: the region a value of this type is good for. `None`
+    /// is a CAPTURE-FREE fn type — an item, a literal that mentions no
+    /// local of an enclosing function, a builtin — good for as long as the
+    /// program runs. A closure that mentions an outer local has a region:
+    /// it must not outlive the places it reaches. Like a borrow's region,
+    /// it is never compared by unification (see `Constraints::unify`);
+    /// only its PRESENCE is part of the type's identity.
+    pub region: Option<Region>,
 }
 
 /// The safety of a function type: a constant, or — during inference — a
@@ -540,12 +548,23 @@ impl FnTy {
     /// survives a substitution into a safe one, which is precisely the
     /// direction the coercion is not allowed to go.
     pub fn rebuilt(&self, params: Vec<Ty>, ret: Ty) -> Ty {
-        Ty::fn_type_safety(self.safety, params, ret)
+        self.rebuilt_in(self.region.clone(), params, ret)
+    }
+
+    /// [`Self::rebuilt`] with a new region too — the rebuild of a map
+    /// that touches regions (erasure, substitution, freshening).
+    pub fn rebuilt_in(&self, region: Option<Region>, params: Vec<Ty>, ret: Ty) -> Ty {
+        Ty::fn_type_full(self.safety, region, params, ret)
     }
 
     /// The same function type with another safety.
     pub fn with_safety(&self, safety: Safety) -> Ty {
-        Ty::fn_type_safety(safety, self.params.clone(), self.ret.clone())
+        Ty::fn_type_full(
+            safety,
+            self.region.clone(),
+            self.params.clone(),
+            self.ret.clone(),
+        )
     }
 
     /// `unsafe fn(...)`: a value of this type may only be called inside an
@@ -706,8 +725,14 @@ pub fn widens_to(actual: &Ty, expected: &Ty) -> bool {
         // this predicate has no table to unify through, and a candidate
         // whose parameters are merely unifiable is not yet known to belong
         // here. Only the safety marker is allowed to differ.
+        // A capture-free fn fits a regioned slot as well — the other
+        // directed conversion, see `Constraints::coerce_fn`.
         (Ty::Fn(a), Ty::Fn(b)) => {
-            !a.unsafe_to_call() && b.unsafe_to_call() && a.params == b.params && a.ret == b.ret
+            let safety = !a.unsafe_to_call() || b.unsafe_to_call();
+            let region = a.region.is_none() || b.region.is_some();
+            let differs = a.unsafe_to_call() != b.unsafe_to_call()
+                || a.region.is_some() != b.region.is_some();
+            differs && safety && region && a.params == b.params && a.ret == b.ret
         }
         _ => false,
     }
@@ -755,10 +780,27 @@ impl Ty {
 
     /// A function type whose safety may still be an inference variable.
     pub fn fn_type_safety(safety: Safety, params: Vec<Ty>, ret: Ty) -> Ty {
+        Ty::fn_type_full(safety, None, params, ret)
+    }
+
+    /// A function type with a constant safety and a region (`None` for a
+    /// capture-free fn).
+    pub fn fn_type_in(
+        unsafe_to_call: bool,
+        region: Option<Region>,
+        params: Vec<Ty>,
+        ret: Ty,
+    ) -> Ty {
+        Ty::fn_type_full(Safety::constant(unsafe_to_call), region, params, ret)
+    }
+
+    /// A function type with every part given.
+    pub fn fn_type_full(safety: Safety, region: Option<Region>, params: Vec<Ty>, ret: Ty) -> Ty {
         Ty::Fn(Arc::new(FnTy {
             params,
             ret,
             safety,
+            region,
         }))
     }
 
@@ -790,7 +832,8 @@ impl Ty {
             } => Ty::borrow(*mutable, Region::Erased, referent.erase_regions()),
             Ty::RawPtr { mutable, pointee } => Ty::raw_ptr(*mutable, pointee.erase_regions()),
             Ty::Array { elem, len } => Ty::array(elem.erase_regions(), len.clone()),
-            Ty::Fn(f) => f.rebuilt(
+            Ty::Fn(f) => f.rebuilt_in(
+                f.region.as_ref().map(|_| Region::Erased),
                 f.params.iter().map(Ty::erase_regions).collect(),
                 f.ret.erase_regions(),
             ),
@@ -812,8 +855,9 @@ impl Ty {
     /// undecided one ends at — for comparing shapes mid-inference.
     pub fn with_open_safety_safe(&self) -> Ty {
         match self {
-            Ty::Fn(f) => Ty::fn_type_with(
-                f.unsafe_to_call(),
+            Ty::Fn(f) => Ty::fn_type_full(
+                Safety::constant(f.unsafe_to_call()),
+                f.region.clone(),
                 f.params.iter().map(Ty::with_open_safety_safe).collect(),
                 f.ret.with_open_safety_safe(),
             ),
@@ -986,7 +1030,14 @@ impl Ty {
             Ty::Borrow { .. } => true,
             Ty::RawPtr { pointee, .. } => pointee.contains_borrow(),
             Ty::Array { elem, .. } => elem.contains_borrow(),
-            Ty::Fn(f) => f.params.iter().any(Ty::contains_borrow) || f.ret.contains_borrow(),
+            // A closure's own region is a borrow's in every way that
+            // matters here: two of them agree on the type and still have
+            // to be related.
+            Ty::Fn(f) => {
+                f.region.is_some()
+                    || f.params.iter().any(Ty::contains_borrow)
+                    || f.ret.contains_borrow()
+            }
             Ty::Record(rec) => rec.fields.iter().any(|(_, ty)| ty.contains_borrow()),
             // BLIND SPOT, and it is the one that matters the day region
             // parameters on type declarations are un-reserved: this reads
@@ -1238,9 +1289,20 @@ fn spell(ty: &Ty, how: Spelling<'_>) -> String {
             // between the two fn types has to read as the one-token
             // difference it is.
             let marker = if f.unsafe_to_call() { "unsafe " } else { "" };
+            // The region follows `fn`, where it is written. Unlike a
+            // borrow's, its PRESENCE is what tells a closure from a
+            // capture-free fn, so an unsolved one still prints (`@_`);
+            // only below the checker, where nothing has a region, is it
+            // dropped. A non-generic signature can't name one.
+            let region = match &f.region {
+                None | Some(Region::Erased) => String::new(),
+                Some(_) if source.is_some() => return HOLE.to_owned(),
+                Some(Region::Var(_)) => " @_ ".to_owned(),
+                Some(region) => format!(" {} ", region.display()),
+            };
             match &f.ret {
-                Ty::Unit if source.is_none() => format!("{marker}fn({params})"),
-                ret => format!("{marker}fn({params}) -> {}", spell(ret, how)),
+                Ty::Unit if source.is_none() => format!("{marker}fn{region}({params})"),
+                ret => format!("{marker}fn{region}({params}) -> {}", spell(ret, how)),
             }
         }
         Ty::RawPtr { mutable, pointee } => {
@@ -1491,6 +1553,7 @@ pub(crate) fn lower_type_ref_in(
             params,
             ret,
             unsafe_to_call,
+            region,
         } => {
             let params = params
                 .iter()
@@ -1502,7 +1565,13 @@ pub(crate) fn lower_type_ref_in(
                 .map(|ret_ty| lower_type_ref_in(db, file, ret_ty, table, scope))
                 .unwrap_or_else(|| Ty::Infer(table.new_key(TyVarValue::Unknown)));
 
-            Ty::fn_type_with(*unsafe_to_call, params, ret)
+            // Resolved like a borrow's: a wildcard needs an inference
+            // context, so it is `Region::Error` here and minted fresh by
+            // the body path (`mint_wildcard_regions`).
+            let region = region
+                .as_ref()
+                .map(|region| lower_region_ref(region, scope, &mut None));
+            Ty::fn_type_in(*unsafe_to_call, region, params, ret)
         }
         TypeRef::RawPtr { mutable, inner } => {
             Ty::raw_ptr(*mutable, lower_type_ref_in(db, file, inner, table, scope))
@@ -1991,7 +2060,12 @@ fn map_table_vars(ty: &Ty, var: &mut impl FnMut(TyVar) -> Ty, numbers: bool) -> 
                 },
                 known => known,
             };
-            Ty::fn_type_safety(safety, params, ret)
+            Ty::fn_type_full(
+                safety,
+                f.region.as_ref().map(erase_region_vars),
+                params,
+                ret,
+            )
         }
         Ty::RawPtr { mutable, pointee } => {
             Ty::raw_ptr(*mutable, map_table_vars(pointee, var, numbers))
@@ -2062,7 +2136,10 @@ pub fn substitute_args(ty: &Ty, decl: &ItemLoc, args: &[GenericArg]) -> Ty {
             Some(GenericArg::Ty(ty)) => ty.clone(),
             _ => Ty::Error,
         },
-        Ty::Fn(f) => f.rebuilt(
+        Ty::Fn(f) => f.rebuilt_in(
+            f.region
+                .as_ref()
+                .map(|region| substitute_region(region, decl, args)),
             f.params
                 .iter()
                 .map(|param| substitute_args(param, decl, args))

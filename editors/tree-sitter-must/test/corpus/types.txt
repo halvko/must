@@ -153,3 +153,33 @@ static f = fn::<const N: usize>(a: [usize; N], b: [u8; const { 2 }], g: fn(usize
             (ret_type
               (unit_type)))))
       (block_expr))))
+
+==================
+Function types with a region
+==================
+
+static f = fn::<@a>(g: fn @a (usize) -> ()) { };
+
+---
+
+(source_file
+  (static_item
+    (identifier)
+    (fn_literal
+      (generic_param_list
+        (region_param
+          (region)))
+      (param_list
+        (param
+          (bind_pat
+            (param_name))
+          (fn_type
+            (region_arg
+              (region))
+            (param_list
+              (param
+                (path_type
+                  (identifier))))
+            (ret_type
+              (unit_type)))))
+      (block_expr))))

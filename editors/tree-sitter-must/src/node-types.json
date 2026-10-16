@@ -2128,7 +2128,18 @@
   {
     "type": "fn_type",
     "named": true,
-    "fields": {},
+    "fields": {
+      "region": {
+        "multiple": false,
+        "required": false,
+        "types": [
+          {
+            "type": "region_arg",
+            "named": true
+          }
+        ]
+      }
+    },
     "children": {
       "multiple": true,
       "required": true,

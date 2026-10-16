@@ -287,6 +287,10 @@ pub enum RegionConstraintReason {
     /// longer), named apart only so the message can point at the match
     /// rather than at a borrow the user never wrote.
     Projection,
+    /// A closure (`fn @a (..)`) flowed into a position expecting a
+    /// shorter-lived one. The same single directed edge as `Reborrow`: a
+    /// closure good for a region is good for any region it outlives.
+    ClosureNarrowing,
 }
 
 impl Constraints {
@@ -490,6 +494,9 @@ impl Constraints {
                 self.relate_type_regions(table, ea, eb, origin);
             }
             (Ty::Fn(fa), Ty::Fn(fb)) => {
+                if let (Some(ra), Some(rb)) = (&fa.region, &fb.region) {
+                    self.relate_regions_invariant(ra, rb, origin);
+                }
                 for (pa, pb) in fa.params.iter().zip(&fb.params) {
                     self.relate_type_regions(table, pa, pb, origin);
                 }
@@ -564,8 +571,9 @@ impl Constraints {
                     .collect(),
             ),
             Ty::Fn(f) => {
+                let region = f.region.as_ref().map(|_| self.fresh_region());
                 let params = f.params.iter().map(|p| self.freshen_regions(p)).collect();
-                f.rebuilt(params, self.freshen_regions(&f.ret))
+                f.rebuilt_in(region, params, self.freshen_regions(&f.ret))
             }
             // A borrow inside a generic argument is as much the join's own
             // region as a top-level one: without this the join's result
@@ -667,6 +675,48 @@ impl Constraints {
         // And the child node's region, for loan liveness — see
         // `Constraints::reborrow_targets`.
         self.reborrow_targets.push((origin, r_tgt));
+        true
+    }
+
+    /// A closure meeting a closure position: its region NARROWS, one
+    /// directed edge, the closure twin of [`Self::try_reborrow`]. Tried
+    /// before unification at both check sites for the same reason: two fn
+    /// types are region-blind to `unify`, and relating them afterwards is
+    /// invariant, which would pin a closure good for the whole body equal
+    /// to the call it is passed to. The parameters and result are still
+    /// related invariantly — they are the same type, not a narrowing.
+    ///
+    /// Returns `false` unless both sides are closures. Safety relates as
+    /// it does in [`Self::relate_fn`]: safe → `unsafe` is fine.
+    pub(crate) fn try_narrow_fn(
+        &mut self,
+        table: &mut InPlaceUnificationTable<TyVar>,
+        actual: &Ty,
+        expected: &Ty,
+        origin: ExprId,
+    ) -> bool {
+        let (Ty::Fn(a), Ty::Fn(b)) = (
+            resolve_shallow(table, actual),
+            resolve_shallow(table, expected),
+        ) else {
+            return false;
+        };
+        let (Some(r_src), Some(r_tgt)) = (&a.region, &b.region) else {
+            return false;
+        };
+        let src = a.rebuilt_in(None, a.params.clone(), a.ret.clone());
+        let tgt = Ty::fn_type_full(a.safety, None, b.params.clone(), b.ret.clone());
+        if !(self.relate(table, &src, &tgt, origin, None)
+            && self.coerce_safety(table, a.safety, b.safety))
+        {
+            return false;
+        }
+        self.push_outlives(
+            r_src.clone(),
+            r_tgt.clone(),
+            origin,
+            RegionConstraintReason::ClosureNarrowing,
+        );
         true
     }
 
@@ -836,8 +886,15 @@ impl Constraints {
             // conversion applied at check sites ([`Self::relate_fn`]),
             // never an equation: inferring it backwards through a variable
             // would let an `unsafe fn` arrive where a safe one was promised.
+            //
+            // A fn type's REGION is a borrow's twin: its presence is part
+            // of the type (a closure is not a capture-free fn, and the
+            // conversion between them is directed, see `relate_fn`), but
+            // two regions are related by `relate_type_regions`, never
+            // compared here.
             (Ty::Fn(f1), Ty::Fn(f2)) => {
                 f1.params.len() == f2.params.len()
+                    && f1.region.is_some() == f2.region.is_some()
                     && self.unify_safety(table, f1.safety, f2.safety)
                     && {
                         let params_ok = f1
@@ -950,18 +1007,29 @@ impl Constraints {
     }
 
     /// A value meeting an expected FUNCTION type: parameters and result
-    /// relate exactly, safety is the one directed conversion on function
-    /// types — a safe `fn` is welcome where an `unsafe fn` is expected
-    /// ([`Self::coerce_safety`]). Both check sites use it: a direct one in
-    /// `InferCtx::check`, and a join's witness loop below. ONE home, because
-    /// two would drift: `hir::widens_to` answers the same question for the
-    /// editor's ranker and has no table to relate through, so it stays the
-    /// predicate and this stays the operation.
+    /// relate exactly, and the two directed conversions on function types
+    /// apply, composing:
+    ///
+    /// - SAFE `fn` → `unsafe fn`: a value that needs no vouching is fine in
+    ///   a position willing to vouch ([`Self::coerce_safety`]).
+    /// - CAPTURE-FREE `fn` → `fn @a`: a value good for the whole program is
+    ///   good for any shorter region.
+    ///
+    /// Both check sites use it: a direct one in `InferCtx::check`, and a
+    /// join's witness loop below. ONE home, because two would drift:
+    /// `hir::widens_to` answers the same question for the editor's ranker
+    /// and has no table to relate through, so it stays the predicate and
+    /// this stays the operation.
     ///
     /// A still-free `actual` becomes a function of the expected shape with
     /// a safety of its OWN, related to the expected one rather than equal
     /// to it: an `unsafe fn` position says the value may be unsafe to call,
-    /// not that it is (#168).
+    /// not that it is (#168). Its region is the expected one's.
+    ///
+    /// ONE-WAY: a closure in a capture-free position keeps its region in
+    /// the shape it is related to, and unification refuses the pair, so
+    /// the ordinary mismatch's two rendered types differ by exactly the
+    /// token that is the whole story.
     ///
     /// `None` when the pair is not a function (or a free variable) meeting a
     /// function type: the caller relates it as usual. Records nothing for
@@ -977,14 +1045,26 @@ impl Constraints {
         let Ty::Fn(expected_fn) = resolve_shallow(table, expected) else {
             return None;
         };
-        let safety = match resolve_shallow(table, actual) {
-            Ty::Fn(actual_fn) => actual_fn.safety,
-            Ty::Infer(var) if matches!(table.probe_value(var), TyVarValue::Unknown) => {
-                Safety::Infer(table.new_key(TyVarValue::Unknown))
-            }
+        let (safety, region) = match resolve_shallow(table, actual) {
+            // A capture-free value fits a regioned position; a regioned
+            // value is related against the expected region (or its
+            // absence, which refuses it).
+            Ty::Fn(actual_fn) => (
+                actual_fn.safety,
+                actual_fn.region.as_ref().and(expected_fn.region.clone()),
+            ),
+            Ty::Infer(var) if matches!(table.probe_value(var), TyVarValue::Unknown) => (
+                Safety::Infer(table.new_key(TyVarValue::Unknown)),
+                expected_fn.region.clone(),
+            ),
             _ => return None,
         };
-        let shape = expected_fn.with_safety(safety);
+        let shape = Ty::fn_type_full(
+            safety,
+            region,
+            expected_fn.params.clone(),
+            expected_fn.ret.clone(),
+        );
         Some(
             self.relate(table, actual, &shape, origin, cause)
                 && self.coerce_safety(table, safety, expected_fn.safety),
@@ -1263,6 +1343,18 @@ impl Constraints {
                         culprits.push((witness, actual));
                     }
                 }
+                // A closure leaf meeting a closure context NARROWS, as it
+                // does at a direct check site.
+                actual
+                    if matches!(&actual, Ty::Fn(f) if f.region.is_some())
+                        && matches!(
+                            resolve_shallow(table, &expected),
+                            Ty::Fn(f) if f.region.is_some()
+                        )
+                        && self.try_narrow_fn(table, &witness.ty, &expected, witness.blame) =>
+                {
+                    siblings.push(Cause::Branch(witness.blame));
+                }
                 actual => {
                     // `relate` rather than `unify`: a leaf that merely
                     // CONTAINS borrows — a record, an array, a fn type —
@@ -1404,7 +1496,8 @@ fn vote_shape(ty: &Ty) -> Ty {
 }
 
 /// Whether relating `actual` against the function type `expected` went
-/// through the safe-to-unsafe conversion rather than equality.
+/// through a conversion (safe to `unsafe`, capture-free to `fn @a`) rather
+/// than equality.
 pub(crate) fn converted(
     table: &mut InPlaceUnificationTable<TyVar>,
     actual: &Ty,
@@ -1416,6 +1509,7 @@ pub(crate) fn converted(
     ) {
         (Ty::Fn(a), Ty::Fn(b)) => {
             resolve_safety(table, a.safety) != resolve_safety(table, b.safety)
+                || (a.region.is_none() && b.region.is_some())
         }
         _ => false,
     }
@@ -1544,7 +1638,7 @@ pub(crate) fn resolve_fully(table: &mut InPlaceUnificationTable<TyVar>, ty: &Ty)
             let params = f.params.iter().map(|p| resolve_fully(table, p)).collect();
             let ret = resolve_fully(table, &f.ret);
             let safety = resolve_safety(table, f.safety);
-            Ty::fn_type_safety(safety, params, ret)
+            Ty::fn_type_full(safety, f.region.clone(), params, ret)
         }
         Ty::RawPtr { mutable, pointee } => Ty::raw_ptr(*mutable, resolve_fully(table, pointee)),
         // The REGION is carried through untouched: it is not this table's
@@ -1589,8 +1683,9 @@ fn render_unresolved_numbers(table: &mut InPlaceUnificationTable<TyVar>, ty: &Ty
             _ => ty.clone(),
         },
         // A safety nothing decided is safe: the least solution.
-        Ty::Fn(f) => Ty::fn_type_with(
-            f.unsafe_to_call(),
+        Ty::Fn(f) => Ty::fn_type_full(
+            Safety::constant(f.unsafe_to_call()),
+            f.region.clone(),
             f.params
                 .iter()
                 .map(|p| render_unresolved_numbers(table, p))

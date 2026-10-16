@@ -126,7 +126,7 @@ pub enum StaticVal {
     /// import is built from that, not from a call site.
     ExternFn {
         decl: ItemLoc,
-        sig: hir::FnTy,
+        sig: std::sync::Arc<hir::FnTy>,
     },
 }
 

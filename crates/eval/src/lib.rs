@@ -45,7 +45,7 @@ pub enum Value {
     /// host is asked for, and the declared signature, which the host checks.
     ExternFn {
         decl: ItemLoc,
-        sig: hir::FnTy,
+        sig: std::sync::Arc<hir::FnTy>,
     },
     Builtin(Builtin),
     /// A record value: fields sorted by name, matching `Ty::Record` and

@@ -1598,6 +1598,53 @@ pub fn range_diagnostics(db: &dyn Db, file: SourceFile) -> Vec<Diagnostic> {
         }
     }
 
+    // A fn type's own region (`fn @a (usize) -> ()`): the same two
+    // judgements as a borrow's — every named region declared by an
+    // enclosing binder, and no `@_` in a signature. There is no
+    // "missing region" case: a fn type without one is capture-free.
+    for fn_type in parse(db, file)
+        .syntax_node()
+        .descendants()
+        .filter_map(ast::FnType::cast)
+    {
+        let Some(region) = fn_type.region() else {
+            continue;
+        };
+        let binder = enclosing_binder_info(fn_type.syntax());
+        for token in region.regions() {
+            let text = token.text();
+            if text != "@_" && !binder.names_region(text) {
+                diagnostics.push(Diagnostic {
+                    range: token.text_range(),
+                    severity: Severity::Error,
+                    message: diag::unknown_region(text),
+                    fix: None,
+                    related: Vec::new(),
+                });
+            }
+        }
+        // Asked of the PARENT: the fn type itself is where
+        // `in_signature_position` stops climbing for the types inside it.
+        if !fn_type
+            .syntax()
+            .parent()
+            .is_some_and(|parent| in_signature_position(&parent))
+        {
+            continue;
+        }
+        for token in region.regions() {
+            if token.text() == "@_" {
+                diagnostics.push(Diagnostic {
+                    range: token.text_range(),
+                    severity: Severity::Error,
+                    message: diag::WILDCARD_REGION_IN_SIGNATURE.to_owned(),
+                    fix: None,
+                    related: Vec::new(),
+                });
+            }
+        }
+    }
+
     // Region parameters on a TYPE declaration (`struct::<@a, T>`). Reserved,
     // not rejected: a region-carrying declaration needs variance and
     // well-formedness rulings this arc does not own. Reported at the

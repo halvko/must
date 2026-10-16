@@ -216,6 +216,7 @@ static spin = fn (limit: usize) -> usize {
 };
 static never = fn () -> ! { loop { } };
 static apply = fn (f: fn(usize) -> usize, g: unsafe fn(usize, str) -> (), x: usize) -> usize { f(x) };
+static each = fn::<@a>(f: fn @a (usize) -> (), g: unsafe fn @a + @a () -> ()) { f(1) };
 static closure = unsafe fn () { };
 "#,
     ),

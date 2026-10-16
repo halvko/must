@@ -629,6 +629,51 @@ static y = 2;
 }
 
 #[test]
+fn a_fn_types_region_parses_as_a_region_arg_after_fn() {
+    // `fn @a (..)`: the region a closure value is good for, as a
+    // `REGION_ARG` child of the fn type — not a turbofish, which on a fn
+    // type is a generic member signature's binder.
+    check(
+        "static f: fn @a + @b (usize) = g;",
+        expect![[r#"
+            SOURCE_FILE@0..33
+              STATIC_ITEM@0..33
+                ITEM_HEAD@0..6
+                  STATIC_KW@0..6 "static"
+                WHITESPACE@6..7 " "
+                NAME@7..8
+                  IDENT@7..8 "f"
+                COLON@8..9 ":"
+                WHITESPACE@9..10 " "
+                FN_TYPE@10..28
+                  FN_KW@10..12 "fn"
+                  WHITESPACE@12..13 " "
+                  REGION_ARG@13..20
+                    REGION_IDENT@13..15 "@a"
+                    WHITESPACE@15..16 " "
+                    PLUS@16..17 "+"
+                    WHITESPACE@17..18 " "
+                    REGION_IDENT@18..20 "@b"
+                  WHITESPACE@20..21 " "
+                  PARAM_LIST@21..28
+                    L_PAREN@21..22 "("
+                    PARAM@22..27
+                      PATH_TYPE@22..27
+                        NAME_REF@22..27
+                          IDENT@22..27 "usize"
+                    R_PAREN@27..28 ")"
+                WHITESPACE@28..29 " "
+                EQ@29..30 "="
+                WHITESPACE@30..31 " "
+                PATH_EXPR@31..32
+                  NAME_REF@31..32
+                    IDENT@31..32 "g"
+                SEMICOLON@32..33 ";"
+        "#]],
+    );
+}
+
+#[test]
 fn an_unsafe_fn_type_parses_into_the_fn_type_node() {
     // One node, one extra token: `unsafe` rides the same modifier slot on a
     // fn TYPE that it does on a fn literal, so nothing downstream has to

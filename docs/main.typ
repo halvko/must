@@ -1645,6 +1645,27 @@ and the one place a member's arguments are carried reads them off the
 receiver's own type — which cannot supply something the receiver does not
 have.
 
+=== Function types with a region
+
+A function type can say how long a value of it is good for, the same way
+a borrow type does. The region goes right after `fn`, because on a fn type
+the turbofish is already taken by a generic member signature's binder:
+
+```must
+static apply = fn::<@a>(f: fn @a (usize) -> usize, x: usize) -> usize {
+    f(x)
+};
+```
+
+A fn type without one is *capture-free*: an item, a builtin, or a literal
+that mentions no local of an enclosing function. It is good for as long as
+the program runs, so it fits a `fn @a` position too — `apply(double, 21)`
+needs nothing written — and the conversion only goes that way, like safe
+`fn` into `unsafe fn`. A `fn @a` value used where a shorter-lived one is
+expected narrows, exactly as a borrow does, and the other direction needs
+an outlives clause. This is the type a closure will have; until closures
+land, every value that reaches one is capture-free.
+
 === Outlives clauses
 
 Returning a borrow at a region the caller chose is a promise that the value

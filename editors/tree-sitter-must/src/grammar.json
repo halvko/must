@@ -1742,6 +1742,22 @@
             ]
           },
           {
+            "type": "CHOICE",
+            "members": [
+              {
+                "type": "FIELD",
+                "name": "region",
+                "content": {
+                  "type": "SYMBOL",
+                  "name": "region_arg"
+                }
+              },
+              {
+                "type": "BLANK"
+              }
+            ]
+          },
+          {
             "type": "ALIAS",
             "content": {
               "type": "SYMBOL",

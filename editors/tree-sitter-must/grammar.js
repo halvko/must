@@ -301,6 +301,7 @@ module.exports = grammar({
       optional('unsafe'),
       'fn',
       optional($.generic_param_list),
+      optional(field('region', $.region_arg)),
       alias($.fn_type_param_list, $.param_list),
       optional($.ret_type),
     )),

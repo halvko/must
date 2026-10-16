@@ -1509,7 +1509,8 @@ impl<'a> BodyCheck<'a> {
 }
 
 /// Every region a type mentions in a value position. A `fn` type's
-/// regions are its own binder's and bind nothing here.
+/// parameter and result regions are its own binder's and bind nothing
+/// here; its OWN region (`fn @a (..)`, a closure's) is the value's.
 fn collect_regions(ty: &Ty, found: &mut impl FnMut(&Region)) {
     fn one(region: &Region, found: &mut impl FnMut(&Region)) {
         match region {
@@ -1540,8 +1541,12 @@ fn collect_regions(ty: &Ty, found: &mut impl FnMut(&Region)) {
             .for_each(|(_, field)| collect_regions(field, found)),
         Ty::Array { elem, .. } => collect_regions(elem, found),
         Ty::Named(named) => args(&named.args, found),
-        Ty::Fn(_)
-        | Ty::Param(_)
+        Ty::Fn(f) => {
+            if let Some(region) = &f.region {
+                one(region, found);
+            }
+        }
+        Ty::Param(_)
         | Ty::Infer(_)
         | Ty::UnresolvedNumber
         | Ty::Unit
