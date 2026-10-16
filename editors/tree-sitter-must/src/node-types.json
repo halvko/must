@@ -2969,11 +2969,23 @@
         "required": true,
         "types": [
           {
+            "type": "array_pat",
+            "named": true
+          },
+          {
             "type": "bind_pat",
             "named": true
           },
           {
             "type": "literal_pat",
+            "named": true
+          },
+          {
+            "type": "newtype_pat",
+            "named": true
+          },
+          {
+            "type": "record_pat",
             "named": true
           },
           {
@@ -5313,7 +5325,31 @@
       "required": false,
       "types": [
         {
+          "type": "array_pat",
+          "named": true
+        },
+        {
           "type": "bind_pat",
+          "named": true
+        },
+        {
+          "type": "literal_pat",
+          "named": true
+        },
+        {
+          "type": "newtype_pat",
+          "named": true
+        },
+        {
+          "type": "record_pat",
+          "named": true
+        },
+        {
+          "type": "variant_pat",
+          "named": true
+        },
+        {
+          "type": "wildcard_pat",
           "named": true
         }
       ]

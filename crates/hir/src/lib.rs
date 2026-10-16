@@ -21,6 +21,7 @@ pub mod traits;
 pub mod trap_sites;
 pub mod ty;
 pub mod unsafe_check;
+mod usefulness;
 
 #[cfg(test)]
 mod tests;
@@ -56,7 +57,8 @@ pub use ty::{
     ConstArgValue, DotReach, FnTy, GenericArg, IntKind, IntValue, NamedTy, ReceiverShape, Region,
     RegionVar, ResolvedVariant, SelfPosition, Ty, annotation_text, dispatches_on, dot_reach,
     enum_variants, member_self_position, member_self_ty, receiver_takes, render_variant, signature,
-    substitute_args, type_underlying, type_underlying_for, variant_payloads_for, widens_to,
+    substitute_args, type_underlying, type_underlying_for, variant_payload_tys,
+    variant_payloads_for, widens_to,
 };
 pub use unsafe_check::UnsafeCheckDiagnostic;
 
@@ -536,8 +538,7 @@ pub fn file_diagnostics(db: &dyn Db, file: SourceFile) -> Vec<Diagnostic> {
                 }
                 // Reported on the `match` keyword: the construct as a whole
                 // is what fails to cover — no single arm is the culprit.
-                InferenceDiagnostic::NonExhaustiveMatch { .. }
-                | InferenceDiagnostic::MatchWithoutCatchAll { .. } => {
+                InferenceDiagnostic::NonExhaustiveMatch { .. } => {
                     ast::MatchExpr::cast(ptr.to_node(&syntax_root))
                         .and_then(|it| it.match_token())
                         .map(|t| t.text_range())
@@ -1139,15 +1140,13 @@ pub fn file_diagnostics(db: &dyn Db, file: SourceFile) -> Vec<Diagnostic> {
                     .node_for_binding(*binding)
                     .and_then(|ptr| ast::Name::cast(ptr.to_node(&syntax_root)))
                     .and_then(|decl| decl.insert_mut_fix()),
-                // "Add missing match arms" — one generated arm per name in
-                // `uncovered`. An empty arm list and a partially-covered one
+                // "Add missing match arms" — one generated arm per missing
+                // pattern. An empty arm list and a partially-covered one
                 // both fall out of the same path with no special-casing (see
                 // `match_arms_fix`'s doc comment).
-                InferenceDiagnostic::NonExhaustiveMatch {
-                    expr,
-                    decl,
-                    uncovered,
-                } => match_arms_fix(db, item, &syntax_root, source_map, *expr, decl, uncovered),
+                InferenceDiagnostic::NonExhaustiveMatch { expr, missing, .. } => {
+                    match_arms_fix(db, item, &syntax_root, source_map, *expr, missing)
+                }
                 // Write the borrow the message asks for: `.&` (or `.&mut`)
                 // right before the dot-call's own `.`, so `c.get()` becomes
                 // `c.&.get()` — a postfix chain whatever the receiver is.
@@ -1901,17 +1900,8 @@ pub fn range_diagnostics(db: &dyn Db, file: SourceFile) -> Vec<Diagnostic> {
 }
 
 /// The "Add missing match arms" quick fix, attached to
-/// [`InferenceDiagnostic::NonExhaustiveMatch`].
-///
-/// `uncovered` is already exactly the right set, in declaration order — the
-/// exhaustiveness pass in `infer_match` computed it as "every variant not
-/// reached by an arm", so a `match s {}` with zero arms and a `match` missing
-/// just the last variant both reduce to the same "insert these names" work
-/// here — none of that needs special-casing in this function, only in the
-/// diagnostic that already computed it. `decl` (carried on the diagnostic)
-/// says which enum to look the variants' arity up in; borrowed scrutinees
-/// need no extra handling here because `infer_match` already resolved the
-/// dispatch before either field was populated.
+/// [`InferenceDiagnostic::NonExhaustiveMatch`]: one arm per missing
+/// pattern, which is already valid pattern source.
 ///
 /// The edit is a pure insertion right after the last existing arm, or
 /// right after `{` when there is none (the empty-arm-list case) — never a
@@ -1923,44 +1913,26 @@ pub fn range_diagnostics(db: &dyn Db, file: SourceFile) -> Vec<Diagnostic> {
 /// sits there (the common, multi-line case), the buffer's own existing run
 /// back to `}` supplies it and is left exactly as written.
 ///
-/// Each generated arm is `::Variant(binders) => panic("unhandled
-/// ::Variant"),`: `panic` types as `!` and joins with any other arm's type
-/// unconditionally, so the edit can never introduce a new type error on
-/// top of the one it's fixing, and the message reads honestly as "not yet
-/// handled" — an empty body wouldn't parse, and `()` would type-check
-/// silently wherever the match's own type happens to permit it, reading as
-/// "handled" when it isn't.
-///
-/// A payload variant's binders are named `v` (one payload) or `v1, v2, …`
-/// (more), checked against locals visible at the match's own (pre-arm)
-/// lexical scope and suffixed with `_` until free on a collision — usable
-/// names beat `_`. This checks only local bindings in scope, not
-/// file-/item-level names a new binding could also shadow: that check is a
-/// full name-resolution query, not the one scope-table lookup this does
-/// per candidate.
+/// Each generated arm is `Shape::Circle(_) => panic("unhandled
+/// Shape::Circle(_)"),`: `panic` types as `!` and joins with any other
+/// arm's type unconditionally, so the edit can never introduce a new type
+/// error on top of the one it's fixing, and the message reads honestly as
+/// "not yet handled" — an empty body wouldn't parse, and `()` would
+/// type-check silently wherever the match's own type happens to permit it,
+/// reading as "handled" when it isn't.
 fn match_arms_fix<'db>(
     db: &'db dyn Db,
     item: ItemId<'db>,
     syntax_root: &syntax::SyntaxNode,
     source_map: &BodySourceMap,
     expr: ExprId,
-    decl: &ItemLoc,
-    uncovered: &[String],
+    missing: &[String],
 ) -> Option<syntax::Fix> {
     let ptr = source_map.node_for_expr(expr)?;
     let match_expr = ast::MatchExpr::cast(ptr.to_node(syntax_root))?;
     let l_brace = match_expr.l_brace_token()?;
     let r_brace = match_expr.r_brace_token()?;
     let match_start = match_expr.syntax().text_range().start();
-
-    let variants = enum_variants(db, decl.to_id(db)).as_ref()?;
-    // Declaration order falls out of filtering `variants` (already in that
-    // order) rather than `uncovered` (also in that order, but as bare
-    // names with no payload arity attached).
-    let missing: Vec<&(String, Vec<Ty>)> = variants
-        .iter()
-        .filter(|(name, _)| uncovered.iter().any(|u| u == name))
-        .collect();
     if missing.is_empty() {
         return None;
     }
@@ -1979,17 +1951,6 @@ fn match_arms_fix<'db>(
 
     let text = item.file(db).text(db);
     let indent = syntax::line_indent(text, match_start);
-    let scopes = expr_scopes(db, item);
-    let enclosing_scope = scopes.scope_of(expr);
-    let shadows =
-        |name: &str| enclosing_scope.is_some_and(|s| scopes.resolve_in_scope(s, name).is_some());
-    let fresh = |base: String| {
-        let mut candidate = base;
-        while shadows(&candidate) {
-            candidate.push('_');
-        }
-        candidate
-    };
 
     // A comma-less last arm is legal (a `}`-bodied arm never needs one, and
     // neither does the arm immediately before the list's own `}` — see
@@ -2018,17 +1979,9 @@ fn match_arms_fix<'db>(
     // `anchor < r_brace_start` yet still needs the synthesized newline.
     let arm_lines: Vec<String> = missing
         .iter()
-        .map(|(name, payload)| {
-            let pattern = match payload.len() {
-                0 => format!("::{name}"),
-                1 => format!("::{name}({})", fresh("v".to_owned())),
-                n => {
-                    let binders: Vec<String> = (1..=n).map(|i| fresh(format!("v{i}"))).collect();
-                    format!("::{name}({})", binders.join(", "))
-                }
-            };
+        .map(|pattern| {
             format!(
-                "{indent}{}{pattern} => panic(\"unhandled ::{name}\"),",
+                "{indent}{}{pattern} => panic(\"unhandled {pattern}\"),",
                 syntax::INDENT_UNIT
             )
         })

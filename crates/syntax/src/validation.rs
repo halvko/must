@@ -117,8 +117,6 @@ pub(crate) fn validate(root: &SyntaxNode) -> Vec<SyntaxError> {
                 .fields()
                 .filter_map(|f| f.field_name()?.ident_token());
             report_duplicate_fields(names, &mut errors);
-        } else if let Some(variant_pat) = ast::VariantPat::cast(node.clone()) {
-            reject_unqualified_bare_variant_pat(&variant_pat, &mut errors);
         } else if let Some(bind_pat) = ast::BindPat::cast(node.clone()) {
             let mut_token = bind_pat.mut_token();
             require_mut_names_a_binding(mut_token, Some(ast::Pat::BindPat(bind_pat)), &mut errors);
@@ -1172,43 +1170,8 @@ fn validate_type_param_bounds(type_param: &ast::TypeParam, errors: &mut Vec<Synt
     }
 }
 
-/// `Circle(r)` with no leading `::` and no qualifying enum used to be a
-/// variant pattern (v1's bare shorthand); the owner retired it alongside
-/// removing bind-pattern reinterpretation (`Circle` gains this shorthand
-/// back the moment some *other* enum happens to declare a `Circle`
-/// variant, and there'd be no way to tell which one the pattern meant) —
-/// so an unmarked `Name(...)` is now an honest mistake, not a call
-/// (patterns have no calls). Offers a fix that inserts the elided `::`.
-///
-/// `colon2_token().is_none()` reaches here only via the bare-`Name(...)`
-/// grammar path: the qualified and elided sigil spellings both carry a
-/// `COLON2`, so this cannot misfire on them.
-fn reject_unqualified_bare_variant_pat(
-    variant_pat: &ast::VariantPat,
-    errors: &mut Vec<SyntaxError>,
-) {
-    if variant_pat.colon2_token().is_some() {
-        return;
-    }
-    let Some(name_ref) = variant_pat.variant_name_ref() else {
-        return;
-    };
-    let name = name_ref.text();
-    errors.push(SyntaxError {
-        message: format!("write `::{name}(...)` to match a variant, or remove `(...)` to bind"),
-        range: variant_pat.syntax().text_range(),
-        fix: Some(Fix {
-            label: "Insert `::`".to_owned(),
-            edits: vec![TextEdit {
-                range: TextRange::empty(name_ref.syntax().text_range().start()),
-                insert: "::".to_owned(),
-            }],
-        }),
-    });
-}
-
 /// Only SCALAR literals are patterns so far — characters and integers. The
-/// grammar takes every literal kind (see `grammar::match_pattern`) so this
+/// grammar takes every literal kind (see `grammar::pattern`) so this
 /// can say which one was written and that it is a "not yet", rather than
 /// the parser handing back a blank "expected a pattern".
 ///

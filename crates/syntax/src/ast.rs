@@ -444,10 +444,8 @@ ast_enum!(
     NegExpr
 );
 ast_enum!(
-    /// A pattern: a match-arm pattern (`VariantPat`/`LiteralPat`/
-    /// `WildcardPat`/`BindPat`) or a `let`/parameter pattern, which takes
-    /// `RecordPat`/`NewtypePat`/`ArrayPat` too (see `crate::grammar`'s
-    /// `binding_pattern`). Both lower through the same `Pat` arena.
+    /// A pattern: the one `Pat` serves match arms, `let`s and parameters
+    /// (see `crate::grammar`'s `pattern`).
     Pat: VariantPat,
     LiteralPat,
     WildcardPat,
@@ -1362,8 +1360,8 @@ impl VariantPat {
     pub fn colon2_token(&self) -> Option<SyntaxToken> {
         token(&self.syntax, COLON2)
     }
-    /// The positional payload bindings (holes included), in source order.
-    pub fn bindings(&self) -> impl Iterator<Item = BindPat> + use<> {
+    /// The positional payload patterns, in source order.
+    pub fn pats(&self) -> impl Iterator<Item = Pat> + use<> {
         children(&self.syntax)
     }
 }

@@ -233,8 +233,8 @@ A `let` pattern must match every value of its type: it is a `match` with
 one arm, and that arm has to be exhaustive. `::At(x, y)` above can never
 fail, because `At` is the only variant; on an enum with more variants, or a
 literal like `let 0 = n;`, the pattern can fail to match, and that is
-an error telling you to use `match`. An array pattern names exactly as
-many elements as the array's length.
+an error naming what it misses and telling you to use `match`. An array
+pattern names exactly as many elements as the array's length.
 
 === Unused bindings
 
@@ -450,10 +450,11 @@ static fib2 = fn (n: usize) -> usize {
 A parameter is a *pattern* against a declared type, not just a name — the
 pattern language `let` takes (see "Variable declarations"): a name,
 `mut name`, `_`, an array pattern, a named type's pattern peeling one layer
-of newtype, a record pattern (no sub-pattern below a bound field), or a
-variant pattern that cannot fail to match. A record pattern binds fields by name, optionally renaming with
-`as`, and a named type's pattern peels the newtype before the record
-pattern underneath sees it:
+of newtype, a record pattern (its fields only bind, with no sub-pattern
+in a field), or a variant pattern that cannot fail to match. A record
+pattern binds fields by name, optionally renaming with `as`, and a named
+type's pattern peels the newtype before the record pattern underneath
+sees it:
 
 ```must
 type Span = struct { lo: usize, hi: usize };
@@ -757,14 +758,16 @@ a variant. Deconstruction goes through `match` (next section).
 
 == Match
 
-The basic braced form. Patterns are deliberately flat in v1 and mirror
-construction: a variant pattern `::Variant(bindings...)` with positional
-binding names (or `_` holes), the payload-less `::Variant`, `_`, and a
-plain binding name that binds the whole scrutinee. A variant is written
-with a leading `::` sigil — "a variant of the scrutinee's enum, enum
-elided" — or fully qualified `Shape::Variant`; the two name the same thing
-(the qualified spelling is construction's mirror image), and the sigil
-resolves *type-directed* against the scrutinee's enum:
+The basic braced form. Patterns mirror construction and nest to any
+depth: a variant pattern `::Variant(patterns...)` whose payload slots are
+patterns themselves (a name, `_`, a literal, another variant, an array, a
+newtype), the payload-less `::Variant`, `_`, and a plain binding name that
+binds the whole scrutinee. Record fields are the one slot that only binds.
+A variant is written with a leading `::` sigil — "a variant of the
+scrutinee's enum, enum elided" — or fully qualified `Shape::Variant`; the
+two name the same thing (the qualified spelling is construction's mirror
+image), and the sigil resolves *type-directed* against the scrutinee's
+enum:
 
 ```
 type Shape = enum { Circle(usize), Pair(usize, str), Point };
@@ -807,8 +810,8 @@ type-directed reinterpretation of a bare name was a footgun — rename or
 remove a variant later and an old bare-name arm would quietly degrade into
 a catch-all with no error. A bare name that shadows a variant of the
 scrutinee's enum is well-typed but warns, pointing at the `::Name`
-spelling. Writing the retired `Name(...)` shape (a bare name with parens)
-is a check-time error asking for `::Name(...)`.
+spelling. A bare name with parens, `Name(...)`, is a newtype pattern,
+never a variant.
 
 Any binding a pattern introduces — a payload binding or a whole-value
 binding — may take `mut` (`::Char(mut c, _)`, `mut other =>`). Exactly as
@@ -817,20 +820,27 @@ nothing about the scrutinee and changes neither dispatch nor coverage.
 Assigning to a binding written without `mut` is the same error it is for
 a `let`.
 
+Patterns nest: each payload slot holds any pattern, the same ones a `let`
+takes (`::Bar([a, _, c])`, `::Wrap(::Some('x'))`, `::Wrap(Point(p))`). A
+slot that could fail to match just narrows its arm, and the next arm that
+matches runs instead.
+
 Arms are branches of one join, exactly like `if`/`else`: arms that build
 variants of one enum agree on the enum, and a match nested in an `if`'s
 branch tail contributes its arms to the enclosing join — blame speaks about
 the leaves.
 
-*Exhaustiveness* is flat set-cover over the enum's variants: a `_` or
-binding arm covers everything, and a `match` that misses variants is a
-check-time error on the `match` keyword naming each uncovered variant.
-Like every deferred error, running code that actually reaches an uncovered
-variant crashes with exactly the squiggle's message. Arms that can never
-run (after a catch-all, a variant already covered) are warnings, not
-errors. On a non-enum scrutinee only `_` or a binding can match (for
-now) — the scalars are the exception, since their literals are patterns
-too (see "Scalar literals are patterns" below).
+*Exhaustiveness* looks at every pattern at every depth: a `match` that
+misses some value is a check-time error on the `match` keyword naming
+patterns for what it misses (`` this `match` does not cover
+`Shape::Wrap(Inner::B)` ``). Integers and characters are never listed
+value by value, so a match on them needs a `_` (or a binding) somewhere.
+Like every deferred error, running code that actually reaches a missed
+value crashes with exactly the squiggle's message. Arms that can never run
+(every value they match is matched above) are warnings, not errors. Any
+pattern a `let` takes works in an arm too: an array, record or newtype
+pattern on a value of that type, and literals on a scalar (see "Scalar
+literals are patterns" below).
 
 *Matching a BORROW projects through it.* A scrutinee of type
 `Opt::<T>.&::<@a>` dispatches on the enum behind the borrow, and each payload
@@ -876,12 +886,14 @@ matched instead. The mismatch you get for using a binding where the value
 is wanted names both routes. Matching an *owned* scrutinee is unchanged in
 every respect — it still copies, and still moves payloads that cannot be copied.
 
-Since a binding is itself a borrow, matching *it* projects again, which is
-how the rule reaches nested data today (nested patterns are not grammar
-yet). And the tag test is a real read *through* the borrow, so a scrutinee
-that has already been invalidated is caught at the `match` itself rather
-than at whichever arm first touches a binding. A `match` no arm of which
-dispatches — only `_` or a binding — tests no tag and so reads nothing.
+Since a binding is itself a borrow, matching *it* projects again, and so
+does every pattern in a payload slot: an array, record or newtype pattern
+under a borrow projects to its parts the same way, each part a borrow of
+its place. And the tag test is a real read *through* the borrow, so a
+scrutinee that has already been invalidated is caught at the `match`
+itself rather than at whichever arm first touches a binding. A `match` no
+arm of which dispatches — only `_` or a binding — tests no tag and so
+reads nothing.
 
 `match` is pure control flow, so it is const-legal — fine inside `const
 fn` bodies and `const { ... }` blocks.
@@ -914,17 +926,14 @@ static classify = fn (d: usize) -> str {
 };
 ```
 
-Not in v1 (landing later as one coherent pattern-language feature): nested
-patterns, or-patterns (`0 | 1`), guards, *ranges* (`0..=9` — a separate
+Not in v1 (landing later as one coherent pattern-language feature):
+or-patterns (`0 | 1`), guards, *ranges* (`0..=9` — a separate
 question, and a deeper one: it asks what order a scalar has, and whether
 listing ranges could exhaust a type and so retire the `_` arm), literal
 patterns of the *other* kinds (string, boolean — they parse, so the error
 names the kind that was written rather than shrugging), `if match`,
-`match ... else`, the statement form `match x => pat;`, and record
-patterns in a match arm. Outside a record pattern, `..` is neither a
-pattern nor a payload binding; it stays free for range patterns.
-Nested patterns are the one whose absence is visible above: reaching into
-nested data through a borrow is spelled as two matches until they land.
+`match ... else`, and the statement form `match x => pat;`. Outside a
+record pattern, `..` is not a pattern; it stays free for range patterns.
 
 == Loops
 

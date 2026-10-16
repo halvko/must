@@ -3324,22 +3324,22 @@ static f = fn (c: char) -> usize {
               bb0:
                 _2 = _1
                 _4 = Eq(_2, '(')
-                if _4 -> [then: bb2, else: bb3]
+                if _4 -> [then: bb1, else: bb4]
               bb1:
+                _3 = 1
+                goto -> bb5
+              bb2:
+                _3 = 2
+                goto -> bb5
+              bb3:
+                _3 = 0
+                goto -> bb5
+              bb4:
+                _5 = Eq(_2, ')')
+                if _5 -> [then: bb2, else: bb3]
+              bb5:
                 _0 = _3
                 return
-              bb2:
-                _3 = 1
-                goto -> bb1
-              bb3:
-                _5 = Eq(_2, ')')
-                if _5 -> [then: bb4, else: bb5]
-              bb4:
-                _3 = 2
-                goto -> bb1
-              bb5:
-                _3 = 0
-                goto -> bb1
             }
             fn b1() -> fn(char) -> usize {
               _0: fn(char) -> usize  // return
@@ -3380,22 +3380,22 @@ static f = fn (b: u8) -> usize {
               bb0:
                 _2 = _1
                 _4 = Eq(_2, 0)
-                if _4 -> [then: bb2, else: bb3]
+                if _4 -> [then: bb1, else: bb4]
               bb1:
+                _3 = 1
+                goto -> bb5
+              bb2:
+                _3 = 2
+                goto -> bb5
+              bb3:
+                _3 = 0
+                goto -> bb5
+              bb4:
+                _5 = Eq(_2, 7)
+                if _5 -> [then: bb2, else: bb3]
+              bb5:
                 _0 = _3
                 return
-              bb2:
-                _3 = 1
-                goto -> bb1
-              bb3:
-                _5 = Eq(_2, 7)
-                if _5 -> [then: bb4, else: bb5]
-              bb4:
-                _3 = 2
-                goto -> bb1
-              bb5:
-                _3 = 0
-                goto -> bb1
             }
             fn b1() -> fn(u8) -> usize {
               _0: fn(u8) -> usize  // return
@@ -3431,15 +3431,15 @@ static f = fn (c: char) -> usize {
               bb0:
                 _2 = _1
                 _4 = Eq(_2, 'a')
-                if _4 -> [then: bb2, else: bb3]
+                if _4 -> [then: bb1, else: bb2]
               bb1:
+                _3 = 1
+                goto -> bb3
+              bb2:
+                _3 = trap "this `match` does not cover every possible `char`; add a `_` arm" -> bb3
+              bb3:
                 _0 = _3
                 return
-              bb2:
-                _3 = 1
-                goto -> bb1
-              bb3:
-                _3 = trap "this `match` does not cover every possible `char`; add a `_` arm" -> bb1
             }
             fn b1() -> fn(char) -> usize {
               _0: fn(char) -> usize  // return
@@ -3476,15 +3476,15 @@ static f = fn (b: u8) -> usize {
               bb0:
                 _2 = _1
                 _4 = Eq(_2, 0)
-                if _4 -> [then: bb2, else: bb3]
+                if _4 -> [then: bb1, else: bb2]
               bb1:
+                _3 = 1
+                goto -> bb3
+              bb2:
+                _3 = trap "this `match` does not cover every possible `u8`; add a `_` arm" -> bb3
+              bb3:
                 _0 = _3
                 return
-              bb2:
-                _3 = 1
-                goto -> bb1
-              bb3:
-                _3 = trap "this `match` does not cover every possible `u8`; add a `_` arm" -> bb1
             }
             fn b1() -> fn(u8) -> usize {
               _0: fn(u8) -> usize  // return
@@ -3523,19 +3523,19 @@ static f = fn (c: char) -> usize {
               bb0:
                 _2 = _1
                 _4 = Eq(_2, 'a')
-                if _4 -> [then: bb2, else: bb3]
+                if _4 -> [then: bb1, else: bb2]
               bb1:
+                _3 = 1
+                goto -> bb4
+              bb2:
+                _3 = 2
+                goto -> bb4
+              bb3:
+                _3 = 3
+                goto -> bb4
+              bb4:
                 _0 = _3
                 return
-              bb2:
-                _3 = 1
-                goto -> bb1
-              bb3:
-                _3 = 2
-                goto -> bb1
-              bb4:
-                _3 = 3
-                goto -> bb1
             }
             fn b1() -> fn(char) -> usize {
               _0: fn(char) -> usize  // return
@@ -3576,18 +3576,18 @@ static f = fn::<@a>(c: char.&::<@a>) -> usize {
               bb0:
                 _2 = _1
                 _4 = Eq(_2.*, 'a')
-                if _4 -> [then: bb2, else: bb3]
+                if _4 -> [then: bb1, else: bb2]
               bb1:
-                _0 = _3
-                return
-              bb2:
                 _3 = 1
-                goto -> bb1
-              bb3:
+                goto -> bb3
+              bb2:
                 _5 = _2
                 storage_dead _5
                 _3 = 0
-                goto -> bb1
+                goto -> bb3
+              bb3:
+                _0 = _3
+                return
             }
             fn b1() -> fn(char.&) -> usize {
               _0: fn(char.&) -> usize  // return
@@ -5163,18 +5163,18 @@ static f = fn::<@a>(d: usize.&::<@a>) -> usize {
               bb0:
                 _2 = _1
                 _4 = Eq(_2.*, 0)
-                if _4 -> [then: bb2, else: bb3]
+                if _4 -> [then: bb1, else: bb2]
               bb1:
-                _0 = _3
-                return
-              bb2:
                 _3 = 1
-                goto -> bb1
-              bb3:
+                goto -> bb3
+              bb2:
                 _5 = _2
                 storage_dead _5
                 _3 = 0
-                goto -> bb1
+                goto -> bb3
+              bb3:
+                _0 = _3
+                return
             }
             fn b1() -> fn(usize.&) -> usize {
               _0: fn(usize.&) -> usize  // return
@@ -5214,14 +5214,16 @@ static f = fn (d: usize) -> usize {
               _4: usize
               bb0:
                 _2 = _1
-                _3 = 0
-                goto -> bb1
+                goto -> bb2
               bb1:
-                _4 = trap "type mismatch: this `match` is on a `usize`, and `char` cannot match one" -> bb3
-              bb2:
                 _3 = 1
-                goto -> bb1
+                goto -> bb3
+              bb2:
+                _3 = 0
+                goto -> bb3
               bb3:
+                _4 = trap "type mismatch: this `match` is on a `usize`, and `char` cannot match one" -> bb4
+              bb4:
                 _0 = _4
                 return
             }

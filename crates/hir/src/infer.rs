@@ -32,9 +32,9 @@ use crate::ty::{
     ConstArgValue, GenericArg, IntKind, IntValue, NamedTy, ParamScope, ReceiverShape, Region,
     ResolvedVariant, SelfPosition, Ty, TyVar, TyVarValue, builtin_type_by_name, dot_callable,
     enum_variants, generic_param_scope, lower_type_ref_in, member_self_position, member_self_ty,
-    receiver_takes, self_position_of, signature, signature_needs_annotation, substitute_args,
-    type_underlying_for,
+    receiver_takes, self_position_of, signature, signature_needs_annotation, type_underlying_for,
 };
+use crate::usefulness;
 use crate::{ItemId, ItemLoc, Severity, TypeRef, item_loc};
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -56,6 +56,9 @@ pub struct InferenceResult {
     /// variant. Consumed by MIR (dispatch) and ide (goto-def, hover,
     /// highlighting).
     pub variant_of_pat: ArenaMap<PatId, ResolvedVariant>,
+    /// The match arms whose pattern did not check, at any depth: no value
+    /// is dispatched to them. Empty when every pattern is sound.
+    pub refused_arms: rustc_hash::FxHashSet<PatId>,
     /// The type a `let`/parameter pattern destructures — every pattern, not
     /// just [`crate::body::PatData::Bind`] (which is also mirrored into
     /// [`Self::type_of_binding`] under its own binding). MIR reads this for
@@ -449,36 +452,26 @@ pub enum InferenceDiagnostic {
         /// The enum `type` item.
         item: ItemLoc,
     },
-    /// A `match` on an enum-typed scrutinee whose arms don't cover every
-    /// variant. One diagnostic on the `match` keyword naming each uncovered
-    /// variant; MIR's otherwise-arm traps with the identical message.
+    /// A `match` whose arms leave some values unmatched. One diagnostic on
+    /// the `match` keyword naming them; the match's fall-through traps with
+    /// the identical message.
     NonExhaustiveMatch {
         /// The match expression.
         expr: ExprId,
-        /// The enum `type` item, carried structurally so [`Self::message`],
-        /// the "Add missing match arms" fix, and MIR's trap fallback can
-        /// all render `{decl.display_name()}::{name}` without re-deriving
-        /// the declaration from the scrutinee's type.
-        decl: ItemLoc,
-        /// Each uncovered variant's bare name, in declaration order.
-        uncovered: Vec<String>,
-    },
-    /// A `match` on a non-enum scrutinee with no `_`/binding arm: those are
-    /// the only patterns that can match it, so one is required.
-    MatchWithoutCatchAll {
-        /// The match expression.
-        expr: ExprId,
+        /// Patterns for the unmatched values (`Shape::Circle(_)`), each
+        /// valid source for an arm.
+        missing: Vec<String>,
+        /// The scrutinee's type, named when only a `_` arm can finish the
+        /// match (no pattern lists the values of a `usize`).
         scrutinee: Ty,
     },
-    /// A match arm that can never run. Warning-severity: the code is
-    /// well-typed, just dead — MIR lowers the arm as an unreachable block
-    /// and plants no trap.
+    /// A match arm that can never run: the arms above it match every value
+    /// it does. Warning-severity: the code is well-typed, just dead.
     UnreachableArm {
         /// The enclosing match expression.
         match_expr: ExprId,
         /// The arm's pattern (carries the squiggle).
         pat: PatId,
-        reason: UnreachableReason,
     },
     /// A variant pattern on a scrutinee that has no variants (a builtin, a
     /// struct type, a record, ...). What CAN match such a scrutinee is
@@ -543,9 +536,9 @@ pub enum InferenceDiagnostic {
         variant: String,
         scrutinee: Ty,
     },
-    /// A binding arm whose name happens to match a variant of the
-    /// scrutinee's enum. Bare binds are never reinterpreted (see
-    /// `check_match_pat`'s `PatData::Bind` arm) — this is almost always a
+    /// A binder whose name happens to match a variant of the enum it
+    /// meets. Bare binds are never reinterpreted (see
+    /// `InferCtx::warn_bind_shadows_variant`) — this is almost always a
     /// migration mistake or confusion, so it's flagged even though the code
     /// is well-typed (warning severity, like `UnreachableArm`).
     BindShadowsVariant {
@@ -659,14 +652,22 @@ pub enum InferenceDiagnostic {
         len: ConstArgValue,
         found: usize,
     },
-    /// A `let`/parameter pattern that can fail to match: a literal, or a
-    /// variant pattern that does not cover every value of its type.
-    RefutablePattern { pat: PatId, expr: ExprId },
+    /// A `let`/parameter pattern that can fail to match.
+    RefutablePattern {
+        pat: PatId,
+        expr: ExprId,
+        /// Patterns for the values it does not match, as in
+        /// [`Self::NonExhaustiveMatch`].
+        missing: Vec<String>,
+    },
     /// `Name(...)` names something other than a declared `type`.
     PatUnknownType {
         pat: PatId,
         expr: ExprId,
         name: String,
+        /// The spelling of the variant of this name on the value's enum
+        /// (`::Name(...)`), when it has one.
+        variant: Option<String>,
     },
     /// `Name(...)` unwraps a *different* named type than the scrutinee
     /// actually has.
@@ -675,6 +676,8 @@ pub enum InferenceDiagnostic {
         expr: ExprId,
         expected: Ty,
         actual: Ty,
+        /// As [`Self::PatUnknownType`]'s `variant`.
+        variant: Option<String>,
     },
     /// A turbofish with the wrong number of arguments for the generic
     /// item's binder. The declaration is the related location.
@@ -1473,61 +1476,10 @@ impl MemberCandidate {
     }
 }
 
-/// Why an arm can never run — one message per cause, so the fix is named.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum UnreachableReason {
-    /// The variant is already covered by an earlier arm.
-    VariantCovered(String),
-    /// The same literal is already matched by an earlier arm — already
-    /// rendered (see [`CoveredLiteral::render`]), so the message needs no
-    /// knowledge of which literal kind it was.
-    LiteralCovered(String),
-    /// An earlier `_`/binding arm already matches anything.
-    AfterCatchAll,
-    /// Every variant of the enum is already covered individually.
-    AllVariantsCovered(String),
-}
-
-/// One literal value an earlier arm already matched — the duplicate-arm
-/// warning's key, and deliberately a VALUE rather than its rendering.
-///
-/// Rendering is a display choice (a character is quoted, an integer is
-/// not), and a display choice must never double as an equality key: the
-/// day two spellings of one value render differently, or two values render
-/// alike, the warning would go wrong SILENTLY. Written literals already
-/// normalize before they reach here (`1_0` and `007` are the same `u128`),
-/// and [`CoveredLiteral::int`] drops the sign of a zero (`-0` is `0`).
-#[derive(Debug, Clone, PartialEq, Eq)]
-enum CoveredLiteral {
-    Char(char),
-    /// Sign and magnitude, so a magnitude past `i128::MAX` still keys.
-    Int {
-        magnitude: u128,
-        negative: bool,
-    },
-}
-
-impl CoveredLiteral {
-    fn int(magnitude: u128, negative: bool) -> Self {
-        CoveredLiteral::Int {
-            magnitude,
-            negative: negative && magnitude != 0,
-        }
-    }
-
-    /// How the value reads inside the unreachable-arm message —
-    /// backticked like every other name that family quotes (a covered
-    /// VARIANT reads `` `Circle` ``, so a covered value reads `` `0` ``
-    /// and `` `'a'` ``: one family, one shape).
-    fn render(&self) -> String {
-        match self {
-            CoveredLiteral::Char(value) => format!("`{value:?}`"),
-            CoveredLiteral::Int {
-                magnitude,
-                negative,
-            } => format!("`{}{magnitude}`", if *negative { "-" } else { "" }),
-        }
-    }
+/// `a`, `b` as "`a`, `b`".
+fn backtick_list(items: &[String]) -> String {
+    let items: Vec<String> = items.iter().map(|item| format!("`{item}`")).collect();
+    items.join(", ")
 }
 
 impl InferenceDiagnostic {
@@ -1551,7 +1503,6 @@ impl InferenceDiagnostic {
             | InferenceDiagnostic::VariantPathOnValue { expr, .. }
             | InferenceDiagnostic::EnumCtorIsVariant { expr, .. }
             | InferenceDiagnostic::NonExhaustiveMatch { expr, .. }
-            | InferenceDiagnostic::MatchWithoutCatchAll { expr, .. }
             | InferenceDiagnostic::BreakOutsideLoop { expr }
             | InferenceDiagnostic::ContinueOutsideLoop { expr }
             | InferenceDiagnostic::ReturnOutsideFn { expr }
@@ -1926,34 +1877,20 @@ impl InferenceDiagnostic {
                 )
             }
             InferenceDiagnostic::NonExhaustiveMatch {
-                decl, uncovered, ..
+                missing, scrutinee, ..
             } => {
-                let prefix = decl.display_name();
-                let list = uncovered
-                    .iter()
-                    .map(|name| format!("`{prefix}::{name}`"))
-                    .collect::<Vec<_>>()
-                    .join(", ");
-                format!("this `match` does not cover {list}")
+                if missing.len() == 1 && missing[0] == "_" {
+                    format!(
+                        "this `match` does not cover every possible `{}`; add a `_` arm",
+                        scrutinee.display()
+                    )
+                } else {
+                    format!("this `match` does not cover {}", backtick_list(missing))
+                }
             }
-            InferenceDiagnostic::MatchWithoutCatchAll { scrutinee, .. } => format!(
-                "this `match` does not cover every possible `{}`; add a `_` arm",
-                scrutinee.display()
-            ),
-            InferenceDiagnostic::UnreachableArm { reason, .. } => match reason {
-                UnreachableReason::VariantCovered(variant) => {
-                    format!("unreachable arm: `{variant}` is already covered by a previous arm")
-                }
-                UnreachableReason::LiteralCovered(literal) => {
-                    format!("unreachable arm: {literal} is already covered by a previous arm")
-                }
-                UnreachableReason::AfterCatchAll => {
-                    "unreachable arm: a previous arm already matches anything".to_owned()
-                }
-                UnreachableReason::AllVariantsCovered(name) => {
-                    format!("unreachable arm: every variant of `{name}` is already covered")
-                }
-            },
+            InferenceDiagnostic::UnreachableArm { .. } => {
+                "unreachable arm: the arms above match every value it matches".to_owned()
+            }
             // What CAN match is type-dependent since literal patterns
             // arrived: the scalars take those too, so the old blanket "only
             // `_` or a binding" is false for exactly those.
@@ -2067,19 +2004,34 @@ impl InferenceDiagnostic {
                 if *found == 1 { "" } else { "s" },
                 len.display()
             ),
-            InferenceDiagnostic::RefutablePattern { .. } => {
-                "this pattern can fail to match; use `match`".to_owned()
-            }
-            InferenceDiagnostic::PatUnknownType { name, .. } => {
-                format!("`{name}` does not name a type")
-            }
-            InferenceDiagnostic::PatNamedTypeMismatch {
-                expected, actual, ..
-            } => format!(
-                "type mismatch: expected `{}`, found `{}`",
-                expected.display(),
-                actual.display()
+            InferenceDiagnostic::RefutablePattern { missing, .. } => format!(
+                "this pattern does not cover {}; use `match`",
+                backtick_list(missing)
             ),
+            InferenceDiagnostic::PatUnknownType { name, variant, .. } => match variant {
+                Some(variant) => {
+                    format!("`{name}` does not name a type; write `{variant}` to match the variant")
+                }
+                None => format!("`{name}` does not name a type"),
+            },
+            InferenceDiagnostic::PatNamedTypeMismatch {
+                expected,
+                actual,
+                variant,
+                ..
+            } => {
+                let mismatch = format!(
+                    "type mismatch: expected `{}`, found `{}`",
+                    expected.display(),
+                    actual.display()
+                );
+                match variant {
+                    Some(variant) => {
+                        format!("{mismatch}; write `{variant}` to match the variant")
+                    }
+                    None => mismatch,
+                }
+            }
             InferenceDiagnostic::GenericArgCount {
                 item,
                 expected,
@@ -2648,6 +2600,10 @@ pub(crate) struct InferCtx<'a, 'db> {
     /// stays quiet about it rather than saying it twice — the arms are two
     /// symptoms, the missing annotation is one fact.
     unresolved_scrutinees: rustc_hash::FxHashSet<ExprId>,
+    /// Patterns refused for what they are themselves, not for a part:
+    /// exhaustiveness reads them as `_`, giving a broken arm the benefit
+    /// of the doubt rather than a second diagnostic.
+    broken_pats: rustc_hash::FxHashSet<PatId>,
     /// Literals directly under a unary minus (`-5`): their range check
     /// applies the sign (`-128` fits `i8`; plain `128` does not). Filled by
     /// the [`crate::body::ExprData::Neg`] arm before its operand is
@@ -2742,6 +2698,8 @@ struct PendingNumberLiteral {
     negated: bool,
     /// The literal's NUMBER-CLASS variable.
     var: Ty,
+    /// The match arm whose pattern holds the literal, if any.
+    arm: Option<PatId>,
 }
 
 /// What a use site knows about the member it reached and the member's
@@ -2852,6 +2810,7 @@ impl<'a, 'db> InferCtx<'a, 'db> {
             pending_empty_arrays: Vec::new(),
             pending_number_literals: Vec::new(),
             unresolved_scrutinees: rustc_hash::FxHashSet::default(),
+            broken_pats: rustc_hash::FxHashSet::default(),
             negated_literals: rustc_hash::FxHashSet::default(),
             number_expectations: rustc_hash::FxHashSet::default(),
             pending_obligations: Vec::new(),
@@ -3464,10 +3423,19 @@ impl<'a, 'db> InferCtx<'a, 'db> {
         let pending = std::mem::take(&mut self.pending_number_literals);
         let mut reported_number_roots: Vec<TyVar> = Vec::new();
         for literal in pending {
-            match constraint::resolve_shallow(self.table, &literal.var) {
+            let resolved = constraint::resolve_shallow(self.table, &literal.var);
+            let fits = match resolved {
                 Ty::Int(kind) => {
-                    let fits =
-                        IntValue::from_literal(kind, literal.value, literal.negated).is_some();
+                    IntValue::from_literal(kind, literal.value, literal.negated).is_some()
+                }
+                _ => false,
+            };
+            // An arm whose literal is no valid integer is not dispatched to.
+            if !fits && let Some(arm) = literal.arm {
+                self.result.refused_arms.insert(arm);
+            }
+            match resolved {
+                Ty::Int(kind) => {
                     if !fits {
                         let rendered = if literal.negated {
                             format!("-{}", literal.value)
@@ -3601,8 +3569,7 @@ impl<'a, 'db> InferCtx<'a, 'db> {
                     *ty = resolve_finished(self.table, ty);
                     *receiver_ty = resolve_finished(self.table, receiver_ty);
                 }
-                InferenceDiagnostic::MatchWithoutCatchAll { scrutinee, .. }
-                | InferenceDiagnostic::NonEnumScrutineeVariantPat { scrutinee, .. }
+                InferenceDiagnostic::NonEnumScrutineeVariantPat { scrutinee, .. }
                 | InferenceDiagnostic::PatWrongEnum { scrutinee, .. } => {
                     *scrutinee = resolve_finished(self.table, scrutinee);
                 }
@@ -3641,6 +3608,9 @@ impl<'a, 'db> InferCtx<'a, 'db> {
                 | InferenceDiagnostic::NoTraitImpl { ty, .. } => {
                     *ty = resolve_finished(self.table, ty);
                 }
+                InferenceDiagnostic::NonExhaustiveMatch { scrutinee, .. } => {
+                    *scrutinee = resolve_finished(self.table, scrutinee);
+                }
                 InferenceDiagnostic::ArgCountMismatch { .. }
                 | InferenceDiagnostic::NeedsAnnotation { .. }
                 | InferenceDiagnostic::AssignToImmutable { .. }
@@ -3655,7 +3625,6 @@ impl<'a, 'db> InferCtx<'a, 'db> {
                 | InferenceDiagnostic::QualifiedPathIsField { .. }
                 | InferenceDiagnostic::VariantPathOnValue { .. }
                 | InferenceDiagnostic::EnumCtorIsVariant { .. }
-                | InferenceDiagnostic::NonExhaustiveMatch { .. }
                 | InferenceDiagnostic::UnreachableArm { .. }
                 | InferenceDiagnostic::PatNoSuchVariant { .. }
                 | InferenceDiagnostic::PatArity { .. }
@@ -3962,6 +3931,7 @@ impl<'a, 'db> InferCtx<'a, 'db> {
                         value: *value,
                         negated: self.negated_literals.contains(&expr),
                         var: var.clone(),
+                        arm: None,
                     });
                 }
                 var
@@ -4435,27 +4405,23 @@ impl<'a, 'db> InferCtx<'a, 'db> {
                                     self.bind_error(&self.body.pat_bindings(*pat));
                                     continue;
                                 };
-                                // The annotation is the axiom, else the
-                                // pattern's own type; a variant pattern (it
-                                // matches through a borrow too) only pins an
-                                // initializer of unknown type.
-                                let variant = type_ref.is_none()
-                                    && matches!(self.body.pats[*pat], PatData::Variant { .. });
+                                // The annotation is the axiom. A pattern
+                                // naming its type (a variant or newtype
+                                // pattern, which matches through a borrow
+                                // too) only pins an initializer of unknown
+                                // type.
                                 let declared = match type_ref {
                                     Some(tr) => self.lower_type_ref(tr),
-                                    None if variant => self.fresh_var(),
-                                    None => self
-                                        .declared_type_for_pat(*pat)
-                                        .unwrap_or_else(|| self.fresh_var()),
+                                    None => self.fresh_var(),
                                 };
                                 let cause =
                                     type_ref.is_some().then_some(Cause::LetAnnotation(*pat));
                                 let ty = self.infer_expr_with(*init, &declared, cause);
-                                let ty = if variant {
+                                let ty = if type_ref.is_none() {
                                     if matches!(self.resolve_shallow(&ty), Ty::Infer(_))
-                                        && let Some(enum_ty) = self.declared_type_for_pat(*pat)
+                                        && let Some(named) = self.declared_type_for_pat(*pat)
                                     {
-                                        self.adopt(&ty, &enum_ty);
+                                        self.adopt(&ty, &named);
                                     }
                                     ty
                                 } else {
@@ -8889,8 +8855,8 @@ impl<'a, 'db> InferCtx<'a, 'db> {
     /// opens a join of its own — same-variant arms keep their precision,
     /// mixed variants of one enum LUB to the enum, blame speaks about the
     /// arm tails. Patterns are checked against the scrutinee's type
-    /// (variant names resolve type-directed, like `::` paths do), and flat
-    /// set-cover over variant indices decides exhaustiveness.
+    /// (variant names resolve type-directed, like `::` paths do), and
+    /// [`usefulness`] decides reachability and exhaustiveness.
     fn infer_match(
         &mut self,
         expr: ExprId,
@@ -8941,7 +8907,6 @@ impl<'a, 'db> InferCtx<'a, 'db> {
                 }
             }
         }
-        let (scrut, lens) = self.classify_scrutinee(&scrut_ty, scrutinee);
 
         // Statement vs. witness position, exactly as for `if` (see there).
         let (sink_index, is_root) = match sink {
@@ -8956,96 +8921,15 @@ impl<'a, 'db> InferCtx<'a, 'db> {
             }
         };
 
-        // Flat set-cover over variant indices: which variants the arms
-        // reach, and whether a catch-all (`_`/binding) has been seen.
-        let n_variants = match &scrut {
-            Scrutinee::Enum(named) => enum_variants(self.db, named.decl.to_id(self.db))
-                .as_ref()
-                .map(Vec::len)
-                .unwrap_or(0),
-            _ => 0,
-        };
-        let mut covered = vec![false; n_variants];
-        // The literal values already matched, for the duplicate-arm warning
-        // — a plain list, not a set-cover: the domain is far too big to
-        // enumerate, so this answers "seen before?" and nothing else. One
-        // list serves every literal kind because it holds VALUES (see
-        // [`CoveredLiteral`]), and the arms of one match all share a
-        // scrutinee type, so two kinds never meet in it.
-        let mut covered_literals: Vec<CoveredLiteral> = Vec::new();
-        let mut catch_all = false;
         let mut all_diverge = true;
         for arm in arms {
-            let cover = self.check_match_pat(expr, arm.pat, &scrut, lens.as_ref());
-            match cover {
-                Cover::Nothing | Cover::Unknown => {}
-                _ if catch_all => {
-                    // Reached by a literal arm too: `_ => ...` before
-                    // `'(' => ...` makes the literal dead, and the reason
-                    // is the catch-all, exactly as for a variant.
-                    // Which earlier arm to blame is in `catch_all` already;
-                    // a duplicate *variant* still reads better named.
-                    let reason = match (&cover, self.result.variant_of_pat.get(arm.pat)) {
-                        (Cover::Variant(_), Some(vt)) => {
-                            UnreachableReason::VariantCovered(vt.name.to_string())
-                        }
-                        _ => UnreachableReason::AfterCatchAll,
-                    };
-                    self.push_unreachable(expr, arm.pat, reason);
-                }
-                Cover::Variant(index) => {
-                    let index = index as usize;
-                    if covered[index] {
-                        let name = self
-                            .result
-                            .variant_of_pat
-                            .get(arm.pat)
-                            .map(|vt| vt.name.to_string())
-                            .unwrap_or_default();
-                        self.push_unreachable(
-                            expr,
-                            arm.pat,
-                            UnreachableReason::VariantCovered(name),
-                        );
-                    } else {
-                        covered[index] = true;
-                    }
-                }
-                Cover::Literal => {
-                    let value = match self.body.pats[arm.pat] {
-                        PatData::Char(value) => Some(CoveredLiteral::Char(value)),
-                        PatData::Int {
-                            value: Some(value),
-                            negative,
-                        } => Some(CoveredLiteral::int(value, negative)),
-                        _ => None,
-                    };
-                    if let Some(value) = value {
-                        if covered_literals.contains(&value) {
-                            self.push_unreachable(
-                                expr,
-                                arm.pat,
-                                UnreachableReason::LiteralCovered(value.render()),
-                            );
-                        } else {
-                            covered_literals.push(value);
-                        }
-                    }
-                }
-                Cover::All => {
-                    if n_variants > 0 && covered.iter().all(|&c| c) {
-                        let name = match &scrut {
-                            Scrutinee::Enum(named) => named.decl.display_name().to_owned(),
-                            _ => String::new(),
-                        };
-                        self.push_unreachable(
-                            expr,
-                            arm.pat,
-                            UnreachableReason::AllVariantsCovered(name),
-                        );
-                    }
-                    catch_all = true;
-                }
+            let site = PatSite {
+                anchor: expr,
+                blame: scrutinee,
+                arm: Some(arm.pat),
+            };
+            if !self.check_pat_in(arm.pat, &scrut_ty, site) {
+                self.result.refused_arms.insert(arm.pat);
             }
             let arm_fresh = self.fresh_var();
             self.witness_sink = Some(sink_index);
@@ -9056,40 +8940,45 @@ impl<'a, 'db> InferCtx<'a, 'db> {
             }
         }
 
-        // Exhaustiveness. Skipped for unknown/broken scrutinees — there is
-        // no value universe to cover (and the pattern diagnostics above
-        // already said what's wrong).
-        if !catch_all {
-            match &scrut {
-                Scrutinee::Enum(named) => {
-                    if !covered.iter().all(|&c| c) {
-                        let variants = enum_variants(self.db, named.decl.to_id(self.db))
-                            .as_ref()
-                            .expect("classified as an enum above");
-                        let uncovered = variants
-                            .iter()
-                            .enumerate()
-                            .filter(|&(i, _)| !covered[i])
-                            .map(|(_, (name, _))| name.clone())
-                            .collect();
-                        self.result
-                            .diagnostics
-                            .push(InferenceDiagnostic::NonExhaustiveMatch {
-                                expr,
-                                decl: named.decl.clone(),
-                                uncovered,
-                            });
-                    }
+        // Reachability and exhaustiveness, over every pattern at every
+        // depth, unless the scrutinee never yields a value. A broken arm (its
+        // diagnostic says what is wrong) is not judged for reachability and
+        // hides nothing from later arms; it covers what its checked parts
+        // cover, its broken parts reading as `_`.
+        if !matches!(self.resolve_shallow(&scrut_ty), Ty::Error | Ty::Never) {
+            let tys = std::slice::from_ref(&scrut_ty);
+            let mut rows = Vec::new();
+            let mut refused = Vec::new();
+            for arm in arms {
+                let row = vec![self.deconstruct_pat(arm.pat)];
+                if !self.result.refused_arms.is_empty()
+                    && self.result.refused_arms.contains(&arm.pat)
+                {
+                    refused.push(row);
+                    continue;
                 }
-                Scrutinee::Other(ty) => {
+                if !usefulness::is_useful(self, &rows, &row, tys) {
                     self.result
                         .diagnostics
-                        .push(InferenceDiagnostic::MatchWithoutCatchAll {
-                            expr,
-                            scrutinee: ty.clone(),
+                        .push(InferenceDiagnostic::UnreachableArm {
+                            match_expr: expr,
+                            pat: arm.pat,
                         });
                 }
-                Scrutinee::Unknown(_) | Scrutinee::Error => {}
+                rows.push(row);
+            }
+            rows.append(&mut refused);
+            let missing = usefulness::missing(self, &rows, tys);
+            if !missing.is_empty() {
+                let missing = self.render_witnesses(&scrut_ty, missing);
+                let scrutinee = self.pat_shape(&scrut_ty);
+                self.result
+                    .diagnostics
+                    .push(InferenceDiagnostic::NonExhaustiveMatch {
+                        expr,
+                        missing,
+                        scrutinee,
+                    });
             }
         }
 
@@ -9130,71 +9019,15 @@ impl<'a, 'db> InferCtx<'a, 'db> {
         ty
     }
 
-    /// Classify a scrutinee's type for pattern checking. The lens is `Some`
-    /// when the scrutinee is a borrow looked through to its referent, `None`
-    /// when it is owned. `scrutinee` is the expression projections out of it
-    /// are blamed on.
-    fn classify_scrutinee(
-        &mut self,
-        scrut_ty: &Ty,
-        scrutinee: ExprId,
-    ) -> (Scrutinee, Option<MatchLens>) {
-        // MATCH PROJECTS THROUGH BORROWS (M13): a borrow of something a
-        // pattern can DISPATCH on (`dispatches_on`, the predicate mir asks)
-        // is classified by its referent, and the lens makes every payload
-        // binding a borrow of its sub-place. A `struct.&` or `str.&` stays
-        // `Scrutinee::Other` holding the borrow type.
-        let mut lens = None;
-        let mut classify = self.resolve_shallow(scrut_ty);
-        if let Ty::Borrow {
-            mutable,
-            region,
-            referent,
-        } = &classify
-        {
-            let referent = self.resolve_shallow(referent);
-            if crate::dispatches_on(self.db, &referent) {
-                lens = Some(MatchLens {
-                    mutable: *mutable,
-                    region: region.clone(),
-                    scrutinee,
-                });
-                classify = referent;
-            }
-        }
-        let scrut = match classify {
-            Ty::Named(named) => {
-                if enum_variants(self.db, named.decl.to_id(self.db)).is_some() {
-                    Scrutinee::Enum(named)
-                } else if matches!(
-                    crate::type_decl(self.db, named.decl.to_id(self.db)),
-                    Some(TypeDeclData::Struct { .. })
-                ) {
-                    Scrutinee::Other(Ty::Named(named))
-                } else {
-                    // A broken declaration: its own diagnostics sit at the
-                    // declaration site (infectious, silent).
-                    Scrutinee::Error
-                }
-            }
-            Ty::Infer(var) => Scrutinee::Unknown(Ty::Infer(var)),
-            // A diverging or broken scrutinee: the arms never run; stay
-            // silent (the scrutinee carries its own story).
-            Ty::Error | Ty::Never => Scrutinee::Error,
-            other => Scrutinee::Other(other),
-        };
-        (scrut, lens)
-    }
-
-    /// Generic args for a pattern's enum: taken from the scrutinee when it
-    /// is the same enum — patterns never introduce args of
-    /// their own beyond a written turbofish, and the scrutinee's are the
+    /// Generic args for a pattern's enum: taken from the value's type when
+    /// it is (a variant of) the same enum — patterns never introduce args
+    /// of their own beyond a written turbofish, and the value's are the
     /// ground truth. A wrong-enum pattern (its own diagnostic) gets
     /// all-error args, so the declaration's rigid params never leak into
     /// the arm's binding types.
-    fn pat_enum_args(&mut self, target: &ItemLoc, scrut: &Scrutinee) -> Vec<GenericArg> {
-        match scrut {
-            Scrutinee::Enum(named) if named.decl == *target => named.args.clone(),
+    fn pat_enum_args(&mut self, target: &ItemLoc, shape: &Ty) -> Vec<GenericArg> {
+        match shape {
+            Ty::Named(named) if named.decl == *target => named.args.clone(),
             _ => item_generics(self.db, target.to_id(self.db))
                 .iter()
                 .map(|param| match param.kind {
@@ -9206,38 +9039,14 @@ impl<'a, 'db> InferCtx<'a, 'db> {
         }
     }
 
-    fn push_unreachable(&mut self, match_expr: ExprId, pat: PatId, reason: UnreachableReason) {
-        self.result
-            .diagnostics
-            .push(InferenceDiagnostic::UnreachableArm {
-                match_expr,
-                pat,
-                reason,
-            });
-    }
-
-    /// One LITERAL pattern meeting its scrutinee. A literal pattern binds
-    /// nothing, so agreement is the whole check — and it is the same
-    /// question for every literal kind, which is why both arms ask it here
-    /// instead of each writing its own half of it. `true` means the arm
-    /// covers something; `false` means the mismatch has been reported.
-    ///
-    /// Two things this does that neither arm did on its own:
-    ///
-    /// **The scrutinee is re-read PER ARM**, not taken from the `Scrutinee`
-    /// the arm loop was opened with. A literal arm can PIN a still-unknown
-    /// scrutinee, so by the time a later arm runs, "unknown" may be stale —
-    /// and the arms that pin are exactly the ones that must notice. While
-    /// one literal kind existed this was unobservable; with two, an arm
-    /// loop that trusted the pre-loop classification would accept
-    /// `match d { 0 => …, 'a' => … }` on an unannotated `d` and lower a
-    /// `char` equality test against a number.
+    /// One LITERAL pattern meeting the value it tests. A literal pattern
+    /// binds nothing, so agreement is the whole check, and it is the same
+    /// question for every literal kind.
     ///
     /// **`adopt`'s answer is checked.** Adoption IS the agreement test: it
     /// already knows that a number-class variable takes only integer
     /// scalars, that `Ty::Error` is infectious and silent, and that `u8` is
-    /// not `u32`. Nothing here restates those rules, so nothing here can
-    /// drift away from unification's.
+    /// not `u32`. Nothing here restates those rules.
     ///
     /// `asserts` is what the pattern claims — a definite `Ty::Char`, or the
     /// fresh number variable an integer literal claims. `renders` is how
@@ -9245,25 +9054,20 @@ impl<'a, 'db> InferCtx<'a, 'db> {
     /// `{number}` rather than a variable's own blank `_`.
     fn literal_pat_agrees(
         &mut self,
-        match_expr: ExprId,
+        anchor: ExprId,
         pat: PatId,
-        scrut: &Scrutinee,
+        shape: &Ty,
         asserts: &Ty,
         renders: Ty,
     ) -> bool {
-        let scrut_ty = match scrut {
-            Scrutinee::Enum(named) => Ty::Named(named.clone()),
-            Scrutinee::Other(ty) | Scrutinee::Unknown(ty) => ty.clone(),
-            Scrutinee::Error => Ty::Error,
-        };
-        if self.adopt(&scrut_ty, asserts) {
+        if self.adopt(shape, asserts) {
             return true;
         }
-        let expected = self.resolve_shallow(&scrut_ty);
+        let expected = self.resolve_shallow(shape);
         self.result
             .diagnostics
             .push(InferenceDiagnostic::PatLiteralTypeMismatch {
-                match_expr,
+                match_expr: anchor,
                 pat,
                 expected,
                 found: renders,
@@ -9271,303 +9075,648 @@ impl<'a, 'db> InferCtx<'a, 'db> {
         false
     }
 
-    /// Check one arm's pattern against the scrutinee: resolve variant
-    /// names (type-directed), type the pattern's bindings, and report what
-    /// the pattern covers.
+    /// Check a `let`/parameter pattern against the type it destructures,
+    /// binding every name it introduces. It is a one-arm match, so it is
+    /// refused unless it covers every value of `ty`.
     ///
-    /// `lens` is `Some` exactly when the scrutinee is a BORROW of the enum
-    /// `scrut` describes — see [`MatchLens`]. It changes only
-    /// what the bindings are typed as: a whole-value binder gets the
-    /// borrow back, and each payload binder gets a borrow of that
-    /// payload's sub-place. Coverage, variant resolution, arity and every
-    /// diagnostic below are untouched by it, which is what makes the owned
-    /// path provably unchanged.
-    fn check_match_pat(
-        &mut self,
-        match_expr: ExprId,
-        pat: PatId,
-        scrut: &Scrutinee,
-        lens: Option<&MatchLens>,
-    ) -> Cover {
+    /// `anchor` is the expression [`InferenceDiagnostic::expr`] reports a
+    /// finding on: the `let`'s initializer, or the enclosing `fn` literal's
+    /// body for a parameter pattern (every call runs the body).
+    /// [`InferenceDiagnostic::pat`] carries the precise pattern, so the
+    /// squiggle always lands on the pattern itself.
+    fn check_pat(&mut self, pat: PatId, ty: &Ty, anchor: ExprId) {
+        let site = PatSite {
+            anchor,
+            blame: anchor,
+            arm: None,
+        };
+        if self.check_pat_in(pat, ty, site) {
+            let row = vec![self.deconstruct_pat(pat)];
+            let missing = usefulness::missing(self, &[row], std::slice::from_ref(ty));
+            if !missing.is_empty() {
+                let missing = self.render_witnesses(ty, missing);
+                self.result
+                    .diagnostics
+                    .push(InferenceDiagnostic::RefutablePattern {
+                        pat,
+                        expr: anchor,
+                        missing,
+                    });
+            }
+        }
+    }
+
+    /// Type `pat` against a value of type `ty`, binding every name it
+    /// introduces, at any depth. Returns whether the pattern checked
+    /// cleanly.
+    fn check_pat_in(&mut self, pat: PatId, ty: &Ty, site: PatSite) -> bool {
+        self.result.type_of_pat.insert(pat, ty.clone());
         match self.body.pats[pat].clone() {
-            PatData::Missing => Cover::Nothing,
-            PatData::Wildcard => Cover::All,
-            // A character literal pattern. It binds nothing, so agreement
-            // with the scrutinee is the whole check — and unlike a variant
-            // pattern there is no name to resolve type-directed: `'x'` is a
-            // `char` before anything is known about what it is matched
-            // against, which is exactly why it can carry the blame itself.
-            PatData::Char(_) => {
-                if self.literal_pat_agrees(match_expr, pat, scrut, &Ty::Char, Ty::Char) {
-                    // Recorded so `arm_kind` can ask whether inference
-                    // AGREED, exactly as the integer arm's width read does
-                    // — a refused literal arm must not lower a live test.
-                    self.result.type_of_pat.insert(pat, Ty::Char);
-                    Cover::Literal
-                } else {
-                    Cover::Nothing
+            PatData::Missing => false,
+            PatData::Wildcard => true,
+            PatData::Bind(binding) => {
+                self.warn_bind_shadows_variant(site.anchor, pat, binding, ty);
+                self.result.type_of_binding.insert(binding, ty.clone());
+                true
+            }
+            _ => {
+                // Every other pattern looks inside the value, so through a
+                // borrow it looks at the referent, and what it binds
+                // borrows from there. A borrow behind another borrow is
+                // shared unless both are exclusive, and lives no longer
+                // than the outer one.
+                let mut shape = self.resolve_shallow(ty);
+                let mut lens: Option<MatchLens> = None;
+                while let Ty::Borrow {
+                    mutable,
+                    region,
+                    referent,
+                } = shape
+                {
+                    lens = Some(match lens {
+                        Some(outer) => MatchLens {
+                            mutable: mutable && outer.mutable,
+                            ..outer
+                        },
+                        None => MatchLens { mutable, region },
+                    });
+                    shape = self.resolve_shallow(&referent);
+                }
+                match self.check_pat_shape(pat, &shape, site, lens.as_ref()) {
+                    PatVerdict::Ok => true,
+                    PatVerdict::PartsBroken => false,
+                    PatVerdict::Refused => {
+                        self.broken_pats.insert(pat);
+                        false
+                    }
                 }
             }
-            // An integer literal pattern. It binds nothing either, so it
-            // asks the same agreement question — but what it ASSERTS is
-            // weaker: `0` has no type of its own the way `'x'` does, so it
-            // claims only "this is a number" and the SCRUTINEE is the
-            // defining use that picks the width (the DEFINING-USE ruling,
-            // applied where a pattern meets a value). The range check is
-            // then exactly the machinery an expression literal uses — one
-            // pending literal, one post-traversal answer, no suffixes and
-            // no default width.
+        }
+    }
+
+    /// [`Self::check_pat_in`] for a pattern that looks inside its value,
+    /// `shape` being the value's type behind any borrow.
+    fn check_pat_shape(
+        &mut self,
+        pat: PatId,
+        shape: &Ty,
+        site: PatSite,
+        lens: Option<&MatchLens>,
+    ) -> PatVerdict {
+        let anchor = site.anchor;
+        match self.body.pats[pat].clone() {
+            PatData::Missing | PatData::Wildcard | PatData::Bind(_) => {
+                unreachable!("handled by check_pat_in")
+            }
+            // A broken value (its own diagnostic) or one that never arrives
+            // is no scalar to test.
+            PatData::Char(_) | PatData::Int { .. } if matches!(shape, Ty::Error | Ty::Never) => {
+                PatVerdict::Refused
+            }
+            // A character literal is a `char` before anything is known
+            // about what it meets, which is why it can carry the blame.
+            PatData::Char(_) => {
+                let ok = self.literal_pat_agrees(anchor, pat, shape, &Ty::Char, Ty::Char);
+                PatVerdict::of(ok, true)
+            }
+            // An integer literal claims only "this is a number": the value
+            // it meets is the defining use that picks the width, and the
+            // range check is the one an expression literal gets.
             PatData::Int { value, negative } => {
-                // A magnitude no integer type could hold names no matchable
-                // value. It asserts nothing, so it pins nothing and there is
-                // nothing to range-check — checked BEFORE agreement for
-                // that reason: a literal with no value must not drag the
-                // scrutinee into the number class on its way out.
+                // A magnitude no integer type could hold asserts nothing,
+                // so it must not drag the value into the number class.
                 let Some(value) = value else {
                     self.result
                         .diagnostics
-                        .push(InferenceDiagnostic::PatIntLiteralTooLarge { match_expr, pat });
-                    return Cover::Nothing;
+                        .push(InferenceDiagnostic::PatIntLiteralTooLarge {
+                            match_expr: anchor,
+                            pat,
+                        });
+                    return PatVerdict::Refused;
                 };
-                // The number-class variable IS the assertion: adopting it
-                // pins a still-unknown scrutinee to "a number" and takes
-                // the width from an already-pinned one, in one step.
                 let var = self.fresh_number_var();
-                if !self.literal_pat_agrees(match_expr, pat, scrut, &var, Ty::UnresolvedNumber) {
-                    return Cover::Nothing;
+                if !self.literal_pat_agrees(anchor, pat, shape, &var, Ty::UnresolvedNumber) {
+                    return PatVerdict::Refused;
                 }
                 self.pending_number_literals.push(PendingNumberLiteral {
-                    expr: match_expr,
+                    expr: anchor,
                     pat: Some(pat),
                     value,
                     negated: negative,
-                    var: var.clone(),
+                    var,
+                    arm: site.arm,
                 });
-                // MIR reads the width back from here to build the constant
-                // its equality test compares against.
-                self.result.type_of_pat.insert(pat, var);
-                Cover::Literal
-            }
-            PatData::Bind(binding) => {
-                let name = self.body.bindings[binding].written_name();
-                // A bare bind always binds the whole scrutinee — patterns
-                // are never reinterpreted as variants (G25: silent
-                // reinterpretation was a footgun — rename/remove a variant
-                // later and an old bare-name arm would silently degrade to
-                // a catch-all). Warn when the name shadows a variant of the
-                // scrutinee's enum: almost always a migration mistake or a
-                // stale rename; write `::Name` (or `Enum::Name`) to
-                // actually match it. This does *not* change the binding's
-                // type or the `Cover::All` outcome — it only warns.
-                let enum_loc = match scrut {
-                    Scrutinee::Enum(named) => Some(named.decl.clone()),
-                    _ => None,
-                };
-                if let Some(loc) = &enum_loc
-                    && let Some(name) = name
-                    && let Some(variants) = enum_variants(self.db, loc.to_id(self.db)).as_ref()
-                    && variants.iter().any(|(n, _)| *n == name)
-                {
-                    self.result
-                        .diagnostics
-                        .push(InferenceDiagnostic::BindShadowsVariant {
-                            match_expr,
-                            pat,
-                            item: loc.clone(),
-                            name: name.to_owned(),
-                        });
-                }
-                let ty = match scrut {
-                    Scrutinee::Enum(named) => Ty::Named(named.clone()),
-                    Scrutinee::Other(ty) | Scrutinee::Unknown(ty) => ty.clone(),
-                    Scrutinee::Error => Ty::Error,
-                };
-                // A whole-value binder on a BORROWED scrutinee binds the
-                // borrow itself, with the scrutinee's own region and no
-                // new edge: it names the very same place, so there is
-                // nothing to project and nothing to shorten. (This is also
-                // what the arm got before the lens existed, when a
-                // borrowed scrutinee classified as `Scrutinee::Other`.)
-                let ty = match lens {
-                    Some(lens) => lens.wrap(lens.region.clone(), ty),
-                    None => ty,
-                };
-                self.result.type_of_binding.insert(binding, ty);
-                Cover::All
+                PatVerdict::Ok
             }
             PatData::Variant {
                 enum_name,
                 variant,
-                bindings,
+                payload: payload_pats,
             } => {
-                // Which enum the variant name resolves against: the named
-                // one (qualified spelling), or the scrutinee's (bare).
-                let target = match &enum_name {
-                    Some(enum_name) => match self.resolve_pat_enum(match_expr, pat, enum_name) {
-                        Some(loc) => loc,
-                        None => {
-                            self.bind_error(&bindings);
-                            return Cover::Nothing;
-                        }
-                    },
-                    None => match scrut {
-                        Scrutinee::Enum(named) => named.decl.clone(),
-                        Scrutinee::Other(ty) => {
-                            self.result.diagnostics.push(
-                                InferenceDiagnostic::NonEnumScrutineeVariantPat {
-                                    match_expr,
-                                    pat,
-                                    scrutinee: ty.clone(),
-                                },
-                            );
-                            self.bind_error(&bindings);
-                            return Cover::Nothing;
-                        }
-                        Scrutinee::Unknown(_) => {
-                            self.result.diagnostics.push(
-                                InferenceDiagnostic::VariantPatUnknownScrutinee { match_expr, pat },
-                            );
-                            self.unresolved_scrutinees.insert(match_expr);
-                            self.bind_error(&bindings);
-                            return Cover::Nothing;
-                        }
-                        Scrutinee::Error => {
-                            self.bind_error(&bindings);
-                            return Cover::Nothing;
-                        }
-                    },
+                let Some((variant_ty, payload)) =
+                    self.resolve_variant_pat(pat, enum_name.as_deref(), &variant, shape, site)
+                else {
+                    self.bind_payload_error(&payload_pats);
+                    return PatVerdict::Refused;
                 };
-                // `Shape:: =>` — the parse error covers the missing name.
-                if variant.is_empty() {
-                    self.bind_error(&bindings);
-                    return Cover::Nothing;
-                }
-                let Some(variants) = enum_variants(self.db, target.to_id(self.db)).as_ref() else {
-                    // `resolve_pat_enum` only returns enums; a bare
-                    // pattern's scrutinee enum was classified above.
-                    self.bind_error(&bindings);
-                    return Cover::Nothing;
-                };
-                let Some(index) = variants.iter().position(|(n, _)| *n == variant) else {
-                    self.result
-                        .diagnostics
-                        .push(InferenceDiagnostic::PatNoSuchVariant {
-                            match_expr,
-                            pat,
-                            item: target.clone(),
-                            name: variant,
-                        });
-                    self.bind_error(&bindings);
-                    return Cover::Nothing;
-                };
-                // A diverging or broken scrutinee: nothing says which
-                // variant it holds, so nothing is read out of it.
-                if matches!(scrut, Scrutinee::Error) {
-                    self.bind_error(&bindings);
-                    return Cover::Nothing;
-                }
-                let args = self.pat_enum_args(&target, scrut);
-                let variant_ty = ResolvedVariant {
-                    decl: target.clone(),
-                    args,
-                    index: index as u32,
-                    name: std::sync::Arc::from(variant.as_str()),
-                };
-                self.result.variant_of_pat.insert(pat, variant_ty.clone());
-                // Payload binding types come from the declaration either
-                // way — even a wrong-enum pattern's arm body shouldn't
-                // cascade — with the scrutinee's generic args substituted
-                // in (a wrong-enum pattern gets all-error args, so the
-                // declaration's rigid params never leak into a binding).
-                let payload: Vec<Ty> = variants[index]
-                    .1
-                    .iter()
-                    .map(|ty| substitute_args(ty, &target, &variant_ty.args))
-                    .collect();
-                if bindings.len() != payload.len() {
+                self.result.variant_of_pat.insert(pat, variant_ty);
+                let arity_ok = payload_pats.len() == payload.len();
+                if !arity_ok {
                     self.result.diagnostics.push(InferenceDiagnostic::PatArity {
-                        match_expr,
+                        match_expr: anchor,
                         pat,
                         variant,
                         payloads: payload.len(),
-                        found: bindings.len(),
+                        found: payload_pats.len(),
                     });
                 }
-                for (i, &binding) in bindings.iter().enumerate() {
+                let mut parts_ok = true;
+                for (i, &slot) in payload_pats.iter().enumerate() {
                     let ty = payload.get(i).cloned().unwrap_or(Ty::Error);
-                    // THE PROJECTION. Through a borrow the binder does not
-                    // receive the payload — it receives a borrow OF the
-                    // payload's sub-place, in the scrutinee's flavor, at a
-                    // fresh region the scrutinee's region must cover.
-                    //
-                    // Fresh-and-bounded rather than the scrutinee's region
-                    // verbatim, for the same reason every other mention of
-                    // a borrow mints one: the payload loan is allowed to be
-                    // SHORTER than the parent's, and the single directed
-                    // edge is what forbids it ever being longer. It is not
-                    // forced shorter — `@r` has only this upper bound, so
-                    // it can still take the parent's whole region, which is
-                    // exactly the `as_ref` requirement.
-                    //
-                    // `Ty::Error` stays bare: an already-broken binding
-                    // reads worse wrapped in a borrow, and cascades.
-                    let ty = match lens {
-                        Some(lens) if !matches!(ty, Ty::Error) => {
-                            let region = self.fresh_region();
-                            self.push_outlives(
-                                lens.region.clone(),
-                                region.clone(),
-                                lens.scrutinee,
-                                RegionConstraintReason::Projection,
-                            );
-                            lens.wrap(region, ty)
-                        }
-                        _ => ty,
-                    };
-                    self.result.type_of_binding.insert(binding, ty);
+                    let ty = self.sub_pat_ty(ty, site, lens);
+                    parts_ok &= self.check_pat_in(slot, &ty, site);
                 }
-                match scrut {
-                    Scrutinee::Enum(scrut_named) => {
-                        if scrut_named.decl != target {
+                // A wrong slot count still names a variant to test.
+                PatVerdict::of(true, arity_ok && parts_ok)
+            }
+            PatData::Array { elements } => match shape {
+                Ty::Array { elem, len } => {
+                    let fits = match len {
+                        ConstArgValue::Int(n) => *n == elements.len() as u128,
+                        _ => false,
+                    };
+                    // An unknown length is already an error of its own.
+                    if !fits && !matches!(len, ConstArgValue::Error) {
+                        self.result
+                            .diagnostics
+                            .push(InferenceDiagnostic::PatArrayLength {
+                                pat,
+                                expr: anchor,
+                                len: len.clone(),
+                                found: elements.len(),
+                            });
+                    }
+                    let mut parts_ok = true;
+                    for element in elements {
+                        let ty = self.sub_pat_ty(elem.as_ref().clone(), site, lens);
+                        parts_ok &= self.check_pat_in(element, &ty, site);
+                    }
+                    PatVerdict::of(fits, parts_ok)
+                }
+                Ty::Infer(_) => {
+                    self.result
+                        .diagnostics
+                        .push(InferenceDiagnostic::PatBindingNeedsAnnotation { pat, expr: anchor });
+                    self.bind_pat_error(pat);
+                    PatVerdict::Refused
+                }
+                Ty::Error => {
+                    self.bind_pat_error(pat);
+                    PatVerdict::Refused
+                }
+                other => {
+                    self.result
+                        .diagnostics
+                        .push(InferenceDiagnostic::PatNotArray {
+                            pat,
+                            expr: anchor,
+                            ty: other.clone(),
+                        });
+                    self.bind_pat_error(pat);
+                    PatVerdict::Refused
+                }
+            },
+            PatData::Record { fields, rest } => match shape {
+                Ty::Record(rec) => {
+                    let mut ok = true;
+                    let mut seen: Vec<&str> = Vec::new();
+                    for f in &fields {
+                        match rec.field_ty(&f.field) {
+                            Some(field_ty) => {
+                                let ty = self.sub_pat_ty(field_ty.clone(), site, lens);
+                                self.result.type_of_binding.insert(f.binding, ty);
+                            }
+                            None => {
+                                self.result.diagnostics.push(
+                                    InferenceDiagnostic::PatUnknownField {
+                                        pat,
+                                        expr: anchor,
+                                        name: f.field.clone(),
+                                        record_ty: Ty::Record(rec.clone()),
+                                    },
+                                );
+                                self.result.type_of_binding.insert(f.binding, Ty::Error);
+                                ok = false;
+                            }
+                        }
+                        seen.push(f.field.as_str());
+                    }
+                    if !rest {
+                        let missing: Vec<(String, Ty)> = rec
+                            .fields
+                            .iter()
+                            .filter(|(name, _)| !seen.contains(&name.as_str()))
+                            .cloned()
+                            .collect();
+                        if !missing.is_empty() {
                             self.result
                                 .diagnostics
-                                .push(InferenceDiagnostic::PatWrongEnum {
-                                    match_expr,
+                                .push(InferenceDiagnostic::PatMissingFields {
                                     pat,
-                                    item: target,
-                                    variant: variant_ty.name.to_string(),
-                                    scrutinee: Ty::Named(scrut_named.clone()),
+                                    expr: anchor,
+                                    fields: missing,
                                 });
-                            Cover::Nothing
-                        } else {
-                            Cover::Variant(variant_ty.index)
+                            ok = false;
                         }
                     }
-                    // A qualified pattern on a non-enum scrutinee: the
-                    // scrutinee is the problem, same as the bare spelling.
-                    Scrutinee::Other(ty) => {
-                        self.result.diagnostics.push(
-                            InferenceDiagnostic::NonEnumScrutineeVariantPat {
-                                match_expr,
+                    PatVerdict::of(ok, true)
+                }
+                Ty::Infer(_) => {
+                    self.result
+                        .diagnostics
+                        .push(InferenceDiagnostic::PatBindingNeedsAnnotation { pat, expr: anchor });
+                    self.bind_pat_error(pat);
+                    PatVerdict::Refused
+                }
+                Ty::Error => {
+                    self.bind_pat_error(pat);
+                    PatVerdict::Refused
+                }
+                other => {
+                    self.result
+                        .diagnostics
+                        .push(InferenceDiagnostic::PatNotRecord {
+                            pat,
+                            expr: anchor,
+                            ty: other.clone(),
+                        });
+                    self.bind_pat_error(pat);
+                    PatVerdict::Refused
+                }
+            },
+            PatData::Newtype { type_name, inner } => {
+                let target = match type_scope(self.db, self.file).resolve(&type_name) {
+                    Some(Resolution::TypeItem(loc)) => Some(loc),
+                    _ => None,
+                };
+                let Some(target) = target else {
+                    // An empty name is broken source (the parse error
+                    // covers it); anything else names no type at all.
+                    if !type_name.is_empty() {
+                        self.result
+                            .diagnostics
+                            .push(InferenceDiagnostic::PatUnknownType {
                                 pat,
-                                scrutinee: ty.clone(),
-                            },
-                        );
-                        Cover::Nothing
+                                expr: anchor,
+                                name: type_name.clone(),
+                                variant: self.variant_spelling(shape, &type_name, site),
+                            });
                     }
-                    // Unknown only when the pre-scan couldn't pin the
-                    // scrutinee (this pattern resolved, so it did): which
-                    // variant it holds is unknown.
-                    Scrutinee::Unknown(_) => Cover::Unknown,
-                    // Returned before anything was recorded.
-                    Scrutinee::Error => Cover::Nothing,
+                    self.bind_pat_error(inner);
+                    return PatVerdict::Refused;
+                };
+                // An enum has no one shape to unwrap: it is matched
+                // through its variants.
+                if enum_variants(self.db, target.to_id(self.db)).is_some() {
+                    let name = target.display_name();
+                    self.result
+                        .diagnostics
+                        .push(InferenceDiagnostic::PatPathError {
+                            match_expr: anchor,
+                            pat,
+                            message: format!(
+                                "`{name}` is an `enum`; match it through one of its variants \
+                                 (`{name}::<variant>(...)`)"
+                            ),
+                        });
+                    self.bind_pat_error(inner);
+                    return PatVerdict::Refused;
+                }
+                let shape = self.adopt_named_pat_ty(shape, &target);
+                match &shape {
+                    Ty::Named(named) if named.decl == target => {
+                        // A broken declaration carries its own diagnostic.
+                        let Some(underlying) = type_underlying_for(self.db, named) else {
+                            self.bind_pat_error(inner);
+                            return PatVerdict::Refused;
+                        };
+                        let ty = self.sub_pat_ty(underlying, site, lens);
+                        PatVerdict::of(true, self.check_pat_in(inner, &ty, site))
+                    }
+                    Ty::Infer(_) => {
+                        self.result.diagnostics.push(
+                            InferenceDiagnostic::PatBindingNeedsAnnotation { pat, expr: anchor },
+                        );
+                        self.bind_pat_error(inner);
+                        PatVerdict::Refused
+                    }
+                    Ty::Error => {
+                        self.bind_pat_error(inner);
+                        PatVerdict::Refused
+                    }
+                    other => {
+                        let expected = self.named_with_fresh_args(&target);
+                        let variant = self.variant_spelling(other, &type_name, site);
+                        self.result
+                            .diagnostics
+                            .push(InferenceDiagnostic::PatNamedTypeMismatch {
+                                pat,
+                                expr: anchor,
+                                expected: Ty::Named(expected),
+                                actual: other.clone(),
+                                variant,
+                            });
+                        self.bind_pat_error(inner);
+                        PatVerdict::Refused
+                    }
                 }
             }
-            // `let`/parameter-only shapes; `match_pattern`'s grammar never
-            // produces them. Defensive fallback.
-            PatData::Record { .. } | PatData::Newtype { .. } | PatData::Array { .. } => {
-                Cover::Nothing
+        }
+    }
+
+    /// Resolve a variant pattern against the value it meets: the variant,
+    /// and its payload types with the value's generic args substituted in.
+    /// `None` when the pattern is refused (reported here) or the value is
+    /// broken.
+    fn resolve_variant_pat(
+        &mut self,
+        pat: PatId,
+        enum_name: Option<&str>,
+        variant: &str,
+        shape: &Ty,
+        site: PatSite,
+    ) -> Option<(ResolvedVariant, Vec<Ty>)> {
+        let anchor = site.anchor;
+        // A diverging or broken value: nothing says which variant it holds.
+        if matches!(shape, Ty::Error | Ty::Never) {
+            return None;
+        }
+        // The qualified spelling names its enum.
+        let named = match enum_name {
+            Some(enum_name) => Some(self.resolve_pat_enum(anchor, pat, enum_name)?),
+            None => None,
+        };
+        let shape = match &named {
+            Some(named) => self.adopt_named_pat_ty(shape, named),
+            None => shape.clone(),
+        };
+        let value_enum = match &shape {
+            Ty::Named(value) if enum_variants(self.db, value.decl.to_id(self.db)).is_some() => {
+                value.decl.clone()
             }
+            Ty::Infer(_) => {
+                self.result
+                    .diagnostics
+                    .push(InferenceDiagnostic::VariantPatUnknownScrutinee {
+                        match_expr: anchor,
+                        pat,
+                    });
+                self.unresolved_scrutinees.insert(anchor);
+                return None;
+            }
+            other => {
+                self.result
+                    .diagnostics
+                    .push(InferenceDiagnostic::NonEnumScrutineeVariantPat {
+                        match_expr: anchor,
+                        pat,
+                        scrutinee: other.clone(),
+                    });
+                return None;
+            }
+        };
+        let target = named.unwrap_or_else(|| value_enum.clone());
+        // `Shape:: =>` — the parse error covers the missing name.
+        if variant.is_empty() {
+            return None;
+        }
+        let variants = enum_variants(self.db, target.to_id(self.db)).as_ref()?;
+        let Some(index) = variants.iter().position(|(n, _)| n == variant) else {
+            self.result
+                .diagnostics
+                .push(InferenceDiagnostic::PatNoSuchVariant {
+                    match_expr: anchor,
+                    pat,
+                    item: target.clone(),
+                    name: variant.to_owned(),
+                });
+            return None;
+        };
+        if target != value_enum {
+            self.result
+                .diagnostics
+                .push(InferenceDiagnostic::PatWrongEnum {
+                    match_expr: anchor,
+                    pat,
+                    item: target,
+                    variant: variant.to_owned(),
+                    scrutinee: shape,
+                });
+            return None;
+        }
+        let args = self.pat_enum_args(&target, &shape);
+        let payload = crate::ty::variant_payload_tys(self.db, &target, &args, index as u32);
+        let variant_ty = ResolvedVariant {
+            decl: target,
+            args,
+            index: index as u32,
+            name: std::sync::Arc::from(variant),
+        };
+        Some((variant_ty, payload))
+    }
+
+    /// The value a pattern naming `target` meets: one of unknown type takes
+    /// the named type, the way construction does (fresh generic args; a
+    /// const-generic type leaves it unknown, as const args are never
+    /// inferred). A number, which no named type can be, comes back as
+    /// `{number}` for the caller's mismatch to report.
+    fn adopt_named_pat_ty(&mut self, shape: &Ty, target: &ItemLoc) -> Ty {
+        if !matches!(shape, Ty::Infer(_))
+            || item_generics(self.db, target.to_id(self.db))
+                .iter()
+                .any(|param| matches!(param.kind, GenericParamKind::Const(_)))
+        {
+            return shape.clone();
+        }
+        let ty = Ty::Named(self.named_with_fresh_args(target));
+        if self.adopt(shape, &ty) {
+            return ty;
+        }
+        let shown = if is_unresolved_number(self.table, shape) {
+            Ty::UnresolvedNumber
+        } else {
+            shape.clone()
+        };
+        self.constraints.poison_unresolved_number(self.table, shape);
+        shown
+    }
+
+    /// The type a sub-pattern meets for a part of type `ty`: through a
+    /// borrow, a borrow of the part in the lens's flavor, at a fresh region
+    /// the lens's region outlives.
+    fn sub_pat_ty(&mut self, ty: Ty, site: PatSite, lens: Option<&MatchLens>) -> Ty {
+        match lens {
+            // An already-broken binding reads worse wrapped in a borrow.
+            Some(_) if matches!(ty, Ty::Error) => ty,
+            Some(lens) => {
+                let region = self.fresh_region();
+                self.push_outlives(
+                    lens.region.clone(),
+                    region.clone(),
+                    site.blame,
+                    RegionConstraintReason::Projection,
+                );
+                lens.wrap(region, ty)
+            }
+            None => ty,
+        }
+    }
+
+    /// A bare name always binds the whole value — patterns are never
+    /// reinterpreted as variants (G25: rename or remove a variant later and
+    /// an old bare-name pattern would silently become a catch-all). Warn
+    /// when the name shadows a variant of the value's enum: almost always a
+    /// stale rename. Write `::Name` to match the variant.
+    fn warn_bind_shadows_variant(
+        &mut self,
+        anchor: ExprId,
+        pat: PatId,
+        binding: BindingId,
+        ty: &Ty,
+    ) {
+        let Some(name) = self.body.bindings[binding].written_name() else {
+            return;
+        };
+        let loc = match self.pat_shape(ty) {
+            Ty::Named(named) => named.decl,
+            _ => return,
+        };
+        if let Some(variants) = enum_variants(self.db, loc.to_id(self.db)).as_ref()
+            && variants.iter().any(|(n, _)| n == name)
+        {
+            self.result
+                .diagnostics
+                .push(InferenceDiagnostic::BindShadowsVariant {
+                    match_expr: anchor,
+                    pat,
+                    item: loc,
+                    name: name.to_owned(),
+                });
+        }
+    }
+
+    /// A checked pattern as [`usefulness`] sees it.
+    fn deconstruct_pat(&self, pat: PatId) -> usefulness::Pat {
+        use usefulness::{Ctor, Pat};
+        if !self.broken_pats.is_empty() && self.broken_pats.contains(&pat) {
+            return Pat::Wild;
+        }
+        match &self.body.pats[pat] {
+            // A record pattern's fields are all binders.
+            PatData::Missing | PatData::Wildcard | PatData::Bind(_) | PatData::Record { .. } => {
+                Pat::Wild
+            }
+            PatData::Char(c) => Pat::Ctor(Ctor::Char(*c), Vec::new()),
+            PatData::Int {
+                value: Some(value),
+                negative,
+            } => Pat::Ctor(
+                Ctor::Int {
+                    value: *value,
+                    negative: *negative && *value != 0,
+                },
+                Vec::new(),
+            ),
+            PatData::Int { value: None, .. } => Pat::Wild,
+            PatData::Variant { payload, .. } => match self.result.variant_of_pat.get(pat) {
+                Some(variant) => Pat::Ctor(
+                    Ctor::Variant(variant.index),
+                    payload.iter().map(|&p| self.deconstruct_pat(p)).collect(),
+                ),
+                None => Pat::Wild,
+            },
+            PatData::Newtype { inner, .. } => {
+                Pat::Ctor(Ctor::Single, vec![self.deconstruct_pat(*inner)])
+            }
+            PatData::Array { elements } => Pat::Ctor(
+                Ctor::Single,
+                elements.iter().map(|&p| self.deconstruct_pat(p)).collect(),
+            ),
+        }
+    }
+
+    /// How to match the variant `name` of `shape`'s enum (`::Circle(...)`,
+    /// `::Point`), when it has one. Outside an arm only for an enum of one
+    /// variant: there any other would make the pattern refutable.
+    fn variant_spelling(&self, shape: &Ty, name: &str, site: PatSite) -> Option<String> {
+        let Ty::Named(named) = shape else {
+            return None;
+        };
+        let variants = enum_variants(self.db, named.decl.to_id(self.db)).as_ref()?;
+        if site.arm.is_none() && variants.len() > 1 {
+            return None;
+        }
+        let (_, payload) = variants.iter().find(|(n, _)| n == name)?;
+        Some(if payload.is_empty() {
+            format!("::{name}")
+        } else {
+            format!("::{name}(...)")
+        })
+    }
+
+    /// The value's type behind any borrows: what a pattern tests.
+    fn pat_shape(&mut self, ty: &Ty) -> Ty {
+        let mut shape = self.resolve_shallow(ty);
+        while let Ty::Borrow { referent, .. } = shape {
+            shape = self.resolve_shallow(&referent);
+        }
+        shape
+    }
+
+    /// Witnesses of one column of type `ty`, rendered as source patterns.
+    fn render_witnesses(&mut self, ty: &Ty, witnesses: Vec<Vec<usefulness::Pat>>) -> Vec<String> {
+        witnesses
+            .iter()
+            .map(|row| self.render_witness(ty, &row[0]))
+            .collect()
+    }
+
+    /// One witness as a source pattern: `Shape::Circle(_)`, `[_, 'a']`.
+    fn render_witness(&mut self, ty: &Ty, pat: &usefulness::Pat) -> String {
+        use usefulness::{Columns, Ctor, Pat};
+        let Pat::Ctor(ctor, fields) = pat else {
+            return "_".to_owned();
+        };
+        let shape = self.pat_shape(ty);
+        let field_tys = self.fields(&shape, ctor);
+        let fields: Vec<String> = fields
+            .iter()
+            .zip(&field_tys)
+            .map(|(field, ty)| self.render_witness(ty, field))
+            .collect();
+        match (ctor, &shape) {
+            (Ctor::Char(c), _) => format!("{c:?}"),
+            (Ctor::Int { value, negative }, _) => {
+                format!("{}{value}", if *negative { "-" } else { "" })
+            }
+            (Ctor::Single, Ty::Array { .. }) => format!("[{}]", fields.join(", ")),
+            (Ctor::Single, Ty::Named(named)) => {
+                format!("{}({})", named.decl.display_name(), fields.join(", "))
+            }
+            (Ctor::Variant(index), Ty::Named(NamedTy { decl, .. })) => {
+                let name = enum_variants(self.db, decl.to_id(self.db))
+                    .as_ref()
+                    .and_then(|variants| variants.get(*index as usize))
+                    .map(|(name, _)| name.clone())
+                    .unwrap_or_default();
+                let path = format!("{}::{name}", decl.display_name());
+                if fields.is_empty() {
+                    path
+                } else {
+                    format!("{path}({})", fields.join(", "))
+                }
+            }
+            _ => "_".to_owned(),
         }
     }
 
@@ -9618,6 +9767,12 @@ impl<'a, 'db> InferCtx<'a, 'db> {
     fn bind_error(&mut self, bindings: &[BindingId]) {
         for &binding in bindings {
             self.result.type_of_binding.insert(binding, Ty::Error);
+        }
+    }
+
+    fn bind_payload_error(&mut self, payload: &[PatId]) {
+        for &slot in payload {
+            self.bind_pat_error(slot);
         }
     }
 
@@ -9694,7 +9849,7 @@ impl<'a, 'db> InferCtx<'a, 'db> {
             PatData::Bind(binding) => {
                 self.result.type_of_binding.insert(binding, Ty::Error);
             }
-            PatData::Variant { bindings, .. } => self.bind_error(&bindings),
+            PatData::Variant { payload, .. } => self.bind_payload_error(&payload),
             PatData::Record { fields, .. } => {
                 for f in &fields {
                     self.result.type_of_binding.insert(f.binding, Ty::Error);
@@ -9704,200 +9859,6 @@ impl<'a, 'db> InferCtx<'a, 'db> {
             PatData::Array { elements } => {
                 for element in elements {
                     self.bind_pat_error(element);
-                }
-            }
-        }
-    }
-
-    /// Check a `let`/parameter pattern against the type it destructures,
-    /// binding every name it introduces. A `Record` pattern must name
-    /// exactly `ty`'s fields (missing/extra fields are reported), and a
-    /// `Newtype` pattern must name `ty`'s newtype, its inner pattern checked
-    /// against the wrapped type. A variant or literal pattern is a one-arm
-    /// match, refused unless what it covers is every value of `ty`.
-    ///
-    /// `anchor` is the expression [`InferenceDiagnostic::expr`] reports a
-    /// finding on: the `let`'s initializer (whose value fails to destructure
-    /// — the direct reconciliation, same as a bad record literal), or the
-    /// enclosing `fn` literal's body for a parameter pattern (there is no
-    /// per-call expression to blame; every call runs the body). Either way
-    /// [`InferenceDiagnostic::pat`] carries the precise pattern, so the
-    /// rendered squiggle always lands on the pattern itself.
-    fn check_pat(&mut self, pat: PatId, ty: &Ty, anchor: ExprId) {
-        self.result.type_of_pat.insert(pat, ty.clone());
-        match self.body.pats[pat].clone() {
-            PatData::Missing | PatData::Wildcard => {}
-            PatData::Bind(binding) => {
-                self.result.type_of_binding.insert(binding, ty.clone());
-            }
-            // A one-arm match that must be exhaustive: what the arm covers
-            // decides.
-            PatData::Variant { .. } | PatData::Char(_) | PatData::Int { .. } => {
-                let (scrut, lens) = self.classify_scrutinee(ty, anchor);
-                let exhaustive = match self.check_match_pat(anchor, pat, &scrut, lens.as_ref()) {
-                    // A refused pattern is already an error, and a value
-                    // that never arrives meets no pattern.
-                    Cover::All | Cover::Nothing => true,
-                    Cover::Unknown => false,
-                    Cover::Variant(_) => match &scrut {
-                        Scrutinee::Enum(named) => enum_variants(self.db, named.decl.to_id(self.db))
-                            .as_ref()
-                            .is_some_and(|variants| variants.len() == 1),
-                        _ => true,
-                    },
-                    Cover::Literal => false,
-                };
-                if !exhaustive {
-                    self.result
-                        .diagnostics
-                        .push(InferenceDiagnostic::RefutablePattern { pat, expr: anchor });
-                }
-            }
-            PatData::Array { elements } => match self.resolve_shallow(ty) {
-                Ty::Array { elem, len } => {
-                    let fits = match &len {
-                        ConstArgValue::Int(n) => *n == elements.len() as u128,
-                        ConstArgValue::Error => true,
-                        _ => false,
-                    };
-                    if !fits {
-                        self.result
-                            .diagnostics
-                            .push(InferenceDiagnostic::PatArrayLength {
-                                pat,
-                                expr: anchor,
-                                len,
-                                found: elements.len(),
-                            });
-                    }
-                    for element in elements {
-                        self.check_pat(element, &elem, anchor);
-                    }
-                }
-                Ty::Infer(_) => {
-                    self.result
-                        .diagnostics
-                        .push(InferenceDiagnostic::PatBindingNeedsAnnotation { pat, expr: anchor });
-                    self.bind_pat_error(pat);
-                }
-                Ty::Error => self.bind_pat_error(pat),
-                other => {
-                    self.result
-                        .diagnostics
-                        .push(InferenceDiagnostic::PatNotArray {
-                            pat,
-                            expr: anchor,
-                            ty: other,
-                        });
-                    self.bind_pat_error(pat);
-                }
-            },
-            PatData::Record { fields, rest } => match self.resolve_shallow(ty) {
-                Ty::Record(rec) => {
-                    let mut seen: Vec<&str> = Vec::new();
-                    for f in &fields {
-                        match rec.field_ty(&f.field) {
-                            Some(field_ty) => {
-                                self.result
-                                    .type_of_binding
-                                    .insert(f.binding, field_ty.clone());
-                            }
-                            None => {
-                                self.result.diagnostics.push(
-                                    InferenceDiagnostic::PatUnknownField {
-                                        pat,
-                                        expr: anchor,
-                                        name: f.field.clone(),
-                                        record_ty: Ty::Record(rec.clone()),
-                                    },
-                                );
-                                self.result.type_of_binding.insert(f.binding, Ty::Error);
-                            }
-                        }
-                        seen.push(f.field.as_str());
-                    }
-                    if !rest {
-                        let missing: Vec<(String, Ty)> = rec
-                            .fields
-                            .iter()
-                            .filter(|(name, _)| !seen.contains(&name.as_str()))
-                            .cloned()
-                            .collect();
-                        if !missing.is_empty() {
-                            self.result
-                                .diagnostics
-                                .push(InferenceDiagnostic::PatMissingFields {
-                                    pat,
-                                    expr: anchor,
-                                    fields: missing,
-                                });
-                        }
-                    }
-                }
-                Ty::Infer(_) => {
-                    self.result
-                        .diagnostics
-                        .push(InferenceDiagnostic::PatBindingNeedsAnnotation { pat, expr: anchor });
-                    self.bind_error(&fields.iter().map(|f| f.binding).collect::<Vec<_>>());
-                }
-                Ty::Error => {
-                    self.bind_error(&fields.iter().map(|f| f.binding).collect::<Vec<_>>());
-                }
-                other => {
-                    self.result
-                        .diagnostics
-                        .push(InferenceDiagnostic::PatNotRecord {
-                            pat,
-                            expr: anchor,
-                            ty: other,
-                        });
-                    self.bind_error(&fields.iter().map(|f| f.binding).collect::<Vec<_>>());
-                }
-            },
-            PatData::Newtype { type_name, inner } => {
-                let target = match type_scope(self.db, self.file).resolve(&type_name) {
-                    Some(Resolution::TypeItem(loc)) => Some(loc),
-                    _ => None,
-                };
-                let Some(target) = target else {
-                    // An empty name is broken source (the parse error
-                    // covers it); anything else names no type at all.
-                    if !type_name.is_empty() {
-                        self.result
-                            .diagnostics
-                            .push(InferenceDiagnostic::PatUnknownType {
-                                pat,
-                                expr: anchor,
-                                name: type_name.clone(),
-                            });
-                    }
-                    self.bind_pat_error(inner);
-                    return;
-                };
-                match self.resolve_shallow(ty) {
-                    Ty::Named(named) if named.decl == target => {
-                        let underlying = type_underlying_for(self.db, &named).unwrap_or(Ty::Error);
-                        self.check_pat(inner, &underlying, anchor);
-                    }
-                    Ty::Infer(_) => {
-                        self.result.diagnostics.push(
-                            InferenceDiagnostic::PatBindingNeedsAnnotation { pat, expr: anchor },
-                        );
-                        self.bind_pat_error(inner);
-                    }
-                    Ty::Error => self.bind_pat_error(inner),
-                    other => {
-                        let expected = self.named_with_fresh_args(&target);
-                        self.result
-                            .diagnostics
-                            .push(InferenceDiagnostic::PatNamedTypeMismatch {
-                                pat,
-                                expr: anchor,
-                                expected: Ty::Named(expected),
-                                actual: other,
-                            });
-                        self.bind_pat_error(inner);
-                    }
                 }
             }
         }
@@ -10448,27 +10409,39 @@ impl<'a, 'db> InferCtx<'a, 'db> {
     }
 }
 
-/// The BORROW a `match` is looking through, when it is looking through
-/// one — the whole of "match projects through borrows" as data.
-///
-/// Held beside [`Scrutinee`] rather than as a variant of it on purpose:
-/// the scrutinee classification answers "what universe do the arms cover",
-/// which a borrow does not change at all (the enum behind `T.&` has the
-/// same variants `T` does). What the borrow changes is only what the
+/// How a pattern that looks inside its value checked.
+enum PatVerdict {
+    Ok,
+    /// The pattern itself is fine; a part of it is refused.
+    PartsBroken,
+    /// The pattern itself is refused (its own diagnostic, or a broken
+    /// value): it tests nothing.
+    Refused,
+}
+
+impl PatVerdict {
+    fn of(own_ok: bool, parts_ok: bool) -> Self {
+        match (own_ok, parts_ok) {
+            (false, _) => PatVerdict::Refused,
+            (true, false) => PatVerdict::PartsBroken,
+            (true, true) => PatVerdict::Ok,
+        }
+    }
+}
+
+/// The BORROW a pattern is looking through, when it is looking through
+/// one. A borrow does not change which values a pattern matches (the enum
+/// behind `T.&` has the same variants `T` does); it changes only what the
 /// BINDERS are typed as, and that is what this carries.
+#[derive(Clone)]
 struct MatchLens {
     /// The scrutinee borrow's flavor, which every payload borrow inherits.
     /// There is no per-binder mode and there is no pattern syntax for one:
     /// a `.&mut` scrutinee binds `.&mut` payloads, a `.&` scrutinee binds
     /// `.&` payloads, and copying out afterwards is spelled `t.*`.
     mutable: bool,
-    /// The scrutinee's region — the upper bound on every payload's.
+    /// The borrow's region — the upper bound on every sub-borrow's.
     region: Region,
-    /// The scrutinee expression, which every projection edge is blamed on.
-    /// A pattern has no `ExprId` of its own, and the scrutinee is the
-    /// operation that made the projection possible, so it is the honest
-    /// anchor for "this borrow does not live long enough".
-    scrutinee: ExprId,
 }
 
 impl MatchLens {
@@ -10478,43 +10451,57 @@ impl MatchLens {
     }
 }
 
-/// What a `match` scrutinee's resolved type says about the value universe
-/// the arms must cover.
-enum Scrutinee {
-    /// Enum-typed (tagged at runtime): the arms dispatch over the
-    /// declaration's variants; the mention's generic args flow into the
-    /// arms' payload binding types.
-    Enum(NamedTy),
-    /// Any other concrete type: only `_`/binding arms can match it (v1).
-    Other(Ty),
-    /// Still an inference variable.
-    Unknown(Ty),
-    /// Broken upstream (or diverging): stay silent.
-    Error,
+/// Where a pattern sits: the expression its findings are reported on, and
+/// the one its projection edges are blamed on. A pattern has no `ExprId` of
+/// its own, and the scrutinee of a `match` is the operation that made the
+/// projection possible; a `let` or a parameter blames the `anchor` itself.
+#[derive(Clone, Copy)]
+struct PatSite {
+    anchor: ExprId,
+    blame: ExprId,
+    /// The match arm the pattern belongs to, if any.
+    arm: Option<PatId>,
 }
 
-/// What one arm's pattern covers of the scrutinee's value universe.
-#[derive(Clone, PartialEq, Eq)]
-enum Cover {
-    /// Matches anything the scrutinee can be.
-    All,
-    /// Exactly one variant, by declaration index.
-    Variant(u32),
-    /// ONE value of the scrutinee, over a domain the set-cover does not
-    /// enumerate — a LITERAL pattern, character or integer. It is a real,
-    /// reachable arm (so it participates in after-a-catch-all deadness) but
-    /// it never contributes to exhaustiveness, and that is a POLICY, not an
-    /// arithmetic: a `u8` could be covered by listing 256 arms, and Must
-    /// still requires the `_`. Covering a scalar by enumeration is not a
-    /// thing a program does, so the rule reads the same at every width
-    /// instead of turning on where the domain stops being small.
-    Literal,
-    /// Not judged: a resolved variant pattern on a scrutinee of unknown
-    /// type.
-    Unknown,
-    /// Nothing: a broken or rejected pattern, or a scrutinee that never
-    /// yields a value.
-    Nothing,
+impl usefulness::Columns for InferCtx<'_, '_> {
+    type Ty = Ty;
+
+    fn ctors(&mut self, ty: &Ty) -> Option<Vec<usefulness::Ctor>> {
+        use usefulness::Ctor;
+        match self.pat_shape(ty) {
+            Ty::Named(named) => match enum_variants(self.db, named.decl.to_id(self.db)) {
+                Some(variants) => Some((0..variants.len() as u32).map(Ctor::Variant).collect()),
+                None => Some(vec![Ctor::Single]),
+            },
+            Ty::Array {
+                len: ConstArgValue::Int(_),
+                ..
+            } => Some(vec![Ctor::Single]),
+            // No value ever arrives, so there is nothing to cover.
+            Ty::Never => Some(Vec::new()),
+            _ => None,
+        }
+    }
+
+    fn fields(&mut self, ty: &Ty, ctor: &usefulness::Ctor) -> Vec<Ty> {
+        use usefulness::Ctor;
+        match (self.pat_shape(ty), ctor) {
+            (Ty::Named(NamedTy { decl, args }), Ctor::Variant(index)) => {
+                crate::ty::variant_payload_tys(self.db, &decl, &args, *index)
+            }
+            (Ty::Named(named), Ctor::Single) => {
+                vec![type_underlying_for(self.db, &named).unwrap_or(Ty::Error)]
+            }
+            (
+                Ty::Array {
+                    elem,
+                    len: ConstArgValue::Int(n),
+                },
+                Ctor::Single,
+            ) => vec![elem.as_ref().clone(); n as usize],
+            _ => Vec::new(),
+        }
+    }
 }
 
 /// The expressions a body consumes as a PLACE rather than as a value: the

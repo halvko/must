@@ -100,7 +100,7 @@ fn item(p: &mut Parser<'_>) {
         return;
     }
     let is_extern = head.is_extern;
-    pattern(p, "expected a name for the item");
+    name_or_hole(p, "expected a name for the item");
     if p.eat(COLON) {
         type_(p);
     }
@@ -528,7 +528,7 @@ fn member(p: &mut Parser<'_>) {
     if p.at(TYPE_KW) || p.at(CONST_KW) {
         p.bump_any();
     }
-    pattern(p, "expected a member name");
+    name_or_hole(p, "expected a member name");
     if p.eat(COLON) {
         // A requirement's signature sits in a TYPE position: a plain fn type
         // ([`anon_fn_type`]), `push: fn(str, Self) -> Self;`. It may carry a
@@ -546,8 +546,9 @@ fn member(p: &mut Parser<'_>) {
     m.complete(p, MEMBER);
 }
 
-/// A pattern an assignment is destructured to
-fn pattern(p: &mut Parser<'_>, msg: &str) {
+/// A `NAME`: an identifier or `_`, with `msg` as the error when neither
+/// follows.
+fn name_or_hole(p: &mut Parser<'_>, msg: &str) {
     match p.current() {
         IDENT | HOLE => {
             let m = p.start();
@@ -558,12 +559,21 @@ fn pattern(p: &mut Parser<'_>, msg: &str) {
     }
 }
 
-/// A `let`/parameter pattern: `mut? name` (`BIND_PAT`), `_`
-/// (`WILDCARD_PAT`), a `struct { ... }` record
-/// (`RECORD_PAT`), `Name(pattern)` unwrapping a newtype (`NEWTYPE_PAT`), an
-/// array (`ARRAY_PAT`), and variant and literal patterns, which `hir`
-/// refuses where they can fail to match. `..` is no pattern here.
-fn binding_pattern(p: &mut Parser<'_>, msg: &str) {
+/// A pattern, the one grammar for match arms, `let`s, parameters and every
+/// pattern nested in one: `mut? name` (`BIND_PAT`), `_` (`WILDCARD_PAT`), a
+/// `struct { ... }` record (`RECORD_PAT`), `Name(pattern)` unwrapping a
+/// newtype (`NEWTYPE_PAT`), an array (`ARRAY_PAT`), a variant pattern
+/// (`VARIANT_PAT`) and a literal (`LITERAL_PAT`). A bare name is always a
+/// binding, never a variant. `..` is no pattern here.
+fn pattern(p: &mut Parser<'_>, msg: &str) {
+    if !try_pattern(p, msg) {
+        p.error(msg);
+    }
+}
+
+/// [`pattern`] without the error: `false`, having eaten nothing,
+/// when the current token starts no pattern.
+fn try_pattern(p: &mut Parser<'_>, msg: &str) -> bool {
     match p.current() {
         IDENT if p.nth(1) == L_PAREN => {
             newtype_pat(p);
@@ -571,15 +581,18 @@ fn binding_pattern(p: &mut Parser<'_>, msg: &str) {
         IDENT if p.nth(1) == COLON2 => variant_pat(p),
         COLON2 => variant_pat(p),
         HOLE => wildcard_pat(p),
-        IDENT | MUT_KW => bind_pat(p, msg),
+        IDENT => bind_pat(p, msg),
+        // After `mut` only a name can follow.
+        MUT_KW => bind_pat(p, "expected a binding name"),
         STRUCT_KW if p.nth(1) == L_BRACE => {
             record_pat(p);
         }
         L_BRACKET => array_pat(p),
         INT_NUMBER | STRING | CHAR | TRUE_KW | FALSE_KW => literal_pat(p),
         MINUS if sign_begins_literal_pat(p.nth(1)) => literal_pat(p),
-        _ => p.error(msg),
+        _ => return false,
     }
+    true
 }
 
 /// `[a, b, c]` — destructures a fixed-length array, one pattern per
@@ -587,7 +600,7 @@ fn binding_pattern(p: &mut Parser<'_>, msg: &str) {
 fn array_pat(p: &mut Parser<'_>) {
     let m = p.start();
     p.bump(L_BRACKET);
-    comma_list(p, R_BRACKET, |p| binding_pattern(p, "expected a pattern"));
+    comma_list(p, R_BRACKET, |p| pattern(p, "expected a pattern"));
     m.complete(p, ARRAY_PAT);
 }
 
@@ -621,9 +634,9 @@ fn record_pat(p: &mut Parser<'_>) -> CompletedMarker {
 fn record_pat_field(p: &mut Parser<'_>) {
     let m = p.start();
     p.eat(MUT_KW);
-    pattern(p, "expected a field name");
+    name_or_hole(p, "expected a field name");
     if p.eat(AS_KW) {
-        pattern(p, "expected a binding name");
+        name_or_hole(p, "expected a binding name");
     }
     m.complete(p, RECORD_PAT_FIELD);
 }
@@ -635,7 +648,7 @@ fn newtype_pat(p: &mut Parser<'_>) -> CompletedMarker {
     let m = p.start();
     name_ref(p);
     p.bump(L_PAREN);
-    binding_pattern(p, "expected a pattern");
+    pattern(p, "expected a pattern");
     p.expect_after_prev(R_PAREN);
     m.complete(p, NEWTYPE_PAT)
 }
@@ -1108,39 +1121,19 @@ fn skip_arm_body(p: &mut Parser<'_>) {
     }
 }
 
-/// A match-arm pattern — deliberately flat in v1: `_`, a plain binding
-/// name (`mut` allowed), and a variant pattern in one of three
-/// spellings — qualified `Enum::Variant(bindings...)`, elided
-/// `::Variant(bindings...)` (the scrutinee's enum, enum segment dropped),
-/// and the retired unqualified `Name(bindings...)` (parsed as a
-/// `VARIANT_PAT` so `validation` can hand back an honest "write
-/// `::Name(...)`" error — patterns have no calls). Plus a LITERAL pattern
-/// (`'(' =>`, `0 =>`). A bare name with no `::` and no parens is *always* a
-/// binding — never reinterpreted type-directed as a variant (see
-/// `infer.rs`'s `check_match_pat` `PatData::Bind` arm). Patterns do not
-/// nest, and there are no or-patterns or guards. `..` is no pattern here.
+/// A match arm's pattern: a [`pattern`], with a stray `..` eaten so the
+/// arm's `=>` and body parse.
 fn match_pattern(p: &mut Parser<'_>) {
-    match p.current() {
-        INT_NUMBER | STRING | CHAR | TRUE_KW | FALSE_KW => literal_pat(p),
-        MINUS if sign_begins_literal_pat(p.nth(1)) => literal_pat(p),
-        HOLE => wildcard_pat(p),
-        // Eaten so the arm's `=>` and body parse.
-        DOT2 => p.err_and_bump(DOT2_OUTSIDE_RECORD_PATTERN),
-        COLON2 => variant_pat(p),
-        // `Name::…` (qualified) or the bare `Name(...)` shape parse as a
-        // variant pattern; a bare name alone is *always* a binding (no
-        // type-directed reinterpretation). The bare `Name(...)` shape, which
-        // `validation` rejects, parses only so it can report an honest
-        // "write `::Name(...)`" error.
-        IDENT if matches!(p.nth(1), COLON2 | L_PAREN) => variant_pat(p),
-        IDENT | MUT_KW => bind_pat(p, "expected a binding name"),
-        _ => p.error("expected a pattern"),
+    if p.at(DOT2) {
+        p.err_and_bump(DOT2_OUTSIDE_RECORD_PATTERN);
+    } else {
+        pattern(p, "expected a pattern");
     }
 }
 
 /// Whether a `-` followed by `next` begins a literal pattern: only an
-/// integer takes a sign. The one rule for both pattern grammars, and for
-/// any caller asking whether a `-` line could start a pattern.
+/// integer takes a sign. The one rule for the pattern grammar and for any
+/// caller asking whether a `-` line could start a pattern.
 pub fn sign_begins_literal_pat(next: SyntaxKind) -> bool {
     next == INT_NUMBER
 }
@@ -1149,8 +1142,7 @@ pub fn sign_begins_literal_pat(next: SyntaxKind) -> bool {
 const DOT2_OUTSIDE_RECORD_PATTERN: &str =
     "`..` is only allowed in a record pattern (`struct { x, .. }`)";
 
-/// `_` as a whole pattern, the one spelling both pattern grammars share:
-/// matches anything, binds nothing.
+/// `_` as a whole pattern: matches anything, binds nothing.
 fn wildcard_pat(p: &mut Parser<'_>) {
     let m = p.start();
     p.bump(HOLE);
@@ -1173,10 +1165,9 @@ fn literal_pat(p: &mut Parser<'_>) {
     m.complete(p, LITERAL_PAT);
 }
 
-/// A variant pattern in one of its three spellings: the elided sigil
-/// `::Variant(...)` (one `NameRef`, `COLON2` before it), qualified
-/// `Enum::Variant(...)`, and the bare `Variant(...)`, which `validation`
-/// rejects.
+/// A variant pattern in one of its two spellings: the elided sigil
+/// `::Variant(...)` (one `NameRef`, `COLON2` before it) and qualified
+/// `Enum::Variant(...)`.
 fn variant_pat(p: &mut Parser<'_>) {
     let m = p.start();
     if !p.at(COLON2) {
@@ -1190,7 +1181,7 @@ fn variant_pat(p: &mut Parser<'_>) {
         }
     }
     if p.at(L_PAREN) {
-        pattern_binding_list(p);
+        variant_payload(p);
     }
     m.complete(p, VARIANT_PAT);
 }
@@ -1200,22 +1191,25 @@ fn variant_pat(p: &mut Parser<'_>) {
 fn bind_pat(p: &mut Parser<'_>, msg: &str) {
     let m = p.start();
     p.eat(MUT_KW);
-    pattern(p, msg);
+    name_or_hole(p, msg);
     m.complete(p, BIND_PAT);
 }
 
-/// The positional bindings of a variant pattern: `mut? name` and `_`
-/// holes.
-fn pattern_binding_list(p: &mut Parser<'_>) {
+/// The positional payload of a variant pattern: one [`pattern`] per
+/// payload.
+fn variant_payload(p: &mut Parser<'_>) {
     p.bump(L_PAREN);
     comma_list(p, R_PAREN, |p| match p.current() {
-        MUT_KW | IDENT | HOLE => bind_pat(p, "expected a binding name"),
         DOT2 => p.err_and_bump(DOT2_OUTSIDE_RECORD_PATTERN),
         // Left for `comma_list`: at the arm's own arrow (the `)` is
         // missing) it reports the `,` and the `)` and ends the list; an
         // empty slot before a `,` is skipped.
-        _ if p.at(FAT_ARROW) || at_expr_recovery(p) => p.error("expected a binding name"),
-        _ => p.err_and_bump("expected a binding name"),
+        _ if p.at(FAT_ARROW) || at_expr_recovery(p) => p.error("expected a pattern"),
+        _ => {
+            if !try_pattern(p, "expected a pattern") {
+                p.err_and_bump("expected a pattern");
+            }
+        }
     });
 }
 
@@ -1402,7 +1396,7 @@ fn param(p: &mut Parser<'_>) {
         || (p.at(STRUCT_KW) && p.nth(1) == L_BRACE)
     {
         p.eat(MUT_KW);
-        binding_pattern(p, "expected a parameter name");
+        pattern(p, "expected a parameter name");
         if p.eat(COLON) {
             type_(p);
         }
@@ -1450,7 +1444,7 @@ fn generic_param(p: &mut Parser<'_>) {
     if p.at(CONST_KW) {
         let m = p.start();
         p.bump(CONST_KW);
-        pattern(p, "expected a name for the const parameter");
+        name_or_hole(p, "expected a name for the const parameter");
         if p.eat(COLON) {
             type_(p);
         } else {
@@ -1462,7 +1456,7 @@ fn generic_param(p: &mut Parser<'_>) {
         m.complete(p, CONST_PARAM);
     } else if matches!(p.current(), IDENT | HOLE) {
         let m = p.start();
-        pattern(p, "expected a type parameter name");
+        name_or_hole(p, "expected a type parameter name");
         // `T: Display + Debug` — bounds live where params are born (TR05:
         // binder-position bounds, `+` composition). A CAPABILITY the body
         // needs rides this same slot (`T: forget`, T22): it is a positive
@@ -2163,7 +2157,7 @@ fn let_stmt(p: &mut Parser<'_>) {
     let m = p.start();
     p.bump(LET_KW);
     p.eat(MUT_KW);
-    binding_pattern(p, "expected a binding name");
+    pattern(p, "expected a binding name");
     if p.eat(COLON) {
         type_(p);
     }

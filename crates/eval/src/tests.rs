@@ -2120,7 +2120,7 @@ static f = fn (o: Opt) -> usize {
 "#,
         "f(Opt::Some(1))",
         expect![[r#"
-            error[Trap]: this pattern can fail to match; use `match`
+            error[Trap]: this pattern does not cover `Opt::None`; use `match`
         "#]],
     );
 }
@@ -2143,14 +2143,14 @@ static borrowed = fn (c: Shape) -> str {
         text,
         "owned(Shape::Circle(1))",
         expect![[r#"
-            error[Trap]: this pattern can fail to match; use `match`
+            error[Trap]: this pattern does not cover `Shape::Circle(_)`; use `match`
         "#]],
     );
     check_run(
         text,
         "borrowed(Shape::Circle(1))",
         expect![[r#"
-            error[Trap]: this pattern can fail to match; use `match`
+            error[Trap]: this pattern does not cover `Shape::Circle(_)`; use `match`
         "#]],
     );
 }
@@ -2169,7 +2169,7 @@ static f = fn (c: Shape) -> str {
 "#,
         "f(Shape::Circle(7))",
         expect![[r#"
-            error[Trap]: this pattern can fail to match; use `match`
+            error[Trap]: this pattern does not cover `Shape::Circle(_)`; use `match`
         "#]],
     );
 }
@@ -2204,6 +2204,102 @@ static from_param = fn (Shape::Label(s): Nope) -> str { s };
 }
 
 #[test]
+fn a_payload_slot_destructures_like_a_let() {
+    let text = r#"
+type Only = enum { One(usize) };
+type Foo = enum { Bar([usize; 3]), Pair(usize, usize), Wrap(Only) };
+static sum = fn (f: Foo) -> usize {
+    match f {
+        ::Bar([a, _, c]) => a + c,
+        ::Pair(a, _) => a,
+        ::Wrap(::One(n)) => n,
+    }
+};
+"#;
+    check_run(
+        text,
+        "sum(Foo::Bar([1, 20, 300]))",
+        expect![[r#"
+        => 301
+    "#]],
+    );
+    check_run(
+        text,
+        "sum(Foo::Pair(7, 8))",
+        expect![[r#"
+        => 7
+    "#]],
+    );
+    check_run(
+        text,
+        "sum(Foo::Wrap(Only::One(9)))",
+        expect![[r#"
+        => 9
+    "#]],
+    );
+}
+
+#[test]
+fn a_nested_variant_slot_projects_through_a_borrowed_scrutinee() {
+    let text = r#"
+type Inner = enum { Only(usize) };
+type Outer = enum { Wrap(Inner), Empty };
+static peek = fn::<@a>(o: Outer.&::<@a>) -> usize {
+    match o {
+        ::Wrap(::Only(n)) => n.*,
+        ::Empty => 0,
+    }
+};
+"#;
+    check_run(
+        text,
+        "{ let o: Outer = Outer::Wrap(Inner::Only(5)); peek(o.&) }",
+        expect![[r#"
+            => 5
+        "#]],
+    );
+}
+
+#[test]
+fn a_value_no_nested_pattern_matches_traps_with_the_match_message() {
+    // A slot dispatches like the arm does. A match that misses a value at
+    // some depth is a check-time error (pinned in hir's
+    // `a_nested_pattern_counts_toward_exhaustiveness`); when the program
+    // runs anyway, only that value traps.
+    let text = r#"
+type S = enum { A(usize), B(usize, usize) };
+type T = enum { Wrap(S), Nil };
+static f = fn (t: T) -> usize {
+    match t {
+        ::Wrap(::B(x, y)) => x + y,
+        ::Nil => 0,
+    }
+};
+"#;
+    check_run(
+        text,
+        "f(T::Wrap(S::A(1)))",
+        expect![[r#"
+            error[Trap]: this `match` does not cover `T::Wrap(S::A(_))`
+        "#]],
+    );
+    check_run(
+        text,
+        "f(T::Wrap(S::B(1, 2)))",
+        expect![[r#"
+            => 3
+        "#]],
+    );
+    check_run(
+        text,
+        "f(T::Nil)",
+        expect![[r#"
+        => 0
+    "#]],
+    );
+}
+
+#[test]
 fn a_refutable_parameter_pattern_traps_before_it_reads_the_argument() {
     let text = r#"
 type S = enum { A(usize), B(usize, usize) };
@@ -2215,21 +2311,21 @@ static nested = fn ([::B(x, y)]: [S; 1]) -> usize { x + y };
         text,
         "owned(S::A(1))",
         expect![[r#"
-            error[Trap]: this pattern can fail to match; use `match`
+            error[Trap]: this pattern does not cover `S::A(_)`; use `match`
         "#]],
     );
     check_run(
         text,
         "{ let s: S = S::A(1); borrowed(s.&) }",
         expect![[r#"
-            error[Trap]: this pattern can fail to match; use `match`
+            error[Trap]: this pattern does not cover `S::A(_)`; use `match`
         "#]],
     );
     check_run(
         text,
         "nested([S::A(1)])",
         expect![[r#"
-            error[Trap]: this pattern can fail to match; use `match`
+            error[Trap]: this pattern does not cover `[S::A(_)]`; use `match`
         "#]],
     );
 }
@@ -9407,5 +9503,207 @@ static f = fn () -> usize {
         expect![[r#"
             error[Trap]: `p` is used before it is assigned a value
         "#]],
+    );
+}
+
+#[test]
+fn nested_patterns_dispatch_at_every_depth() {
+    let text = r#"
+type S = enum { A(usize), B(usize, usize) };
+type T = enum { Wrap(S), Pair(S, S), Nil };
+static f = fn (t: T) -> usize {
+    match t {
+        ::Wrap(::A(0)) => 100,
+        ::Wrap(::A(n)) => n,
+        ::Wrap(::B(x, y)) => x + y,
+        ::Pair(::A(_), ::A(_)) => 1,
+        ::Pair(_, ::B(_, z)) => z,
+        ::Pair(::B(_, _), _) => 3,
+        ::Nil => 0,
+    }
+};
+static g = fn::<@a>(t: T.&::<@a>) -> usize {
+    match t {
+        ::Wrap(::A(n)) => n.*,
+        ::Wrap(::B(x, _)) => x.*,
+        ::Pair(::B(_, z), _) => z.*,
+        _ => 7,
+    }
+};
+"#;
+    check_run(
+        text,
+        "f(T::Wrap(S::A(0)))",
+        expect![[r#"
+        => 100
+    "#]],
+    );
+    check_run(
+        text,
+        "f(T::Wrap(S::A(5)))",
+        expect![[r#"
+        => 5
+    "#]],
+    );
+    check_run(
+        text,
+        "f(T::Wrap(S::B(2, 3)))",
+        expect![[r#"
+        => 5
+    "#]],
+    );
+    check_run(
+        text,
+        "f(T::Pair(S::A(1), S::A(2)))",
+        expect![[r#"
+        => 1
+    "#]],
+    );
+    check_run(
+        text,
+        "f(T::Pair(S::A(1), S::B(2, 9)))",
+        expect![[r#"
+        => 9
+    "#]],
+    );
+    check_run(
+        text,
+        "f(T::Pair(S::B(1, 2), S::A(4)))",
+        expect![[r#"
+        => 3
+    "#]],
+    );
+    check_run(
+        text,
+        "f(T::Nil)",
+        expect![[r#"
+        => 0
+    "#]],
+    );
+    check_run(
+        text,
+        "{ let t: T = T::Wrap(S::B(4, 5)); g(t.&) }",
+        expect![[r#"
+        => 4
+    "#]],
+    );
+    check_run(
+        text,
+        "{ let t: T = T::Pair(S::B(4, 6), S::A(1)); g(t.&) }",
+        expect![[r#"
+        => 6
+    "#]],
+    );
+    check_run(
+        text,
+        "{ let t: T = T::Pair(S::A(4), S::A(1)); g(t.&) }",
+        expect![[r#"
+        => 7
+    "#]],
+    );
+}
+
+#[test]
+fn nested_literals_dispatch_inside_a_payload() {
+    let text = r#"
+type O = enum { Some(char), None };
+static f = fn (o: O) -> usize {
+    match o {
+        ::Some('a') => 1,
+        ::Some(_) => 2,
+        ::None => 3,
+    }
+};
+"#;
+    check_run(
+        text,
+        "f(O::Some('a'))",
+        expect![[r#"
+        => 1
+    "#]],
+    );
+    check_run(
+        text,
+        "f(O::Some('b'))",
+        expect![[r#"
+        => 2
+    "#]],
+    );
+    check_run(
+        text,
+        "f(O::None)",
+        expect![[r#"
+        => 3
+    "#]],
+    );
+}
+
+#[test]
+fn array_record_and_newtype_patterns_project_through_a_borrow() {
+    let text = r#"
+type N = struct { x: usize, y: usize };
+type O = enum { Arr([usize; 2]), Rec(struct { a: usize }), New(N), None };
+static arr = fn::<@a>(p: [usize; 2].&::<@a>) -> usize {
+    let [a, b] = p;
+    a.* + b.*
+};
+static new = fn::<@a>(p: N.&::<@a>) -> usize {
+    let N(struct { x, y }) = p;
+    x.* * y.*
+};
+static slot = fn::<@a>(o: O.&::<@a>) -> usize {
+    match o {
+        ::Arr([a, _]) => a.*,
+        ::Rec(struct { a }) => a.*,
+        ::New(N(struct { x, .. })) => x.*,
+        ::None => 0,
+    }
+};
+static bump = fn::<@a>(p: [usize; 2].&mut::<@a>) -> () {
+    let [a, _] = p;
+    a.* = a.* + 1;
+};
+"#;
+    check_run(
+        text,
+        "{ let p: [usize; 2] = [3, 4]; arr(p.&) }",
+        expect![[r#"
+        => 7
+    "#]],
+    );
+    check_run(
+        text,
+        "{ let n: N = N(struct { x = 3, y = 5 }); new(n.&) }",
+        expect![[r#"
+        => 15
+    "#]],
+    );
+    check_run(
+        text,
+        "{ let o: O = O::Arr([8, 9]); slot(o.&) }",
+        expect![[r#"
+        => 8
+    "#]],
+    );
+    check_run(
+        text,
+        "{ let o: O = O::Rec(struct { a = 6 }); slot(o.&) }",
+        expect![[r#"
+        => 6
+    "#]],
+    );
+    check_run(
+        text,
+        "{ let o: O = O::New(N(struct { x = 2, y = 1 })); slot(o.&) }",
+        expect![[r#"
+        => 2
+    "#]],
+    );
+    check_run(
+        text,
+        "{ let mut p: [usize; 2] = [1, 2]; bump(p.&mut); p[0] }",
+        expect![[r#"
+        => 2
+    "#]],
     );
 }

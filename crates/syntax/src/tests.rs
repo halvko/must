@@ -4145,9 +4145,8 @@ static f = fn (s: Shape) -> usize {
                               IDENT@97..98 "a"
                           COMMA@98..99 ","
                           WHITESPACE@99..100 " "
-                          BIND_PAT@100..101
-                            NAME@100..101
-                              HOLE@100..101 "_"
+                          WILDCARD_PAT@100..101
+                            HOLE@100..101 "_"
                           R_PAREN@101..102 ")"
                         WHITESPACE@102..103 " "
                         FAT_ARROW@103..105 "=>"
@@ -4391,11 +4390,9 @@ static f = fn (s: Shape) -> usize {
 }
 
 #[test]
-fn match_retired_bare_variant_pat_still_parses() {
-    // `Circle(r)` (no `::`, no qualifying enum) is the retired v1
-    // shorthand. It still parses as a `VARIANT_PAT` with no `COLON2` (the
-    // tree keeps the user's intent), and validation reports the honest
-    // "write `::Circle(...)`" error.
+fn match_arm_name_with_parens_is_a_newtype_pattern() {
+    // One pattern grammar: `Circle(r)` unwraps a newtype in an arm as in a
+    // `let`. A variant is always written with `::`.
     check(
         r#"
 static f = fn (s: Shape) -> usize {
@@ -4453,7 +4450,7 @@ static f = fn (s: Shape) -> usize {
                       L_BRACE@49..50 "{"
                       WHITESPACE@50..59 "\n        "
                       MATCH_ARM@59..74
-                        VARIANT_PAT@59..68
+                        NEWTYPE_PAT@59..68
                           NAME_REF@59..65
                             IDENT@59..65 "Circle"
                           L_PAREN@65..66 "("
@@ -4483,36 +4480,8 @@ static f = fn (s: Shape) -> usize {
                     WHITESPACE@96..97 "\n"
                     R_BRACE@97..98 "}"
               WHITESPACE@98..99 "\n"
-            error 59..68: write `::Circle(...)` to match a variant, or remove `(...)` to bind
         "#]],
     );
-}
-
-#[test]
-fn match_retired_bare_variant_pat_fix_inserts_colon2() {
-    // The retired `Circle(r)` shape's fix inserts `::` right before the
-    // variant name, turning it into the elided sigil spelling.
-    let parse = crate::parse(
-        r#"
-static f = fn (s: Shape) -> usize {
-    match s {
-        Circle(r) => r,
-        _ => 0,
-    }
-}
-"#,
-    );
-    let err = parse
-        .errors()
-        .iter()
-        .find(|e| e.message.starts_with("write `::Circle"))
-        .expect("expected the retired-bare-variant error");
-    let fix = err.fix.as_ref().expect("expected a fix");
-    assert_eq!(fix.label, "Insert `::`");
-    assert_eq!(fix.edits.len(), 1);
-    let edit = &fix.edits[0];
-    assert!(edit.range.is_empty(), "the fix is a pure insertion");
-    assert_eq!(edit.insert, "::");
 }
 
 #[test]
@@ -10068,9 +10037,8 @@ fn match_pattern_bindings_take_mut() {
                               IDENT@37..38 "c"
                           COMMA@38..39 ","
                           WHITESPACE@39..40 " "
-                          BIND_PAT@40..41
-                            NAME@40..41
-                              HOLE@40..41 "_"
+                          WILDCARD_PAT@40..41
+                            HOLE@40..41 "_"
                           R_PAREN@41..42 ")"
                         WHITESPACE@42..43 " "
                         FAT_ARROW@43..45 "=>"
@@ -10119,7 +10087,135 @@ fn doubled_comma_in_a_variant_pattern_is_one_error() {
     check_errors(
         "static f = fn(o) { match o { ::Some(a, , b) => 1 } };",
         expect![[r#"
-            39..40: expected a binding name
+            39..40: expected a pattern
+        "#]],
+    );
+}
+
+#[test]
+fn patterns_nest_in_arms_lets_and_params() {
+    // One pattern grammar at every depth and in every position.
+    check(
+        r#"
+static f = fn (::Wrap([a, _]): W) {
+    let N(::Some('x')) = n;
+    match w { ::Wrap(::A(0)) => 1, _ => 0 }
+}
+"#,
+        expect![[r#"
+            SOURCE_FILE@0..111
+              WHITESPACE@0..1 "\n"
+              STATIC_ITEM@1..110
+                ITEM_HEAD@1..7
+                  STATIC_KW@1..7 "static"
+                WHITESPACE@7..8 " "
+                NAME@8..9
+                  IDENT@8..9 "f"
+                WHITESPACE@9..10 " "
+                EQ@10..11 "="
+                WHITESPACE@11..12 " "
+                FN_LITERAL@12..110
+                  FN_KW@12..14 "fn"
+                  WHITESPACE@14..15 " "
+                  PARAM_LIST@15..34
+                    L_PAREN@15..16 "("
+                    PARAM@16..33
+                      VARIANT_PAT@16..30
+                        COLON2@16..18 "::"
+                        NAME_REF@18..22
+                          IDENT@18..22 "Wrap"
+                        L_PAREN@22..23 "("
+                        ARRAY_PAT@23..29
+                          L_BRACKET@23..24 "["
+                          BIND_PAT@24..25
+                            NAME@24..25
+                              IDENT@24..25 "a"
+                          COMMA@25..26 ","
+                          WHITESPACE@26..27 " "
+                          WILDCARD_PAT@27..28
+                            HOLE@27..28 "_"
+                          R_BRACKET@28..29 "]"
+                        R_PAREN@29..30 ")"
+                      COLON@30..31 ":"
+                      WHITESPACE@31..32 " "
+                      PATH_TYPE@32..33
+                        NAME_REF@32..33
+                          IDENT@32..33 "W"
+                    R_PAREN@33..34 ")"
+                  WHITESPACE@34..35 " "
+                  BLOCK_EXPR@35..110
+                    L_BRACE@35..36 "{"
+                    WHITESPACE@36..41 "\n    "
+                    LET_STMT@41..64
+                      LET_KW@41..44 "let"
+                      WHITESPACE@44..45 " "
+                      NEWTYPE_PAT@45..59
+                        NAME_REF@45..46
+                          IDENT@45..46 "N"
+                        L_PAREN@46..47 "("
+                        VARIANT_PAT@47..58
+                          COLON2@47..49 "::"
+                          NAME_REF@49..53
+                            IDENT@49..53 "Some"
+                          L_PAREN@53..54 "("
+                          LITERAL_PAT@54..57
+                            LITERAL@54..57
+                              CHAR@54..57 "'x'"
+                          R_PAREN@57..58 ")"
+                        R_PAREN@58..59 ")"
+                      WHITESPACE@59..60 " "
+                      EQ@60..61 "="
+                      WHITESPACE@61..62 " "
+                      PATH_EXPR@62..63
+                        NAME_REF@62..63
+                          IDENT@62..63 "n"
+                      SEMICOLON@63..64 ";"
+                    WHITESPACE@64..69 "\n    "
+                    MATCH_EXPR@69..108
+                      MATCH_KW@69..74 "match"
+                      WHITESPACE@74..75 " "
+                      PATH_EXPR@75..76
+                        NAME_REF@75..76
+                          IDENT@75..76 "w"
+                      WHITESPACE@76..77 " "
+                      L_BRACE@77..78 "{"
+                      WHITESPACE@78..79 " "
+                      MATCH_ARM@79..99
+                        VARIANT_PAT@79..93
+                          COLON2@79..81 "::"
+                          NAME_REF@81..85
+                            IDENT@81..85 "Wrap"
+                          L_PAREN@85..86 "("
+                          VARIANT_PAT@86..92
+                            COLON2@86..88 "::"
+                            NAME_REF@88..89
+                              IDENT@88..89 "A"
+                            L_PAREN@89..90 "("
+                            LITERAL_PAT@90..91
+                              LITERAL@90..91
+                                INT_NUMBER@90..91 "0"
+                            R_PAREN@91..92 ")"
+                          R_PAREN@92..93 ")"
+                        WHITESPACE@93..94 " "
+                        FAT_ARROW@94..96 "=>"
+                        WHITESPACE@96..97 " "
+                        LITERAL@97..98
+                          INT_NUMBER@97..98 "1"
+                        COMMA@98..99 ","
+                      WHITESPACE@99..100 " "
+                      MATCH_ARM@100..106
+                        WILDCARD_PAT@100..101
+                          HOLE@100..101 "_"
+                        WHITESPACE@101..102 " "
+                        FAT_ARROW@102..104 "=>"
+                        WHITESPACE@104..105 " "
+                        LITERAL@105..106
+                          INT_NUMBER@105..106 "0"
+                      WHITESPACE@106..107 " "
+                      R_BRACE@107..108 "}"
+                    WHITESPACE@108..109 "\n"
+                    R_BRACE@109..110 "}"
+              WHITESPACE@110..111 "\n"
         "#]],
     );
 }
@@ -10189,6 +10285,17 @@ fn variant_pattern_missing_its_close_paren_stops_at_the_arrow() {
 }
 
 #[test]
+fn a_broken_nested_pattern_recovers_at_the_arm() {
+    check_errors(
+        "static f = fn { match w { ::Wrap(::A( => 1, _ => 0 } };",
+        expect![[r#"
+            36..37: expected `)`
+            38..40: expected a pattern
+        "#]],
+    );
+}
+
+#[test]
 fn let_takes_a_pattern() {
     check(
         "static f = fn { let [a, [mut b, _]] = v; let ::Char(c, _) = s; let 0 = n; };",
@@ -10253,9 +10360,8 @@ fn let_takes_a_pattern() {
                             IDENT@52..53 "c"
                         COMMA@53..54 ","
                         WHITESPACE@54..55 " "
-                        BIND_PAT@55..56
-                          NAME@55..56
-                            HOLE@55..56 "_"
+                        WILDCARD_PAT@55..56
+                          HOLE@55..56 "_"
                         R_PAREN@56..57 ")"
                       WHITESPACE@57..58 " "
                       EQ@58..59 "="

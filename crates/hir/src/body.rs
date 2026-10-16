@@ -380,12 +380,8 @@ pub struct Param {
     pub type_ref: Option<TypeRef>,
 }
 
-/// A pattern. Match-arm patterns (`Wildcard`/`Bind`/`Variant`/`Char`/`Int`) stay
-/// deliberately flat (no nesting, or-patterns or guards — those land later
-/// as one coherent pattern-language feature); `Record` and
-/// `Newtype` are `let`/parameter patterns, construction's mirror image, and
-/// only ever appear as a whole `let`/parameter pattern (or nested one level
-/// inside a `Newtype`) — never inside a variant pattern's payload.
+/// A pattern: construction's mirror image. Match arms, `let`s and
+/// parameters share every kind, nested to any depth.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PatData {
     /// Source was broken; matches nothing.
@@ -395,11 +391,8 @@ pub enum PatData {
     /// meets is dropped (a parameter gets a slot at runtime so callers'
     /// arguments line up positionally).
     Wildcard,
-    /// A bare name: binds the whole scrutinee — unless inference
-    /// reinterprets it, type-directed, as a payload-less variant of the
-    /// scrutinee's enum (`Point =>` on a `Shape` scrutinee). Also how a
-    /// bare name inside a [`PatData::Newtype`] binds the whole underlying
-    /// value (`Foo(inner)`).
+    /// A bare name: binds the whole value it meets, never reinterpreted as
+    /// a variant (write `::Point` for that).
     Bind(BindingId),
     /// `'x'` — a character literal pattern: matches exactly this scalar
     /// value, binds nothing. Kept a bare `char` rather than the
@@ -418,18 +411,17 @@ pub enum PatData {
     /// [`LiteralData::Int`]); `negative` is a leading `-` (`-1 =>`), applied
     /// once the width is known.
     Int { value: Option<u128>, negative: bool },
-    /// `Circle(r)` / `Shape::Circle(r)`: a variant pattern, construction's
-    /// mirror image. The variant resolves against the scrutinee's enum
-    /// (bare) or the named enum (qualified) during inference.
+    /// `::Circle(r)` / `Shape::Circle(r)`: a variant pattern. The variant
+    /// resolves against the matched value's enum (elided) or the named
+    /// enum (qualified) during inference.
     Variant {
         /// `Some` for the qualified spelling (`Shape::Circle`), `None` for
-        /// the bare one (`Circle`).
+        /// the elided one (`::Circle`).
         enum_name: Option<String>,
         /// Empty when broken (`Shape:: =>` — the parse error covers it).
         variant: String,
-        /// Positional payload bindings, in source order; `_` holes lower
-        /// as unnamed bindings.
-        bindings: Vec<BindingId>,
+        /// Positional payload patterns, in source order.
+        payload: Vec<PatId>,
     },
     /// `struct { x, y as z, mut w, .. }` — destructures a structural
     /// record, construction's mirror image ([`crate::body::ExprData::RecordLit`]).
@@ -445,7 +437,7 @@ pub enum PatData {
         rest: bool,
     },
     /// `[a, b, c]` — destructures a fixed-length array, one pattern per
-    /// element (a `let`/parameter pattern).
+    /// element.
     Array { elements: Vec<PatId> },
     /// `Name(pattern)` — unwraps a newtype and destructures its underlying
     /// shape, construction's mirror image (`Name(struct { ... })`). Erased
@@ -461,7 +453,7 @@ pub enum PatData {
 
 /// One field of a [`PatData::Record`] pattern: which field of the record is
 /// matched, and the binding it's bound to (the same one when there is no
-/// `as` rename — see [`crate::body::LowerCtx::lower_binding_pattern`]).
+/// `as` rename — see [`crate::body::LowerCtx::lower_pat`]).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RecordPatField {
     pub field: String,
@@ -485,12 +477,24 @@ impl Body {
             .collect()
     }
 
+    /// The patterns directly nested in `pat`.
+    pub fn children(&self, pat: PatId) -> &[PatId] {
+        match &self.pats[pat] {
+            PatData::Variant { payload, .. } => payload,
+            PatData::Newtype { inner, .. } => std::slice::from_ref(inner),
+            PatData::Array { elements } => elements,
+            _ => &[],
+        }
+    }
+
     fn collect_pat_bindings(&self, pat: PatId, out: &mut Vec<BindingId>) {
         match &self.pats[pat] {
             PatData::Missing | PatData::Wildcard | PatData::Char(_) | PatData::Int { .. } => {}
             PatData::Bind(binding) => out.push(*binding),
-            PatData::Variant { bindings, .. } => {
-                out.extend(bindings.iter().copied());
+            PatData::Variant { payload, .. } => {
+                for &slot in payload {
+                    self.collect_pat_bindings(slot, out);
+                }
             }
             PatData::Record { fields, .. } => {
                 out.extend(fields.iter().map(|f| f.binding));
@@ -1017,7 +1021,7 @@ impl LowerCtx {
                     .arms()
                     .map(|arm| {
                         let pat = match arm.pat() {
-                            Some(pat) => self.lower_pat(pat),
+                            Some(pat) => self.lower_pat(pat, None, false),
                             // No pattern at all: broken source, the parse
                             // error covers it.
                             None => self.pats.alloc(PatData::Missing),
@@ -1050,11 +1054,9 @@ impl LowerCtx {
                             .map(|param| {
                                 let type_ref = TypeRef::from_opt_ast(param.ty());
                                 let pat = match param.pat() {
-                                    Some(pat) => self.lower_binding_pattern(
-                                        pat,
-                                        type_ref.clone(),
-                                        param.is_mut(),
-                                    ),
+                                    Some(pat) => {
+                                        self.lower_pat(pat, type_ref.clone(), param.is_mut())
+                                    }
                                     None => self.pats.alloc(PatData::Missing),
                                 };
                                 Param { pat, type_ref }
@@ -1082,15 +1084,24 @@ impl LowerCtx {
         }
     }
 
-    fn lower_pat(&mut self, pat: ast::Pat) -> PatId {
+    /// `type_ref`/`mutable` (a `let`'s or parameter's) apply only when
+    /// `pat` is directly a bare name: nested patterns carry no type
+    /// ascription, and a nested binding's own `mut` is read straight off
+    /// its syntax.
+    fn lower_pat(&mut self, pat: ast::Pat, type_ref: Option<TypeRef>, mutable: bool) -> PatId {
         match pat {
-            ast::Pat::WildcardPat(it) => self.alloc_pat(PatData::Wildcard, it.syntax()),
-            // The two SCALAR literals have pattern semantics; string and
-            // boolean literals parse into this node so `validation` can
-            // name them, and lower as broken (their diagnostic is already
-            // written, and there is nothing to match on). A malformed
-            // character literal lowers as broken for the same reason its
-            // expression form does — it names no value at all.
+            ast::Pat::BindPat(it) => {
+                let mutable = mutable || it.is_mut();
+                let binding = self.alloc_binding(it.name(), type_ref, mutable, it.syntax());
+                self.alloc_pat(PatData::Bind(binding), it.syntax())
+            }
+            ast::Pat::ArrayPat(it) => {
+                let elements = it
+                    .pats()
+                    .map(|element| self.lower_pat(element, None, false))
+                    .collect();
+                self.alloc_pat(PatData::Array { elements }, it.syntax())
+            }
             ast::Pat::LiteralPat(it) => {
                 let data = match it.literal().and_then(|lit| lit.kind()) {
                     Some(ast::LiteralKind::Char(token)) => syntax::char_literal_value(token.text())
@@ -1106,65 +1117,27 @@ impl LowerCtx {
                 };
                 self.alloc_pat(data, it.syntax())
             }
-            ast::Pat::BindPat(it) => {
-                let binding = self.alloc_binding(it.name(), None, it.is_mut(), it.syntax());
-                self.alloc_pat(PatData::Bind(binding), it.syntax())
-            }
             ast::Pat::VariantPat(it) => {
-                // The three spellings — qualified `Shape::Circle`, elided
-                // `::Circle`, retired bare `Circle(...)` — all funnel
-                // through the same helpers: `enum_name_ref` is present only
-                // for the qualified spelling, and a missing variant segment
-                // stays empty (the parse error covers it), mirroring
-                // `ExprData::VariantPath`.
+                // Both spellings, qualified `Shape::Circle` and elided
+                // `::Circle`, funnel through the same helpers:
+                // `enum_name_ref` is present only for the qualified
+                // spelling, and a missing variant segment stays empty (the
+                // parse error covers it), mirroring `ExprData::VariantPath`.
                 let enum_name = it.enum_name_ref().map(|n| n.text());
                 let variant = it.variant_name_ref().map(|n| n.text()).unwrap_or_default();
-                let bindings = it
-                    .bindings()
-                    .map(|bind| self.alloc_binding(bind.name(), None, bind.is_mut(), bind.syntax()))
+                let payload = it
+                    .pats()
+                    .map(|slot| self.lower_pat(slot, None, false))
                     .collect();
                 self.alloc_pat(
                     PatData::Variant {
                         enum_name,
                         variant,
-                        bindings,
+                        payload,
                     },
                     it.syntax(),
                 )
             }
-            // `let`/parameter-only shapes; `match_pattern`'s grammar never
-            // produces them, but a defensive fallback keeps this function
-            // total if that ever changes.
-            ast::Pat::RecordPat(_) | ast::Pat::NewtypePat(_) | ast::Pat::ArrayPat(_) => {
-                self.lower_binding_pattern(pat, None, false)
-            }
-        }
-    }
-
-    /// A `let`/parameter pattern — construction's mirror image. `_` lowers
-    /// as [`PatData::Wildcard`]. `type_ref`/`mutable` apply only when `pat`
-    /// is directly a bare name — nested patterns carry no type ascription,
-    /// and a nested binding's own `mut` is read straight off its syntax.
-    fn lower_binding_pattern(
-        &mut self,
-        pat: ast::Pat,
-        type_ref: Option<TypeRef>,
-        mutable: bool,
-    ) -> PatId {
-        match pat {
-            ast::Pat::BindPat(it) => {
-                let mutable = mutable || it.is_mut();
-                let binding = self.alloc_binding(it.name(), type_ref, mutable, it.syntax());
-                self.alloc_pat(PatData::Bind(binding), it.syntax())
-            }
-            ast::Pat::ArrayPat(it) => {
-                let elements = it
-                    .pats()
-                    .map(|element| self.lower_binding_pattern(element, None, false))
-                    .collect();
-                self.alloc_pat(PatData::Array { elements }, it.syntax())
-            }
-            ast::Pat::VariantPat(_) | ast::Pat::LiteralPat(_) => self.lower_pat(pat),
             ast::Pat::RecordPat(it) => {
                 let fields = it
                     .fields()
@@ -1188,7 +1161,7 @@ impl LowerCtx {
             ast::Pat::NewtypePat(it) => {
                 let type_name = it.name_ref().map(|n| n.text()).unwrap_or_default();
                 let inner = match it.pat() {
-                    Some(inner) => self.lower_binding_pattern(inner, None, false),
+                    Some(inner) => self.lower_pat(inner, None, false),
                     None => self.pats.alloc(PatData::Missing),
                 };
                 self.alloc_pat(PatData::Newtype { type_name, inner }, it.syntax())
@@ -1206,7 +1179,7 @@ impl LowerCtx {
                     let init = it.eq_token().map(|_| self.lower_opt_expr(it.initializer()));
                     let type_ref = TypeRef::from_opt_ast(it.ty());
                     let pat = match it.pat() {
-                        Some(pat) => self.lower_binding_pattern(pat, type_ref.clone(), it.is_mut()),
+                        Some(pat) => self.lower_pat(pat, type_ref.clone(), it.is_mut()),
                         None => self.pats.alloc(PatData::Missing),
                     };
                     Stmt::Let {

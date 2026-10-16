@@ -2014,6 +2014,22 @@ pub fn variant_payloads_for(db: &dyn Db, variant: &ResolvedVariant) -> Option<Ve
     Some(substitute_payload(payload, &variant.decl, &variant.args))
 }
 
+/// The payload types of variant `index` of the enum `decl` at `args`; empty
+/// for a broken declaration or index. What a variant pattern's sub-patterns
+/// meet, for inference, usefulness and MIR alike.
+pub fn variant_payload_tys(
+    db: &dyn Db,
+    decl: &ItemLoc,
+    args: &[GenericArg],
+    index: u32,
+) -> Vec<Ty> {
+    enum_variants(db, decl.to_id(db))
+        .as_ref()
+        .and_then(|variants| variants.get(index as usize))
+        .map(|(_, payload)| substitute_payload(payload, decl, args))
+        .unwrap_or_default()
+}
+
 /// The type other items see for `item`. A fully-typed contract is the
 /// whole answer (a hard firewall edge: edits to the body never change this
 /// signature) — written as an annotation, or synthesized from a

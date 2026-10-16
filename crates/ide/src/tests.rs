@@ -3688,7 +3688,7 @@ static f = fn (s: Shape) {
 
 #[test]
 fn completions_match_template_gives_each_payload_its_own_tab_stop() {
-    // `check_match_pat` counts a pattern's bindings against the variant's
+    // Inference counts a pattern's sub-patterns against the variant's
     // payloads, so a two-payload variant needs two stops: one `$1` covering
     // both would insert `::Pair($1)` and hand the user an arity error to
     // fix. The numbering keeps running across arms.
