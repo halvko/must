@@ -19,6 +19,16 @@ reviews what changed for new problems. Adding the `review` label asks for
 a round at any time and starts a fresh budget of five, counting that
 round; it is meant for humans, and comes off again when the round ends.
 
+The `review gate` status on the PR's head says whether the reviewers are
+done with it. It is red while a thread a reviewer opened is unresolved, and
+while the head has changes no reviewer has seen: past the round limit, say,
+or on a PR that edits the review workflow, which the reviewers cannot run on.
+It is yellow while a round is coming and on drafts. It never weighs how
+serious a finding is: settle each thread by fixing it or answering why not,
+then resolve it. GitHub sends no event when a thread is resolved, so the
+gate updates on the next push, reply or round; to update it sooner, re-run
+the PR's latest `Review gate` run, or run that workflow for the PR.
+
 - To teach a reviewer, edit its file: what to look for, what to ignore,
   examples of past mistakes. The whole file is its brief.
 - To add a reviewer, add a file. Its name (without `.md`) is the reviewer's
