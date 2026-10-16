@@ -6480,6 +6480,27 @@ static main = fn { g(P(struct { n = 1 }), true); };
     );
 }
 
+/// A field access on a parameter its caller types waits for the caller,
+/// so the whole signature is written in one step.
+#[test]
+fn assist_writes_a_param_reached_only_through_a_field() {
+    check_assist(
+        r#"
+type Point = struct { x: usize, y: usize };
+static origin = Point(struct { x = 0, y = 0 });
+static translate$0 = const fn (p, dx) { Point(struct { x = p.x + dx, y = p.y }) };
+static moved = translate(origin, 5);
+"#,
+        "Insert inferred signature",
+        r#"
+type Point = struct { x: usize, y: usize };
+static origin = Point(struct { x = 0, y = 0 });
+static translate = const fn (p: Point, dx: usize) -> Point { Point(struct { x = p.x + dx, y = p.y }) };
+static moved = translate(origin, 5);
+"#,
+    );
+}
+
 #[test]
 fn assist_writes_const_generic_arguments() {
     check_assist(

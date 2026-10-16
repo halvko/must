@@ -2452,6 +2452,209 @@ fn field_access_on_unannotated_param_requires_an_annotation() {
     );
 }
 
+/// A field access on an undetermined receiver waits for it:
+/// `translate`'s caller makes `p` a `Point`, and `p.x + dx` then makes `dx`
+/// a `usize`.
+#[test]
+fn field_access_waits_for_a_caller_to_determine_the_receiver() {
+    let text = r#"
+type Point = struct { x: usize, y: usize };
+static origin = Point(struct { x = 0, y = 0 });
+static translate = const fn (p, dx) {
+    Point(struct { x = p.x + dx, y = p.y })
+};
+static moved = translate(origin, 5);
+"#;
+    check_signatures(
+        text,
+        expect![[r#"
+        origin: Point
+        translate: fn(Point, usize) -> Point
+        moved: Point
+    "#]],
+    );
+    check_diagnostics(text, expect![[r#""#]]);
+    check_infer(
+        text,
+        expect![[r#"
+        61..66 'Point': fn(struct { x: usize, y: usize }) -> Point
+        61..91 'Point(struct { x ...': Point
+        67..90 'struct { x = 0, y...': struct { x: usize, y: usize }
+        80..81 '0': usize
+        87..88 '0': usize
+        112..176 'const fn (p, dx) ...': fn(Point, usize) -> Point
+        122..123 'p': Point
+        125..127 'dx': usize
+        129..176 '{     Point(struc...': Point
+        135..140 'Point': fn(struct { x: usize, y: usize }) -> Point
+        135..174 'Point(struct { x ...': Point
+        141..173 'struct { x = p.x ...': struct { x: usize, y: usize }
+        154..155 'p': Point
+        154..157 'p.x': usize
+        154..162 'p.x + dx': usize
+        160..162 'dx': usize
+        168..169 'p': Point
+        168..171 'p.y': usize
+        193..202 'translate': fn(Point, usize) -> Point
+        193..213 'translate(origin, 5)': Point
+        203..209 'origin': Point
+        211..212 '5': usize
+    "#]],
+    );
+}
+
+/// The same for an index, and through a chain of projections: each one
+/// waits for the one before it.
+#[test]
+fn index_and_chained_fields_wait_for_the_receiver() {
+    let text = r#"
+static first = fn (a) { a[0] };
+static inner = fn (r) { r.a.b };
+static main = fn () -> usize {
+    first([1, 2]) + inner(struct { a = struct { b = 3 } })
+};
+"#;
+    check_signatures(
+        text,
+        expect![[r#"
+        first: fn([usize; 2]) -> usize
+        inner: fn(struct { a: struct { b: usize } }) -> usize
+        main: fn() -> usize
+    "#]],
+    );
+    check_diagnostics(text, expect![[r#""#]]);
+}
+
+/// A receiver determined later in the same body: the call after the field
+/// access types `p`.
+#[test]
+fn field_access_waits_for_a_later_use_in_the_same_body() {
+    check_diagnostics(
+        r#"
+type Point = struct { x: usize, y: usize };
+static take = fn (_p: Point) -> () { };
+static f = fn (p) -> usize { let x = p.x; take(p); x };
+"#,
+        expect![[r#""#]],
+    );
+    // A deferred `let mut q;` read before it is assigned: the access is
+    // typed from the assignment, so what is left is the real problem,
+    // which the initialization check reports.
+    check_infer(
+        r#"
+type Point = struct { x: usize, y: usize };
+static f = fn (c: bool) -> usize {
+    let mut q;
+    if c { return q.x; };
+    q = Point(struct { x = 1, y = 2 });
+    q.y
+};
+"#,
+        expect![[r#"
+            56..170 'fn (c: bool) -> u...': fn(bool) -> usize
+            60..61 'c': bool
+            78..170 '{     let mut q; ...': usize
+            92..93 'q': Point
+            99..119 'if c { return q.x; }': ()
+            102..103 'c': bool
+            104..119 '{ return q.x; }': ()
+            106..116 'return q.x': !
+            113..114 'q': Point
+            113..116 'q.x': usize
+            125..126 'q': Point
+            129..134 'Point': fn(struct { x: usize, y: usize }) -> Point
+            129..159 'Point(struct { x ...': Point
+            135..158 'struct { x = 1, y...': struct { x: usize, y: usize }
+            148..149 '1': usize
+            155..156 '2': usize
+            165..166 'q': Point
+            165..168 'q.y': usize
+        "#]],
+    );
+}
+
+/// Projections across members resolve whatever order the members are
+/// written in: each caller determines its callee's receiver in turn.
+#[test]
+fn projections_across_members_resolve_in_any_order() {
+    let callee_first = r#"
+type Inner = struct { x: usize };
+type Mid = struct { i: Inner };
+type Outer = struct { m: Mid };
+static a = fn (p) { p.x };
+static b = fn (q) { a(q.i) };
+static c = fn (r) { b(r.m) };
+static o = Outer(struct { m = Mid(struct { i = Inner(struct { x = 1 }) }) });
+static main = fn () -> usize { c(o) };
+"#;
+    let expected = expect![[r#"
+        a: fn(Inner) -> usize
+        b: fn(Mid) -> usize
+        c: fn(Outer) -> usize
+        o: Outer
+        main: fn() -> usize
+    "#]];
+    check_signatures(callee_first, expected);
+    check_diagnostics(callee_first, expect![[r#""#]]);
+    let caller_first = r#"
+type Inner = struct { x: usize };
+type Mid = struct { i: Inner };
+type Outer = struct { m: Mid };
+static main = fn () -> usize { c(o) };
+static o = Outer(struct { m = Mid(struct { i = Inner(struct { x = 1 }) }) });
+static c = fn (r) { b(r.m) };
+static b = fn (q) { a(q.i) };
+static a = fn (p) { p.x };
+"#;
+    check_signatures(
+        caller_first,
+        expect![[r#"
+        main: fn() -> usize
+        o: Outer
+        c: fn(Outer) -> usize
+        b: fn(Mid) -> usize
+        a: fn(Inner) -> usize
+    "#]],
+    );
+    check_diagnostics(caller_first, expect![[r#""#]]);
+}
+
+/// Calling a field whose receiver is undetermined commits it to a safe
+/// `fn`, which a caller then confirms.
+#[test]
+fn calling_a_field_of_an_undetermined_receiver() {
+    check_diagnostics(
+        r#"
+static inc = fn (n: usize) -> usize { n + 1 };
+static call = fn (h) { (h.f)(1) };
+static main = fn () -> usize { call(struct { f = inc }) };
+"#,
+        expect![[r#""#]],
+    );
+}
+
+/// What a determined receiver turns out to lack, or a value that doesn't
+/// fit its context, is reported at the access once the receiver is known.
+/// `z`'s use reports too: like any member whose body meets an error in what
+/// it produces, `z`'s return is `{error}`.
+#[test]
+fn a_waiting_field_access_reports_once_the_receiver_is_known() {
+    check_diagnostics(
+        r#"
+type Point = struct { x: usize, y: usize };
+static origin = Point(struct { x = 0, y = 0 });
+static z = fn (p) { p.z };
+static wrong = fn (p) -> bool { p.x };
+static main = fn () { z(origin); wrong(origin); };
+"#,
+        expect![[r#"
+            115..116: no field `z` on `Point` (the fields of `Point` are declared here at 14..43)
+            152..155: type mismatch: expected `bool`, found `usize` (expected `bool` because of this return type at 142..149)
+            181..182: not enough information to infer the type of `z`; add a type annotation to its definition (defined here at 100..101)
+        "#]],
+    );
+}
+
 #[test]
 fn shorthand_field_resolves_and_type_checks() {
     check_diagnostics(
