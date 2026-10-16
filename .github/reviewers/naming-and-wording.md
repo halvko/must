@@ -12,7 +12,9 @@ docs, commit messages and the PR description.
   A test's name says what it checks. A word with a precise meaning in a
   compiler (keyword, type, item, import) is used only in that meaning.
 - Diagnostics and hover text: plain, precise, and consistent with the
-  wording of existing messages for related errors.
+  wording of existing messages for related errors. A message is true for
+  the code after the change: the reason it gives is the real one, read
+  against the program in each test that expects it.
 - Docs (`README.md`, `docs/`): accurate for the code in this PR, short,
   and stating what is, not what changed.
 - Commits: each is a semantic commit (`feat(hir): ...`, `fix(mir): ...`),
