@@ -658,8 +658,9 @@ pub fn body_group<'db>(db: &'db dyn Db, item: crate::ItemId<'db>) -> Option<(u32
 /// Inference for one binding group: checks every body the group covers
 /// once, in its own table, and returns the members' signatures and every
 /// body's result. Callees are checked before their callers, and the uses
-/// fill what their bodies left open together (T11 in
-/// `docs/design/types-and-data.md`).
+/// fill what their bodies left open together, then the projections waiting
+/// for a receiver are retried ([`Solver::settle`]); T11 in
+/// `docs/design/types-and-data.md`.
 #[salsa::tracked(returns(ref))]
 pub fn infer_group<'db>(db: &'db dyn Db, group: GroupId<'db>) -> GroupSignatures {
     let groups = inference_groups(db, group.library(db));
@@ -723,6 +724,7 @@ pub fn infer_group<'db>(db: &'db dyn Db, group: GroupId<'db>) -> GroupSignatures
         disagreements: FxHashMap::default(),
         lost: Vec::new(),
         mentions,
+        links: vec![FxHashMap::default(); bodies.len()],
     };
     let mut ctxs: Vec<Option<InferCtx<'db>>> = (0..bodies.len()).map(|_| None).collect();
 
@@ -754,6 +756,7 @@ pub fn infer_group<'db>(db: &'db dyn Db, group: GroupId<'db>) -> GroupSignatures
     // The members' uses fill what their callees left open, together.
     let member_fills = solver.take_fills();
     solver.unify_uses(&member_fills, false);
+    solver.settle(&mut ctxs, &member_locs, &bodies);
 
     let mut own_error = vec![false; member_count];
     for m in 0..member_count {
@@ -791,6 +794,7 @@ pub fn infer_group<'db>(db: &'db dyn Db, group: GroupId<'db>) -> GroupSignatures
     }
     let source_fills = solver.take_fills();
     solver.unify_uses(&source_fills, false);
+    solver.settle(&mut ctxs, &member_locs, &bodies);
 
     // The decided signatures, as the group publishes them: what no body
     // determined is `{error}`, which the needs-annotation diagnostic is for.
@@ -852,6 +856,8 @@ pub fn infer_group<'db>(db: &'db dyn Db, group: GroupId<'db>) -> GroupSignatures
             let adopted = ctx.adopt_exported(&copy, &exported);
             debug_assert!(adopted, "a group body's copy disagrees with its decision");
         }
+        ctx.retry_deferred_projections();
+        ctx.report_undetermined_projections();
         ctx.poison_left_unbound();
         ctx.report_undetermined_members(|expr, loc| {
             let m = member_of[loc];
@@ -988,6 +994,9 @@ struct Solver {
     /// Per body, how many times it mentions each member: its uses, each a
     /// vote.
     mentions: Vec<FxHashMap<usize, usize>>,
+    /// Per body, the solver variable each of its exported variables became,
+    /// so what the body learns later lands on the same variables.
+    links: Vec<FxHashMap<TyVar, TyVar>>,
 }
 
 impl Solver {
@@ -1055,16 +1064,8 @@ impl Solver {
         cycle: &[usize],
         b: usize,
     ) -> Vec<(usize, Ty)> {
-        let mut vars: FxHashMap<TyVar, Ty> = FxHashMap::default();
         let mut internal = Vec::new();
-        for &m in &body.mentioned {
-            let copy = ctx.copies()[&member_locs[m]].clone();
-            let resolved = ctx.resolve(&copy);
-            let moved = export_ty(&resolved, &mut |var| {
-                vars.entry(var)
-                    .or_insert_with(|| Ty::Infer(self.table.new_key(ctx.var_kind(var))))
-                    .clone()
-            });
+        for (m, moved) in self.moved_copies(ctx, member_locs, &body.mentioned, b) {
             if body.own == Some(m) {
                 self.own[m] = if ctx.root_has_error() {
                     Ty::Error
@@ -1077,19 +1078,7 @@ impl Solver {
                 self.fills[b].push((m, moved));
             }
         }
-        if let Some(own) = body.own {
-            let errors = ctx.left_unbound().to_vec();
-            self.met_error[own] = errors
-                .into_iter()
-                .filter_map(|var| match ctx.resolve(&Ty::Infer(var)) {
-                    Ty::Infer(root) => match vars.get(&root) {
-                        Some(Ty::Infer(moved)) => Some(*moved),
-                        _ => None,
-                    },
-                    _ => None,
-                })
-                .collect();
-        }
+        self.record_errors(ctx, body, b);
         internal
     }
 
@@ -1101,6 +1090,146 @@ impl Solver {
             .filter(|(_, fills)| !fills.is_empty())
             .map(|(b, fills)| (b, std::mem::take(fills)))
             .collect()
+    }
+
+    /// Body `b`'s copy of each member it mentions, moved into the solver's
+    /// table through [`Self::links`].
+    fn moved_copies(
+        &mut self,
+        ctx: &mut InferCtx<'_>,
+        member_locs: &[ItemLoc],
+        mentioned: &[usize],
+        b: usize,
+    ) -> Vec<(usize, Ty)> {
+        let links = &mut self.links[b];
+        let table = &mut self.table;
+        mentioned
+            .iter()
+            .map(|&m| {
+                let copy = ctx.copies()[&member_locs[m]].clone();
+                let resolved = ctx.resolve(&copy);
+                let moved = export_ty(&resolved, &mut |var| {
+                    Ty::Infer(
+                        *links
+                            .entry(var)
+                            .or_insert_with(|| table.new_key(ctx.var_kind(var))),
+                    )
+                });
+                (m, moved)
+            })
+            .collect()
+    }
+
+    /// The variables a member's `body` (body `b`) met an error on, in the
+    /// solver's table.
+    fn record_errors(&mut self, ctx: &mut InferCtx<'_>, body: &GroupBody<'_>, b: usize) {
+        let Some(own) = body.own else {
+            return;
+        };
+        let errors = ctx.left_unbound().to_vec();
+        self.met_error[own] = errors
+            .into_iter()
+            .filter_map(|var| match ctx.resolve(&Ty::Infer(var)) {
+                Ty::Infer(root) => self.links[b].get(&root).copied(),
+                _ => None,
+            })
+            .collect();
+    }
+
+    /// Retry the field accesses and indexes still waiting for their
+    /// receiver, against what the group has decided so far, until none
+    /// moves: each waiting body sees the decided signatures of the members
+    /// it mentions, and what its projections then determine joins the
+    /// decided signatures like any use. One body's projection can
+    /// determine another's receiver, whatever order they come in.
+    fn settle(
+        &mut self,
+        ctxs: &mut [Option<InferCtx<'_>>],
+        member_locs: &[ItemLoc],
+        bodies: &[GroupBody<'_>],
+    ) {
+        loop {
+            let mut progressed = false;
+            for b in 0..ctxs.len() {
+                let Some(ctx) = ctxs[b].as_mut() else {
+                    continue;
+                };
+                if !ctx.has_deferred_projections() {
+                    continue;
+                }
+                let body = &bodies[b];
+                self.import(ctx, member_locs, &body.mentioned, b);
+                if !ctx.retry_deferred_projections() {
+                    continue;
+                }
+                progressed = true;
+                let moved = self.moved_copies(ctx, member_locs, &body.mentioned, b);
+                if let Some(own) = body.own {
+                    self.own[own] = if ctx.root_has_error() {
+                        Ty::Error
+                    } else {
+                        moved
+                            .iter()
+                            .find(|(m, _)| *m == own)
+                            .map_or(Ty::Error, |(_, ty)| ty.clone())
+                    };
+                }
+                self.record_errors(ctx, body, b);
+                self.unify_uses(&[(b, moved)], false);
+            }
+            if !progressed {
+                return;
+            }
+        }
+    }
+
+    /// Give body `b`'s copies what the group decided for them, through
+    /// [`Self::links`]: a solver variable the body has a variable for
+    /// becomes that one (two of them that the solver joined are joined).
+    fn import(
+        &mut self,
+        ctx: &mut InferCtx<'_>,
+        member_locs: &[ItemLoc],
+        mentioned: &[usize],
+        b: usize,
+    ) {
+        let mut back: FxHashMap<TyVar, Ty> = FxHashMap::default();
+        let links: Vec<(TyVar, TyVar)> = self.links[b].iter().map(|(&k, &v)| (k, v)).collect();
+        for (body_var, solver_var) in links {
+            // A decided safety reaches the body through the copies below.
+            if matches!(self.table.probe_value(solver_var), TyVarValue::Safety(_)) {
+                continue;
+            }
+            if let Ty::Infer(root) = resolve_fully(&mut self.table, &Ty::Infer(solver_var)) {
+                match back.get(&root) {
+                    Some(other) => {
+                        let other = other.clone();
+                        ctx.adopt_exported(&Ty::Infer(body_var), &other);
+                    }
+                    None => {
+                        back.insert(root, Ty::Infer(body_var));
+                    }
+                }
+            }
+        }
+        for &m in mentioned {
+            let decided = resolve_fully(&mut self.table, &self.decided[m]);
+            let links = &mut self.links[b];
+            let table = &mut self.table;
+            let imported = export_ty(&decided, &mut |var| {
+                back.entry(var)
+                    .or_insert_with(|| {
+                        let fresh = ctx.new_var(table.probe_value(var));
+                        if let Ty::Infer(body_var) = fresh {
+                            links.insert(body_var, var);
+                        }
+                        fresh
+                    })
+                    .clone()
+            });
+            let copy = ctx.copies()[&member_locs[m]].clone();
+            ctx.adopt_exported(&copy, &imported);
+        }
     }
 
     /// Unify each body's uses with the members' `decided` signatures
