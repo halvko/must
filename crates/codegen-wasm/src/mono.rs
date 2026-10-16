@@ -126,7 +126,7 @@ pub enum StaticVal {
     /// import is built from that, not from a call site.
     ExternFn {
         decl: ItemLoc,
-        sig: hir::FnTy,
+        sig: std::sync::Arc<hir::FnTy>,
     },
 }
 
@@ -755,11 +755,9 @@ impl<'db> Mono<'db> {
         op: &Operand,
     ) -> Result<Ty, Unsupported> {
         match op {
-            Operand::Const(Const::ExternFn { .. }) => {
-                return Err(Unsupported::new(
-                    "an `extern` item used as a value (they are callable, not data)",
-                ));
-            }
+            Operand::Const(Const::ExternFn { .. }) => Err(Unsupported::new(
+                "an `extern` item used as a value (they are callable, not data)",
+            )),
             // A MOVE is a copy plus an ALIASING fact, and this backend has
             // no aliasing model to tell — linearity is check-time only, so
             // the two lower identically and a linear program's bytes are

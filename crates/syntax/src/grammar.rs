@@ -963,7 +963,7 @@ fn fn_literal(p: &mut Parser<'_>) -> CompletedMarker {
     if p.at(L_BRACE) {
         block_expr(p);
     } else if at_expr_recovery(p) {
-        p.error(&format!("expected `{{`: {BRACE_RULE}"));
+        p.error(format!("expected `{{`: {BRACE_RULE}"));
     } else {
         // Superset parsing: take any expression as the body so the tree
         // keeps the user's intent (inference and hover still work);
