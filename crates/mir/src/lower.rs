@@ -1553,13 +1553,13 @@ impl LowerCtx<'_> {
             // under and what the interpreter asks its host for.
             ExprData::ExternItem => {
                 let sig = match self.ty(expr) {
-                    Ty::Fn(f) => f.as_ref().clone(),
+                    Ty::Fn(f) => f.clone(),
                     // Broken source; the declaration carries its own error.
-                    _ => hir::FnTy {
+                    _ => std::sync::Arc::new(hir::FnTy {
                         params: Vec::new(),
                         ret: Ty::Error,
                         unsafe_to_call: true,
-                    },
+                    }),
                 };
                 Operand::Const(Const::ExternFn {
                     decl: self.loc.clone(),
