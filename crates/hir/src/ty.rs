@@ -1955,44 +1955,76 @@ pub(crate) fn substitute_payload(payload: &[Ty], decl: &ItemLoc, args: &[Generic
         .collect()
 }
 
+/// `ty` with its region variables erased as [`erase_infer`] erases them
+/// and its type variables mapped by `var`: how a type leaves one table for
+/// another.
+pub(crate) fn export_ty(ty: &Ty, var: &mut impl FnMut(TyVar) -> Ty) -> Ty {
+    map_table_vars(ty, var, false)
+}
+
 /// Erase dangling inference variables to `Ty::Error` — for lowering done
 /// outside any inference context (declarations), and for group signatures
 /// leaving the group's table.
 pub(crate) fn erase_infer(ty: &Ty) -> Ty {
+    map_table_vars(ty, &mut |_| Ty::Error, true)
+}
+
+/// The walk behind [`export_ty`] and [`erase_infer`]; `numbers` also
+/// erases `Ty::UnresolvedNumber`, as `erase_infer` does.
+fn map_table_vars(ty: &Ty, var: &mut impl FnMut(TyVar) -> Ty, numbers: bool) -> Ty {
     match ty {
-        Ty::Infer(_) | Ty::UnresolvedNumber => Ty::Error,
-        // A safety nothing decided is safe: the least solution.
-        Ty::Fn(f) => Ty::fn_type_with(
-            f.unsafe_to_call(),
-            f.params.iter().map(erase_infer).collect(),
-            erase_infer(&f.ret),
-        ),
-        Ty::RawPtr { mutable, pointee } => Ty::raw_ptr(*mutable, erase_infer(pointee)),
+        Ty::Infer(v) => var(*v),
+        Ty::UnresolvedNumber if numbers => Ty::Error,
+        Ty::Fn(f) => {
+            let params = f
+                .params
+                .iter()
+                .map(|p| map_table_vars(p, var, numbers))
+                .collect();
+            let ret = map_table_vars(&f.ret, var, numbers);
+            // A safety variable moves like a type variable; one the map
+            // erases is safe, the value an undecided one ends at.
+            let safety = match f.safety {
+                Safety::Infer(v) => match var(v) {
+                    Ty::Infer(moved) => Safety::Infer(moved),
+                    _ => Safety::Safe,
+                },
+                known => known,
+            };
+            Ty::fn_type_safety(safety, params, ret)
+        }
+        Ty::RawPtr { mutable, pointee } => {
+            Ty::raw_ptr(*mutable, map_table_vars(pointee, var, numbers))
+        }
         Ty::Borrow {
             mutable,
             region,
             referent,
-        } => Ty::borrow(*mutable, erase_region_vars(region), erase_infer(referent)),
-        Ty::Array { elem, len } => Ty::array(erase_infer(elem), len.clone()),
+        } => Ty::borrow(
+            *mutable,
+            erase_region_vars(region),
+            map_table_vars(referent, var, numbers),
+        ),
+        Ty::Array { elem, len } => Ty::array(map_table_vars(elem, var, numbers), len.clone()),
         Ty::Record(rec) => Ty::record(
             rec.fields
                 .iter()
-                .map(|(name, ty)| (name.clone(), erase_infer(ty)))
+                .map(|(name, ty)| (name.clone(), map_table_vars(ty, var, numbers)))
                 .collect(),
         ),
         Ty::Named(named) => Ty::Named(NamedTy {
             decl: named.decl.clone(),
-            args: named.args.iter().map(erase_infer_arg).collect(),
+            args: named
+                .args
+                .iter()
+                .map(|arg| match arg {
+                    GenericArg::Ty(ty) => GenericArg::Ty(map_table_vars(ty, var, numbers)),
+                    GenericArg::Region(region) => GenericArg::Region(erase_region_vars(region)),
+                    GenericArg::Const(value) => GenericArg::Const(value.clone()),
+                })
+                .collect(),
         }),
         other => other.clone(),
-    }
-}
-
-fn erase_infer_arg(arg: &GenericArg) -> GenericArg {
-    match arg {
-        GenericArg::Ty(ty) => GenericArg::Ty(erase_infer(ty)),
-        GenericArg::Region(region) => GenericArg::Region(erase_region_vars(region)),
-        GenericArg::Const(value) => GenericArg::Const(value.clone()),
     }
 }
 
@@ -2189,16 +2221,17 @@ pub fn signature<'db>(db: &'db dyn Db, item: ItemId<'db>) -> Ty {
             &ParamScope::default(),
         );
     }
-    let library = crate::library::library_of(db, item.file(db));
-    let groups = crate::groups::inference_groups(db, library);
-    let Some(&(group, position)) = groups.slot.get(&crate::item_loc(db, item)) else {
+    let Some((group, position)) = crate::groups::body_group(db, item) else {
         return Ty::Error;
     };
-    crate::groups::infer_group(db, crate::groups::GroupId::new(db, library, group))
-        .signatures
-        .get(position)
-        .cloned()
-        .unwrap_or(Ty::Error)
+    crate::groups::infer_group(
+        db,
+        crate::groups::GroupId::new(db, crate::library::library_of(db, item.file(db)), group),
+    )
+    .signatures
+    .get(position as usize)
+    .cloned()
+    .unwrap_or(Ty::Error)
 }
 
 /// Whether uses of `item` should say "add a type annotation": inference
@@ -2243,7 +2276,17 @@ pub fn signature_needs_annotation<'db>(db: &'db dyn Db, item: ItemId<'db>) -> bo
         // No value at all: the parse errors cover it.
         return false;
     }
-    signature(db, item).contains_error()
+    let Some((group, position)) = crate::groups::body_group(db, item) else {
+        return false;
+    };
+    crate::groups::infer_group(
+        db,
+        crate::groups::GroupId::new(db, crate::library::library_of(db, item.file(db)), group),
+    )
+    .needs_annotation
+    .get(position as usize)
+    .copied()
+    .unwrap_or(false)
 }
 
 fn erase_regions_arg(arg: &GenericArg) -> GenericArg {

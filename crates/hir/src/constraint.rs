@@ -315,7 +315,18 @@ impl Constraints {
         &self.left_unbound
     }
 
-    /// Bind every still-unbound NUMBER-CLASS variable anywhere inside `ty`
+    /// Record `var` as met by an error, to commit to `{error}` once its
+    /// group has decided (see [`Self::left_unbound`]).
+    pub(crate) fn leave_unbound(&mut self, var: TyVar) {
+        self.left_unbound.push(var);
+    }
+
+    /// Whether errors are left unbound (see [`Self::new`]).
+    pub(crate) fn leaves_errors_unbound(&self) -> bool {
+        self.leave_errors_unbound
+    }
+
+    /// Bind every unbound NUMBER-CLASS variable anywhere inside `ty`
     /// to `{error}`: used after a mismatch was already reported against
     /// it, so the literal(s) that minted them don't pile no-defining-use
     /// diagnostics on top (errors are infectious and silent).
@@ -724,6 +735,18 @@ impl Constraints {
              meeting a borrow) instead"
         );
         self.unify(table, a, b, cause)
+    }
+
+    /// Unify two types whose regions are not this body's (an inference
+    /// group's merged signatures carry none): no outlives obligation is
+    /// recorded between them.
+    pub(crate) fn unify_exported(
+        &mut self,
+        table: &mut InPlaceUnificationTable<TyVar>,
+        a: &Ty,
+        b: &Ty,
+    ) -> bool {
+        self.unify(table, a, b, None)
     }
 
     /// RELATION: a value meeting a CONTEXT that already has a type. Unifies

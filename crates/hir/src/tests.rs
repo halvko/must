@@ -390,7 +390,7 @@ fn firewall_body_edit_does_not_reinfer_other_items() {
         log.lock()
             .unwrap()
             .iter()
-            .filter(|entry| entry.contains("infer"))
+            .filter(|entry| entry.starts_with("infer("))
             .count()
     };
     assert_eq!(executed_infers(&log), 2, "both items inferred initially");
@@ -402,7 +402,9 @@ fn firewall_body_edit_does_not_reinfer_other_items() {
     }
     let log = log.lock().unwrap();
     assert_eq!(
-        log.iter().filter(|entry| entry.contains("infer")).count(),
+        log.iter()
+            .filter(|entry| entry.starts_with("infer("))
+            .count(),
         1,
         "only the edited item may re-infer; executed: {log:#?}"
     );
@@ -502,12 +504,20 @@ fn firewall_item_insertion_does_not_reinfer_items_below() {
         crate::infer::infer(&db, item);
     }
     let log = log.lock().unwrap();
+    // The file's inference groups read every item's names, the new one's
+    // included; that's the new item's own work, not a re-run.
+    let new_item = format!(
+        "({:?})",
+        salsa::plumbing::AsId::as_id(&crate::file_item_ids(&db, file)[0])
+    );
     // `resolutions` does re-run — a new name entered the file scope, which
     // genuinely could matter — but its *value* is unchanged (ItemLocs are
     // name-based, not positional), so inference backdates behind it.
-    for query in ["infer", "expr_scopes"] {
+    for query in ["infer(", "expr_scopes"] {
         assert_eq!(
-            log.iter().filter(|entry| entry.contains(query)).count(),
+            log.iter()
+                .filter(|entry| entry.starts_with(query) && !entry.ends_with(&new_item))
+                .count(),
             0,
             "`{query}` should backdate across item insertion; executed: {log:#?}"
         );
@@ -705,13 +715,13 @@ static main = fn { apply(double, 2) };
             33..34 'n': usize
             33..38 'n + n': usize
             37..38 'n': usize
-            57..75 'fn (f, a) { f(a) }': fn(fn(_) -> _, _) -> _
-            61..62 'f': fn(_) -> _
-            64..65 'a': _
-            67..75 '{ f(a) }': _
-            69..70 'f': fn(_) -> _
-            69..73 'f(a)': _
-            71..72 'a': _
+            57..75 'fn (f, a) { f(a) }': fn(fn(usize) -> usize, usize) -> usize
+            61..62 'f': fn(usize) -> usize
+            64..65 'a': usize
+            67..75 '{ f(a) }': usize
+            69..70 'f': fn(usize) -> usize
+            69..73 'f(a)': usize
+            71..72 'a': usize
             91..114 'fn { apply(double...': fn() -> usize
             94..114 '{ apply(double, 2) }': usize
             96..101 'apply': fn(fn(usize) -> usize, usize) -> usize
@@ -2378,7 +2388,7 @@ fn record_literal_against_non_record_expectation() {
     check_diagnostics(
         r#"static f = fn { let n: usize = struct { x = 1 }; };"#,
         expect![[r#"
-            31..47: type mismatch: expected `usize`, found `struct { x: {error} }` (expected `usize` because of this annotation at 23..28)
+            31..47: type mismatch: expected `usize`, found `struct { x: {number} }` (expected `usize` because of this annotation at 23..28)
         "#]],
     );
 }
@@ -2762,7 +2772,7 @@ static a: Foo = struct { x = 1 };
 static b: struct { x: usize } = Foo(struct { x = 1 });
 "#,
         expect![[r#"
-            49..65: type mismatch: expected `Foo`, found `struct { x: {error} }`; `Foo` is a distinct type — construct it with `Foo(...)` (expected `Foo` because of this annotation at 43..46)
+            49..65: type mismatch: expected `Foo`, found `struct { x: {number} }`; `Foo` is a distinct type — construct it with `Foo(...)` (expected `Foo` because of this annotation at 43..46)
             99..120: type mismatch: expected `struct { x: usize }`, found `Foo` (expected `struct { x: usize }` because of this annotation at 77..96)
         "#]],
     );
@@ -2806,7 +2816,7 @@ type Foo = struct { x: usize };
 static eq = Foo(struct { x = 1 }) == struct { x = 1 };
 "#,
         expect![[r#"
-            70..86: type mismatch: expected `Foo`, found `struct { x: {error} }`; `Foo` is a distinct type — construct it with `Foo(...)` (this operand has type `Foo` at 45..66)
+            70..86: type mismatch: expected `Foo`, found `struct { x: {number} }`; `Foo` is a distinct type — construct it with `Foo(...)` (this operand has type `Foo` at 45..66)
         "#]],
     );
 }
@@ -5174,7 +5184,7 @@ fn firewall_expectation_recording_backdates_unchanged_types() {
                    static b: fn() -> usize = fn () -> usize { a() };\n";
 
     let file = SourceFile::new(&db, "test.must".to_owned(), text_v1.to_owned());
-    let before: Vec<crate::InferenceResult> = crate::file_item_ids(&db, file)
+    let before: Vec<std::sync::Arc<crate::InferenceResult>> = crate::file_item_ids(&db, file)
         .iter()
         .map(|&item| crate::infer::infer(&db, item).clone())
         .collect();
@@ -5187,7 +5197,7 @@ fn firewall_expectation_recording_backdates_unchanged_types() {
 
     log.lock().unwrap().clear();
     file.set_text(&mut db).to(text_v2.to_owned());
-    let after: Vec<crate::InferenceResult> = crate::file_item_ids(&db, file)
+    let after: Vec<std::sync::Arc<crate::InferenceResult>> = crate::file_item_ids(&db, file)
         .iter()
         .map(|&item| crate::infer::infer(&db, item).clone())
         .collect();
@@ -6168,8 +6178,24 @@ static f = fn (x) { ignore(x) };
     );
 }
 
-/// A trait-bounded type parameter left open by the signature reports at the
-/// mention, the only place the bound is checked.
+/// A trait-bounded type parameter its caller's use fills checks the bound
+/// at the mention, the only place it is checked.
+#[test]
+fn trait_bound_on_a_use_filled_parameter_reports() {
+    check_diagnostics(
+        r#"
+trait D = requires { m: fn(Self) -> usize; };
+static d = fn::<T: D>(x: T) -> usize { x.m() };
+static f = fn (x) -> usize { d(x) };
+static g = fn () { f(true) };
+"#,
+        expect![[r#"
+            124..125: the bound `T: D` is not satisfied here: `bool` does not implement `D`
+        "#]],
+    );
+}
+
+/// A trait-bounded type parameter nothing fills reports at the mention.
 #[test]
 fn trait_bound_left_open_by_the_signature_still_reports() {
     check_diagnostics(
@@ -6177,7 +6203,6 @@ fn trait_bound_left_open_by_the_signature_still_reports() {
 trait D = requires { m: fn(Self) -> usize; };
 static d = fn::<T: D>(x: T) -> usize { x.m() };
 static f = fn (x) -> usize { d(x) };
-static g = fn () { f(true) };
 "#,
         expect![[r#"
             124..125: cannot infer the type parameter `T` of `d`; write `d::<...>` to specify it (defined here at 54..55)
@@ -6766,7 +6791,7 @@ fn raw_pointer_unification_is_exact_no_mut_mixing() {
     check_diagnostics(
         "static f = fn(p: usize.&raw) {};\nstatic main = fn { let mut x = 1; f(x.&raw mut); };",
         expect![[r#"
-            69..79: type mismatch: expected `usize.&raw`, found `{error}.&raw mut`
+            69..79: type mismatch: expected `usize.&raw`, found `{number}.&raw mut`
         "#]],
     );
 }
@@ -6776,7 +6801,7 @@ fn raw_pointer_unification_is_exact_no_shared_to_mut() {
     check_diagnostics(
         "static f = fn(p: usize.&raw mut) {};\nstatic main = fn { let x = 1; f(x.&raw); };",
         expect![[r#"
-            69..75: type mismatch: expected `usize.&raw mut`, found `{error}.&raw`
+            69..75: type mismatch: expected `usize.&raw mut`, found `{number}.&raw`
         "#]],
     );
 }
@@ -6786,7 +6811,7 @@ fn raw_pointer_pointee_must_match_exactly() {
     check_diagnostics(
         r#"static main = fn { let mut x = 1; let p: str.&raw mut = x.&raw mut; };"#,
         expect![[r#"
-            56..66: type mismatch: expected `str.&raw mut`, found `{error}.&raw mut` (expected `str.&raw mut` because of this annotation at 41..53)
+            56..66: type mismatch: expected `str.&raw mut`, found `{number}.&raw mut` (expected `str.&raw mut` because of this annotation at 41..53)
         "#]],
     );
 }
@@ -6796,7 +6821,7 @@ fn raw_pointer_does_not_coerce_to_pointee() {
     check_diagnostics(
         "static main = fn { let mut x = 1; let y: usize = x.&raw mut; };",
         expect![[r#"
-            49..59: type mismatch: expected `usize`, found `{error}.&raw mut` (expected `usize` because of this annotation at 41..46)
+            49..59: type mismatch: expected `usize`, found `{number}.&raw mut` (expected `usize` because of this annotation at 41..46)
         "#]],
     );
 }
@@ -9758,7 +9783,7 @@ fn firewall_member_body_edit_does_not_reinfer_siblings_or_callers() {
         log.lock()
             .unwrap()
             .iter()
-            .filter(|entry| entry.contains("infer"))
+            .filter(|entry| entry.starts_with("infer("))
             .count()
     };
     // The type item itself has no body to infer, but its query still runs
@@ -9772,7 +9797,9 @@ fn firewall_member_body_edit_does_not_reinfer_siblings_or_callers() {
     }
     let log = log.lock().unwrap();
     assert_eq!(
-        log.iter().filter(|entry| entry.contains("infer")).count(),
+        log.iter()
+            .filter(|entry| entry.starts_with("infer("))
+            .count(),
         1,
         "only the edited member may re-infer; executed: {log:#?}"
     );
@@ -10155,14 +10182,10 @@ static c = fn () -> usize { a };
             c: fn() -> usize
         "#]],
     );
-    // TODO: halvko/must#156: the uses repeat `a`'s error as "not enough
-    // information".
     check_diagnostics(
         b_first,
         expect![[r#"
             12..19: unresolved name `missing`
-            52..53: not enough information to infer the type of `a`; add a type annotation to its definition (defined here at 8..9)
-            86..87: not enough information to infer the type of `a`; add a type annotation to its definition (defined here at 8..9)
         "#]],
     );
     let c_first = r#"
@@ -10182,8 +10205,6 @@ static b = fn () -> () { print(a) };
         c_first,
         expect![[r#"
             12..19: unresolved name `missing`
-            49..50: not enough information to infer the type of `a`; add a type annotation to its definition (defined here at 8..9)
-            85..86: not enough information to infer the type of `a`; add a type annotation to its definition (defined here at 8..9)
         "#]],
     );
 }
@@ -10206,14 +10227,10 @@ static h = fn () -> str { f() };
         h: fn() -> str
     "#]],
     );
-    // TODO: halvko/must#156: the calls repeat `f`'s error as "not enough
-    // information".
     check_diagnostics(
         g_first,
         expect![[r#"
             20..27: unresolved name `missing`
-            59..60: not enough information to infer the type of `f`; add a type annotation to its definition (defined here at 8..9)
-            92..93: not enough information to infer the type of `f`; add a type annotation to its definition (defined here at 8..9)
         "#]],
     );
     let h_first = r#"
@@ -10233,8 +10250,6 @@ static g = fn () -> usize { f() };
         h_first,
         expect![[r#"
             20..27: unresolved name `missing`
-            57..58: not enough information to infer the type of `f`; add a type annotation to its definition (defined here at 8..9)
-            92..93: not enough information to infer the type of `f`; add a type annotation to its definition (defined here at 8..9)
         "#]],
     );
 }
@@ -10278,13 +10293,10 @@ static main = fn () -> usize { let n: usize = 1; f()(n) };
             main: fn() -> usize
         "#]],
     );
-    // TODO: halvko/must#152: `f`'s own body doesn't see that its group
-    // made the `0` a `usize`.
     check_diagnostics(
         curried,
         expect![[r#"
             34..41: unresolved name `missing`
-            43..44: cannot infer the type of this number: it has no defining use — add a type annotation
         "#]],
     );
 }
@@ -10300,8 +10312,6 @@ static g = fn (y) { y };
 static f = fn (x) { g(x); x == 1; let b: bool = x; x };
 static main = fn () -> usize { g(1) };
 "#;
-    // TODO: halvko/must#157: `f`'s own `bool` mismatch isn't reported: its
-    // `x` reads `g`'s poisoned parameter.
     check_signatures(
         text,
         expect![[r#"
@@ -10314,6 +10324,7 @@ static main = fn () -> usize { g(1) };
         text,
         expect![[r#"
             46..47: not enough information to infer the type of `g`; add a type annotation to its definition (defined here at 8..9)
+            74..75: type mismatch: expected `bool`, found `{number}` (expected `bool` because of this annotation at 67..71)
             113..114: not enough information to infer the type of `g`; add a type annotation to its definition (defined here at 8..9)
         "#]],
     );
@@ -10341,7 +10352,6 @@ static h = fn () -> str { a() };
     check_diagnostics(
         caller_first,
         expect![[r#"
-            20..21: not enough information to infer the type of `f`; add a type annotation to its definition (defined here at 34..35)
             46..53: unresolved name `missing`
             85..86: not enough information to infer the type of `a`; add a type annotation to its definition (defined here at 8..9)
             118..119: not enough information to infer the type of `a`; add a type annotation to its definition (defined here at 8..9)
@@ -10366,7 +10376,6 @@ static h = fn () -> str { a() };
         callee_first,
         expect![[r#"
             20..27: unresolved name `missing`
-            50..51: not enough information to infer the type of `f`; add a type annotation to its definition (defined here at 8..9)
             85..86: not enough information to infer the type of `a`; add a type annotation to its definition (defined here at 38..39)
             118..119: not enough information to infer the type of `a`; add a type annotation to its definition (defined here at 38..39)
         "#]],
@@ -10461,14 +10470,11 @@ static main = fn () -> usize { f(1) };
         main: fn() -> usize
     "#]],
     );
-    // TODO: halvko/must#156: the calls repeat `f`'s error as "not enough
-    // information".
     check_diagnostics(
         f_first,
         expect![[r#"
             26..33: unresolved name `missing`
             35..36: not enough information to infer the type of `h`; add a type annotation to its definition (defined here at 50..51)
-            99..100: not enough information to infer the type of `f`; add a type annotation to its definition (defined here at 8..9)
         "#]],
     );
     let h_first = r#"
@@ -10489,7 +10495,6 @@ static main = fn () -> usize { f(1) };
         expect![[r#"
             51..58: unresolved name `missing`
             60..61: not enough information to infer the type of `h`; add a type annotation to its definition (defined here at 8..9)
-            99..100: not enough information to infer the type of `f`; add a type annotation to its definition (defined here at 33..34)
         "#]],
     );
 }
@@ -10538,8 +10543,8 @@ static main = fn () -> usize { g() };
     );
 }
 
-/// A member's use decides an erroneous member's result, as it decides any
-/// variable members share: the first body to run wins, in either order.
+/// A member's use decides an erroneous member's result, as it fills any
+/// part a member's body left open, in either order.
 #[test]
 fn members_use_decides_an_erroneous_members_result() {
     let use_first = r#"
@@ -10578,12 +10583,11 @@ static b = fn () { print(a()) };
     );
 }
 
-/// Two members' uses that disagree on an erroneous member's result: the
-/// first to run wins and the second reports the mismatch.
+/// Two members' uses that disagree on an erroneous member's result leave
+/// it `{error}`, in either order. Its body carries the error, so the uses
+/// say nothing.
 #[test]
-fn members_uses_disagreeing_on_an_erroneous_result_first_wins() {
-    // TODO: halvko/must#146: which use reports the mismatch depends on
-    // member order.
+fn members_uses_disagreeing_on_an_erroneous_result_leave_it_undecided() {
     let k_first = r#"
 static f = fn () { missing };
 static k = fn () { print(f()) };
@@ -10592,17 +10596,16 @@ static m = fn () { let n: usize = f(); n };
     check_signatures(
         k_first,
         expect![[r#"
-        f: fn() -> str
-        k: fn()
-        m: fn() -> usize
-    "#]],
+            f: {error}
+            k: fn()
+            m: fn() -> usize
+        "#]],
     );
     check_diagnostics(
         k_first,
         expect![[r#"
-        20..27: unresolved name `missing`
-        98..101: type mismatch: expected `usize`, found `str` (expected `usize` because of this annotation at 90..95)
-    "#]],
+            20..27: unresolved name `missing`
+        "#]],
     );
     let m_first = r#"
 static f = fn () { missing };
@@ -10612,27 +10615,24 @@ static k = fn () { print(f()) };
     check_signatures(
         m_first,
         expect![[r#"
-        f: fn() -> usize
-        m: fn() -> usize
-        k: fn()
-    "#]],
+            f: {error}
+            m: fn() -> usize
+            k: fn()
+        "#]],
     );
     check_diagnostics(
         m_first,
         expect![[r#"
-        20..27: unresolved name `missing`
-        100..103: type mismatch: expected `str`, found `usize`
-    "#]],
+            20..27: unresolved name `missing`
+        "#]],
     );
 }
 
-/// A static whose value is `{error}` is poisoned right after its body runs,
-/// so the poison reaches a member an earlier body joined it to.
+/// A static whose value is `{error}` decides nothing: a body that joins
+/// it to another member (`a == name()`) leaves that member to its own
+/// body, in either order, and the uses of the broken static say nothing.
 #[test]
-fn erroneous_static_poisons_what_an_earlier_body_joined_it_to() {
-    // TODO: halvko/must#146: `name` is `{error}` only when `check` runs
-    // before `a`. TODO: halvko/must#156: the uses repeat `a`'s error as
-    // "not enough information".
+fn erroneous_static_does_not_poison_what_a_body_joins_it_to() {
     let check_first = r#"
 static check = fn () { a == name() };
 static a = missing;
@@ -10641,16 +10641,14 @@ static name = fn () { "bob" };
     check_signatures(
         check_first,
         expect![[r#"
-        check: fn() -> bool
-        a: {error}
-        name: fn() -> {error}
-    "#]],
+            check: fn() -> bool
+            a: {error}
+            name: fn() -> str
+        "#]],
     );
     check_diagnostics(
         check_first,
         expect![[r#"
-            24..25: not enough information to infer the type of `a`; add a type annotation to its definition (defined here at 46..47)
-            29..33: not enough information to infer the type of `name`; add a type annotation to its definition (defined here at 66..70)
             50..57: unresolved name `missing`
         "#]],
     );
@@ -10671,7 +10669,6 @@ static name = fn () { "bob" };
         a_first,
         expect![[r#"
             12..19: unresolved name `missing`
-            44..45: not enough information to infer the type of `a`; add a type annotation to its definition (defined here at 8..9)
         "#]],
     );
 }
@@ -10717,7 +10714,7 @@ static main = fn () -> usize { f(1) };
     check_diagnostics(
         text,
         expect![[r#"
-            35..38: type mismatch: expected `bool`, found `_.&` (expected `bool` because of this annotation at 28..32)
+            35..38: type mismatch: expected `bool`, found `usize.&` (expected `bool` because of this annotation at 28..32)
         "#]],
     );
 }
@@ -10740,20 +10737,18 @@ static other = fn () -> usize { five };
         other: fn() -> usize
     "#]],
     );
-    // TODO: halvko/must#152: `five`'s own body does not see the type its
-    // group solved, so its `5` reports no defining use.
     check_diagnostics(
         text,
         expect![[r#"
-        15..16: cannot infer the type of this number: it has no defining use — add a type annotation
-        49..53: expression of type `usize` is not callable
-    "#]],
+            49..53: expression of type `usize` is not callable
+        "#]],
     );
 }
 
 /// A caller whose use of a member mismatches doesn't poison the member,
 /// whichever caller comes first: the other caller's use decides it, and the
-/// mismatch is reported once, at the mismatching use.
+/// mismatch is reported once, at the mismatching use, with the type the
+/// member's own body gave it.
 #[test]
 fn mismatching_caller_does_not_poison_a_number_member() {
     let main_first = r#"
@@ -10769,14 +10764,11 @@ static other = fn () -> usize { five };
             other: fn() -> usize
         "#]],
     );
-    // TODO: halvko/must#152: `five`'s own body does not see the type its
-    // group solved, so its `5` reports no defining use.
     check_diagnostics(
         main_first,
         expect![[r#"
-        15..16: cannot infer the type of this number: it has no defining use — add a type annotation
-        48..52: type mismatch: expected `bool`, found `usize` (expected `bool` because of this return type at 38..45)
-    "#]],
+            48..52: type mismatch: expected `bool`, found `usize` (expected `bool` because of this return type at 38..45)
+        "#]],
     );
     let other_first = r#"
 static five = 5;
@@ -10791,14 +10783,11 @@ static main = fn () -> bool { five };
             main: fn() -> bool
         "#]],
     );
-    // TODO: halvko/must#152: `five`'s own body does not see the type its
-    // group solved, so its `5` reports no defining use.
     check_diagnostics(
         other_first,
         expect![[r#"
-        15..16: cannot infer the type of this number: it has no defining use — add a type annotation
-        88..92: type mismatch: expected `bool`, found `usize` (expected `bool` because of this return type at 78..85)
-    "#]],
+            88..92: type mismatch: expected `bool`, found `usize` (expected `bool` because of this return type at 78..85)
+        "#]],
     );
 }
 
@@ -10862,8 +10851,9 @@ static f = fn (x) { x };
     );
 }
 
-/// Editing a fully typed caller re-runs the group it feeds, but when the
-/// filled signature comes out the same, nothing else re-infers.
+/// Editing a fully typed caller re-runs the group it feeds, which checks
+/// every body in it once; when the other bodies' results come out the
+/// same, nothing downstream of them re-runs.
 #[test]
 fn fully_typed_caller_edit_backdates_behind_its_group() {
     use salsa::Setter as _;
@@ -10890,24 +10880,29 @@ static other = fn () -> usize { id(2) + 1 };
 
     let file = SourceFile::new(&db, "test.must".to_owned(), text_v1.to_owned());
     for &item in crate::file_item_ids(&db, file) {
-        crate::infer::infer(&db, item);
+        crate::linear_check::linear_check(&db, item);
     }
     log.lock().unwrap().clear();
     file.set_text(&mut db).to(text_v2.to_owned());
     for &item in crate::file_item_ids(&db, file) {
-        crate::infer::infer(&db, item);
+        crate::linear_check::linear_check(&db, item);
     }
     let log = log.lock().unwrap();
-    assert!(
-        log.iter().any(|entry| entry.contains("infer_group")),
-        "the edited caller feeds `id`'s group: {log:#?}"
+    // Each member's `infer` re-runs to read the group's new result; the
+    // unchanged ones come out equal and backdate.
+    assert_eq!(
+        log.iter()
+            .filter(|entry| entry.starts_with("infer_group("))
+            .count(),
+        1,
+        "the edited caller feeds `id`'s group, which runs once: {log:#?}"
     );
     assert_eq!(
         log.iter()
-            .filter(|entry| entry.starts_with("infer("))
+            .filter(|entry| entry.starts_with("linear_check("))
             .count(),
         1,
-        "only the edited item may re-infer; executed: {log:#?}"
+        "only the edited item's checks may re-run; executed: {log:#?}"
     );
 }
 
@@ -10982,11 +10977,10 @@ static main = fn () -> usize { g() };
     );
 }
 
-/// Two fully typed callers that disagree: the group runs fully typed
-/// bodies in source order, one pass (T11), so the first fills the hole and
-/// the second is reported, deterministically.
+/// Two fully typed callers that disagree leave the hole undecided, in
+/// either order: neither wins by coming first (T11).
 #[test]
-fn first_fully_typed_caller_fills_the_hole() {
+fn disagreeing_fully_typed_callers_leave_the_hole_undecided() {
     check_signatures(
         r#"
 static id = fn (x) { x };
@@ -10994,7 +10988,7 @@ static a = fn () -> usize { id(1) };
 static b = fn () -> bool { id(true) };
 "#,
         expect![[r#"
-            id: fn(usize) -> usize
+            id: {error}
             a: fn() -> usize
             b: fn() -> bool
         "#]],
@@ -11006,11 +11000,240 @@ static b = fn () -> bool { id(true) };
 static a = fn () -> usize { id(1) };
 "#,
         expect![[r#"
-            id: fn(bool) -> bool
+            id: {error}
             b: fn() -> bool
             a: fn() -> usize
         "#]],
     );
+    check_diagnostics(
+        r#"
+static id = fn (x) { x };
+static a = fn () -> usize { id(1) };
+static b = fn () -> bool { id(true) };
+"#,
+        expect![[r#"
+            55..57: not enough information to infer the type of `id`; add a type annotation to its definition (defined here at 8..10)
+            91..93: not enough information to infer the type of `id`; add a type annotation to its definition (defined here at 8..10)
+        "#]],
+    );
+    check_diagnostics(
+        r#"
+static id = fn (x) { x };
+static b = fn () -> bool { id(true) };
+static a = fn () -> usize { id(1) };
+"#,
+        expect![[r#"
+            54..56: not enough information to infer the type of `id`; add a type annotation to its definition (defined here at 8..10)
+            94..96: not enough information to infer the type of `id`; add a type annotation to its definition (defined here at 8..10)
+        "#]],
+    );
+}
+
+/// A use in a call cycle that contradicts what the callee's annotation
+/// writes is reported at the use, as outside a cycle.
+#[test]
+fn cycle_use_contradicting_a_written_annotation_is_a_mismatch() {
+    let text = r#"
+static f = fn () { g(1) };
+static g = fn (x: bool) -> _ { f(); x };
+"#;
+    check_signatures(
+        text,
+        expect![[r#"
+        f: fn() -> bool
+        g: fn(bool) -> bool
+    "#]],
+    );
+    check_diagnostics(
+        text,
+        expect![[r#"
+        22..23: type mismatch: expected `bool`, found `{number}`
+    "#]],
+    );
+}
+
+/// When uses conflict only through shared variables, a member linked to
+/// the conflict by another variable stays decided.
+#[test]
+fn member_linked_beside_a_conflict_stays_decided() {
+    let text = r#"
+static id = fn (x) { x };
+static k = fn (y, w) { w; y };
+static m = fn (z) { z };
+static tie = fn (p, s) { id(p); k(p, s); m(s) };
+static a = fn () -> usize { id(1) };
+static c = fn () -> bool { k(true, 2) };
+static d = fn () -> usize { m(3) };
+"#;
+    check_signatures(
+        text,
+        expect![[r#"
+        id: {error}
+        k: {error}
+        m: fn(usize) -> usize
+        tie: fn({error}, usize) -> usize
+        a: fn() -> usize
+        c: fn() -> bool
+        d: fn() -> usize
+    "#]],
+    );
+    check_diagnostics(
+        text,
+        expect![[r#"
+        108..110: not enough information to infer the type of `id`; add a type annotation to its definition (defined here at 8..10)
+        115..116: not enough information to infer the type of `k`; add a type annotation to its definition (defined here at 34..35)
+        160..162: not enough information to infer the type of `id`; add a type annotation to its definition (defined here at 8..10)
+        196..197: not enough information to infer the type of `k`; add a type annotation to its definition (defined here at 34..35)
+    "#]],
+    );
+}
+
+/// Two conflicts in one unit leave every member of it undecided, bystanders
+/// included: no single member's removal lets the rest agree (#172).
+#[test]
+fn two_conflicts_in_one_unit_leave_all_of_it_undecided() {
+    let text = r#"
+static id = fn (x) { x };
+static k = fn (y, w, u) { w; u; y };
+static m = fn (z) { z };
+static n = fn (v) { v };
+static o = fn (r) { r };
+static tie = fn (p, s, t) { id(p); k(p, s, t); m(s); n(s); o(t) };
+static a = fn () -> usize { id(1) };
+static c = fn () -> bool { k(true, 2, 3) };
+static d = fn () -> usize { m(4) };
+static e = fn () -> bool { n(false) };
+static f = fn () -> usize { o(5) };
+"#;
+    check_signatures(
+        text,
+        expect![[r#"
+        id: {error}
+        k: {error}
+        m: {error}
+        n: {error}
+        o: {error}
+        tie: fn({error}, {error}, {error}) -> {error}
+        a: fn() -> usize
+        c: fn() -> bool
+        d: fn() -> usize
+        e: fn() -> bool
+        f: fn() -> usize
+    "#]],
+    );
+}
+
+/// A destructuring parameter writes its type for the cycle's uses too.
+#[test]
+fn cycle_use_contradicting_a_destructuring_parameter_is_a_mismatch() {
+    let text = r#"
+type Foo = struct { n: usize };
+type Bar = struct { m: usize };
+static f = fn (Foo(struct { n })) -> usize { if n == 0 { 0 } else { g(n) } };
+static g = fn (k) { f(Bar(struct { m = k })) };
+"#;
+    check_signatures(
+        text,
+        expect![[r#"
+        f: fn(Foo) -> usize
+        g: fn(usize) -> usize
+    "#]],
+    );
+    check_diagnostics(
+        text,
+        expect![[r#"
+        165..186: type mismatch: expected `Foo`, found `Bar`
+    "#]],
+    );
+}
+
+/// A hole in the item annotation does not hide what the fn literal writes.
+#[test]
+fn cycle_use_contradicting_a_literal_under_a_holed_annotation_is_a_mismatch() {
+    let text = r#"
+static even: _ = fn (n: usize) -> bool { if n == 0 { true } else { odd(n - 1) } };
+static odd = fn (n) { even(true) };
+"#;
+    check_signatures(
+        text,
+        expect![[r#"
+        even: fn(usize) -> bool
+        odd: fn(usize) -> bool
+    "#]],
+    );
+    check_diagnostics(
+        text,
+        expect![[r#"
+        111..115: type mismatch: expected `usize`, found `bool`
+    "#]],
+    );
+}
+
+/// Uses that disagree on one member leave only it undecided, not the
+/// members it shares variables with.
+#[test]
+fn disagreeing_uses_leave_only_their_member_undecided() {
+    let text = r#"
+static id = fn (x) { x };
+static k = fn (y) { y };
+static pair = fn (p, q) { k(q); id(p) };
+static a = fn () -> usize { k(1) };
+static b = fn () -> usize { id(2) };
+static c = fn () -> bool { id(true) };
+"#;
+    check_signatures(
+        text,
+        expect![[r#"
+        id: {error}
+        k: fn(usize) -> usize
+        pair: fn({error}, usize) -> {error}
+        a: fn() -> usize
+        b: fn() -> usize
+        c: fn() -> bool
+    "#]],
+    );
+    check_diagnostics(
+        text,
+        expect![[r#"
+        84..86: not enough information to infer the type of `id`; add a type annotation to its definition (defined here at 8..10)
+        157..159: not enough information to infer the type of `id`; add a type annotation to its definition (defined here at 8..10)
+        193..195: not enough information to infer the type of `id`; add a type annotation to its definition (defined here at 8..10)
+    "#]],
+    );
+}
+
+/// A safe member used where an `unsafe fn` is expected coerces in a call
+/// cycle too, in either order.
+#[test]
+fn safe_member_used_as_unsafe_fn_in_a_cycle_coerces() {
+    let q_first = r#"
+static apply = fn (f: unsafe fn()) -> () { };
+static q = fn () { p() };
+static p = fn () { apply(q) };
+"#;
+    check_signatures(
+        q_first,
+        expect![[r#"
+        apply: fn(unsafe fn())
+        q: fn()
+        p: fn()
+    "#]],
+    );
+    check_diagnostics(q_first, expect![[r#""#]]);
+    let p_first = r#"
+static apply = fn (f: unsafe fn()) -> () { };
+static p = fn () { apply(q) };
+static q = fn () { p() };
+"#;
+    check_signatures(
+        p_first,
+        expect![[r#"
+        apply: fn(unsafe fn())
+        p: fn()
+        q: fn()
+    "#]],
+    );
+    check_diagnostics(p_first, expect![[r#""#]]);
 }
 
 /// A generic caller is a hard firewall: its body sees `T` as a rigid
@@ -16588,7 +16811,7 @@ static f = fn () -> usize {
 "#,
         expect![[r#"
             48..49: raw borrows are spelled postfix: `x.&raw` / `x.&raw mut`
-            48..58: type mismatch: expected `{number}`, found `{error}.&raw` (`-` requires `{number}` operands at 63..64)
+            48..58: type mismatch: expected `{number}`, found `{number}.&raw` (`-` requires `{number}` operands at 63..64)
             63..64: this `-` continues the expression that ends with the `}` above, rather than starting a new statement; write `;` after that `}` to split them, or move the `-` up onto the same line (or parenthesize the whole expression) if one expression is what you meant
         "#]],
     );

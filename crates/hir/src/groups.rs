@@ -9,8 +9,9 @@
 //! recursion, and its callers' concrete uses — so items are partitioned
 //! into connected components of their reference relation, with every
 //! reference edge added in both directions (a caller constrains the callee
-//! as much as the callee constrains the caller). Each group is inferred in
-//! one unification context, with a shared signature variable per member.
+//! as much as the callee constrains the caller). Each body in a group is
+//! checked once, in a table of its own, with its own copy of each member's
+//! signature; the copies are merged callees first (see [`infer_group`]).
 //! The component condensation is a DAG, so groups only ever ask for
 //! signatures of *other* groups (or of fully-typed items, whose signatures
 //! are read off their annotations): no query cycles.
@@ -33,10 +34,10 @@ use base_db::{Db, SourceFile};
 use ena::unify::InPlaceUnificationTable;
 use rustc_hash::FxHashMap;
 
-use crate::constraint::resolve_fully;
-use crate::infer::InferCtx;
-use crate::library::{LibraryId, library_item_ids};
-use crate::ty::{ParamScope, Ty, TyVar, TyVarValue, erase_infer, lower_type_ref_in};
+use crate::constraint::{Constraints, resolve_fully};
+use crate::infer::{InferCtx, InferenceResult};
+use crate::library::{LibraryId, library_item_ids, library_of};
+use crate::ty::{ParamScope, Ty, TyVar, TyVarValue, erase_infer, export_ty, lower_type_ref_in};
 use crate::{ItemLoc, item_loc};
 
 /// One inference group per salsa key.
@@ -61,6 +62,9 @@ pub struct InferenceGroups {
     pub sources: Vec<Vec<ItemLoc>>,
     /// Each group member → its group index and its position in the group.
     pub slot: FxHashMap<ItemLoc, (u32, usize)>,
+    /// Each fully typed source → the group it feeds and its position among
+    /// the group's bodies, after the members.
+    pub source_slot: FxHashMap<ItemLoc, (u32, usize)>,
 }
 
 #[salsa::tracked(returns(ref))]
@@ -179,16 +183,21 @@ pub fn inference_groups<'db>(db: &'db dyn Db, library: LibraryId<'db>) -> Infere
             slot.insert(items[member].0.clone(), (group_index as u32, position));
         }
     }
-    let mut sources = vec![Vec::new(); state.groups.len()];
+    let mut sources: Vec<Vec<ItemLoc>> = vec![Vec::new(); state.groups.len()];
+    let mut source_slot = FxHashMap::default();
     for (source, refs) in source_refs {
         if let Some(&(group, _)) = slot.get(&items[refs[0]].0) {
-            sources[group as usize].push(source);
+            let feeds = &mut sources[group as usize];
+            let position = state.groups[group as usize].len() + feeds.len();
+            source_slot.insert(source.clone(), (group, position));
+            feeds.push(source);
         }
     }
     InferenceGroups {
         groups: state.groups,
         sources,
         slot,
+        source_slot,
     }
 }
 
@@ -389,12 +398,72 @@ impl Tarjan<'_> {
     }
 }
 
-/// Signatures of one group's members (parallel to its member list).
+/// What one group's inference produces: its members' signatures, and the
+/// result of every body it checked.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct GroupSignatures {
+    /// Parallel to the group's member list.
     pub signatures: Vec<Ty>,
+    /// Parallel to the member list: whether uses of the member say "add a
+    /// type annotation". Its signature has an `{error}` the group could not
+    /// decide, and its own body isn't broken where it produces a value
+    /// (that body already carries the error, so its uses say nothing).
+    pub needs_annotation: Vec<bool>,
+    /// Each body's inference result: the members in member order, then the
+    /// fully typed bodies feeding the group in [`InferenceGroups::sources`]
+    /// order.
+    pub results: Vec<std::sync::Arc<InferenceResult>>,
 }
 
+/// The result of `item`'s body when an inference group checked it: a
+/// member, or a fully typed body feeding a group. `None` for every other
+/// item.
+pub fn group_result<'db>(
+    db: &'db dyn Db,
+    item: crate::ItemId<'db>,
+) -> Option<std::sync::Arc<InferenceResult>> {
+    let (group, position) = body_group(db, item)?;
+    infer_group(db, GroupId::new(db, library_of(db, item.file(db)), group))
+        .results
+        .get(position as usize)
+        .cloned()
+}
+
+/// The group that checks `item`'s body, and the body's position in its
+/// [`GroupSignatures::results`]. Its own query, so a change to the library's
+/// groups re-runs only the bodies whose group or position it changes.
+/// Decided from the item alone where it can be, so an item that can't be
+/// in a group never reads its library's groups.
+#[salsa::tracked]
+pub fn body_group<'db>(db: &'db dyn Db, item: crate::ItemId<'db>) -> Option<(u32, u32)> {
+    let data = crate::item_data(db, item).as_ref()?;
+    let fully_typed = data.type_ref.as_ref().is_some_and(|tr| tr.is_fully_typed());
+    let candidate = if fully_typed {
+        is_constraint_source(db, item)
+    } else {
+        item.member(db).is_none()
+            && matches!(data.kind, crate::item_tree::ItemKind::Value(_))
+            && data.generics.is_empty()
+    };
+    if !candidate {
+        return None;
+    }
+    let groups = inference_groups(db, library_of(db, item.file(db)));
+    let loc = item_loc(db, item);
+    let slots = if fully_typed {
+        &groups.source_slot
+    } else {
+        &groups.slot
+    };
+    let &(group, position) = slots.get(&loc)?;
+    Some((group, position as u32))
+}
+
+/// Inference for one binding group: checks every body the group covers
+/// once, in its own table, and returns the members' signatures and every
+/// body's result. Callees are checked before their callers, and the uses
+/// fill what their bodies left open together (T11 in
+/// `docs/design/types-and-data.md`).
 #[salsa::tracked(returns(ref))]
 pub fn infer_group<'db>(db: &'db dyn Db, group: GroupId<'db>) -> GroupSignatures {
     let groups = inference_groups(db, group.library(db));
@@ -402,140 +471,534 @@ pub fn infer_group<'db>(db: &'db dyn Db, group: GroupId<'db>) -> GroupSignatures
         return GroupSignatures::default();
     };
     let ids = library_item_ids(db, group.library(db));
-
-    let mut table: InPlaceUnificationTable<TyVar> = InPlaceUnificationTable::new();
-    // One signature variable per member; in-group references resolve to
-    // these instead of calling `signature` (which would cycle).
     let member_locs: Vec<ItemLoc> = members.iter().map(|&i| item_loc(db, ids[i])).collect();
-    let in_group: FxHashMap<ItemLoc, Ty> = member_locs
+    let member_of: FxHashMap<ItemLoc, usize> = member_locs
         .iter()
-        .map(|loc| (loc.clone(), Ty::Infer(table.new_key(TyVarValue::Unknown))))
+        .enumerate()
+        .map(|(i, loc)| (loc.clone(), i))
+        .collect();
+    let bodies: Vec<crate::ItemId<'db>> = members
+        .iter()
+        .map(|&i| ids[i])
+        .chain(
+            groups.sources[group.index(db) as usize]
+                .iter()
+                .map(|source| source.to_id(db)),
+        )
+        .collect();
+    let member_count = members.len();
+    let wrong: Vec<Wrong> = (0..member_count)
+        .map(|m| wrong_as_a_whole(db, bodies[m]))
+        .collect();
+    // The members each body mentions; a member always has its own copy.
+    let mentioned: Vec<Vec<usize>> = bodies
+        .iter()
+        .enumerate()
+        .map(|(b, &item)| {
+            let mut mentioned: Vec<usize> = crate::resolutions(db, item)
+                .values()
+                .filter_map(|resolution| match resolution {
+                    crate::Resolution::Item(loc) => member_of.get(loc).copied(),
+                    _ => None,
+                })
+                .chain((b < member_count).then_some(b))
+                .collect();
+            mentioned.sort_unstable();
+            mentioned.dedup();
+            mentioned
+        })
         .collect();
 
-    // Each member's recorded variables, for the walk after the loop.
-    let mut recorded = Vec::new();
-    // One pass, in this order, no fixpoint: whichever body is processed
-    // first constrains the shared variables — its signature, another
-    // member's signature via a call, or an annotation hole — and that
-    // commitment wins; later members must agree with it (or poison below).
-    // So this processing order is load-bearing, not incidental.
-    for (&member, loc) in members.iter().zip(&member_locs) {
-        let item = ids[member];
-        let file = item.file(db);
-        let body = crate::body::body(db, item);
-        let Some(root) = body.root else {
-            // No initializer: nothing to infer from (parse errors cover it).
-            poison(&mut table, &in_group[loc]);
-            continue;
-        };
-        // Whatever annotation this member has is hole-bearing (that's why
-        // it's in a group): lower it here as a partial contract — the
-        // written part constrains the body, holes stay unconstrained for
-        // the body to fill.
-        let expected = crate::item_data(db, item)
-            .as_ref()
-            .and_then(|it| it.type_ref.as_ref())
-            .map(|type_ref| {
-                lower_type_ref_in(db, file, type_ref, &mut table, &ParamScope::default())
-            })
-            .unwrap_or_else(|| Ty::Infer(table.new_key(TyVarValue::Unknown)));
-        let mut ctx = InferCtx::new(
-            db,
-            file,
-            body,
-            crate::resolutions(db, item),
-            &mut table,
-            &in_group,
-            true,
-        );
-        let root_ty = ctx.infer_expr(root, &expected);
-        let unified = ctx.adopt(&in_group[loc], &root_ty);
-        // Solve this member's deferred joins *before* the next member runs:
-        // a member's signature is decided by its own body (its axioms and
-        // conclusions); later members may only fill variables the body left
-        // genuinely free, never override its conclusions. Without this, a
-        // use like `print(g(..))` in a sibling would set an unannotated
-        // `g`'s return type to `str` while its branches say `usize` — and
-        // the mismatch would be visible from no single item.
-        ctx.solve();
-        let left_unbound = ctx.left_unbound().to_vec();
-        let mut own_error = false;
-        if !left_unbound.is_empty() || root_ty.contains_error() {
-            // An error written into the type itself.
-            own_error = resolve_fully(&mut table, &root_ty).contains_error();
-            if !left_unbound.is_empty() {
-                recorded.push((loc, left_unbound));
+    let mut solver = Solver {
+        table: InPlaceUnificationTable::new(),
+        constraints: Constraints::new(true),
+        decided: vec![Ty::Error; member_count],
+        own: vec![Ty::Error; member_count],
+        met_error: vec![Vec::new(); member_count],
+        fills: vec![Vec::new(); bodies.len()],
+    };
+    let mut ctxs: Vec<Option<InferCtx<'db>>> = (0..bodies.len()).map(|_| None).collect();
+
+    // The members, a cycle of calls at a time, callees first.
+    let calls: Vec<Vec<usize>> = (0..member_count)
+        .map(|m| mentioned[m].iter().copied().filter(|&x| x != m).collect())
+        .collect();
+    for cycle in call_cycles(&calls) {
+        let mut internal: Vec<Vec<(usize, Ty)>> = vec![Vec::new(); bodies.len()];
+        for &b in &cycle {
+            let mut ctx = solver.check(db, &bodies, &member_locs, &mentioned[b], &cycle, b);
+            internal[b] = solver.export(&mut ctx, &member_locs, &mentioned[b], &cycle, b);
+            ctxs[b] = Some(ctx);
+        }
+        for &m in &cycle {
+            solver.decided[m] = match wrong[m] {
+                Wrong::No => solver.own[m].clone(),
+                _ => Ty::Error,
+            };
+        }
+        solver.unify_uses(&internal);
+    }
+    // The members' uses fill what their callees left open, together.
+    let member_fills: Vec<Vec<(usize, Ty)>> = (0..bodies.len())
+        .map(|b| {
+            if b < member_count {
+                std::mem::take(&mut solver.fills[b])
+            } else {
+                Vec::new()
             }
-        } else {
-            // Correct code takes this path. An error that reaches one of
-            // the type's variables meets the unify guard on the way and is
-            // recorded, so with nothing recorded the type is error-free.
-            debug_assert!(!resolve_fully(&mut table, &root_ty).contains_error());
+        })
+        .collect();
+    solver.unify_uses(&member_fills);
+
+    let mut own_error = vec![false; member_count];
+    for m in 0..member_count {
+        // A member whose own body went wrong where it produces a value
+        // carries its own error; its uses say nothing.
+        let mut own_produced = rustc_hash::FxHashSet::default();
+        solver.own[m].produced_vars(&mut own_produced);
+        own_error[m] = wrong[m] == Wrong::OwnError
+            || solver.own[m] == Ty::Error
+            || solver.met_error[m]
+                .iter()
+                .any(|var| own_produced.contains(var));
+        // A variable its body met an error on that is open in what the
+        // member produces becomes `{error}`, so no fully typed body decides
+        // what the body got wrong. Parameters stay open for uses.
+        let mut produced = rustc_hash::FxHashSet::default();
+        resolve_fully(&mut solver.table, &solver.decided[m]).produced_vars(&mut produced);
+        for &var in &solver.met_error[m] {
+            if let Ty::Infer(root) = resolve_fully(&mut solver.table, &Ty::Infer(var))
+                && produced.contains(&root)
+            {
+                solver.table.union_value(root, TyVarValue::Known(Ty::Error));
+            }
         }
-        if !unified || own_error {
-            // The body contradicts what the group already committed this
-            // member to (called as a function in one body, bound to a plain
-            // value in another), or an error is written into its type: no
-            // signature is right, so poison it.
-            // Poisoning wins regardless of the solved joins: a poisoned
-            // variable stays poisoned, and poison beats an earlier
-            // commitment.
-            poison(&mut table, &in_group[loc]);
-        }
-        // Per-expression results and diagnostics are the per-item `infer`
-        // query's business; only the signatures leave this query.
     }
 
-    // A variable a body met an error on that is open in what its member
-    // produces (the return of `fn () { missing }`) becomes `{error}`, so no
-    // fully typed body decides what the body got wrong. Parameters stay
-    // open for uses.
-    for (loc, left_unbound) in &recorded {
-        let own = resolve_fully(&mut table, &in_group[*loc]);
-        poison_produced(&mut table, &own, left_unbound);
+    // The fully typed bodies, against what the members decided; then their
+    // fills, together.
+    for b in member_count..bodies.len() {
+        let mut ctx = solver.check(db, &bodies, &member_locs, &mentioned[b], &[], b);
+        solver.export(&mut ctx, &member_locs, &mentioned[b], &[], b);
+        ctxs[b] = Some(ctx);
     }
+    let source_fills = std::mem::take(&mut solver.fills);
+    solver.unify_uses(&source_fills);
 
-    // Fully typed bodies last, so they fill only what the members' own
-    // bodies left open (T11). One that disagrees changes nothing here; its
-    // own `infer` reports the mismatch. Its own errors (an unknown type in
-    // its signature, say) fill nothing either, so they aren't repeated at
-    // every use of its callees.
-    for source in &groups.sources[group.index(db) as usize] {
-        crate::infer::check_item_body(db, source.to_id(db), &mut table, &in_group, true).solve();
+    // The decided signatures, as the group publishes them: what no body
+    // determined is `{error}`, which the needs-annotation diagnostic is for.
+    let signatures: Vec<Ty> = (0..member_count)
+        .map(|m| erase_infer(&resolve_fully(&mut solver.table, &solver.decided[m])))
+        .collect();
+    let needs_annotation: Vec<bool> = signatures
+        .iter()
+        .zip(&own_error)
+        .map(|(sig, &own_error)| !own_error && sig.contains_error())
+        .collect();
+
+    let mut results = Vec::with_capacity(bodies.len());
+    for (b, ctx) in ctxs.into_iter().enumerate() {
+        let mut ctx = ctx.expect("every body of the group is checked");
+        // A member's own body sees what its uses filled in, open parts
+        // staying open, so its literals report only what nobody determined;
+        // another member's copy gets the published signature, exactly as
+        // a body outside the group would.
+        let mut vars: FxHashMap<TyVar, Ty> = FxHashMap::default();
+        for &m in &mentioned[b] {
+            let exported = if m == b {
+                solver.instance(m, &mut vars, &mut |kind| ctx.new_var(kind))
+            } else {
+                signatures[m].clone()
+            };
+            let copy = ctx.copies()[&member_locs[m]].clone();
+            ctx.adopt_exported(&copy, &exported);
+        }
+        ctx.poison_left_unbound();
+        ctx.report_undetermined_members(|loc| needs_annotation[member_of[loc]]);
+        results.push(std::sync::Arc::new(ctx.finish()));
     }
 
     GroupSignatures {
-        signatures: member_locs
-            .iter()
-            // Undetermined leftovers become `{error}` — a `TyVar` is only
-            // meaningful inside this query's own table, and an
-            // undetermined signature is what the needs-annotation
-            // diagnostic exists for. (Poisoned members already resolve to
-            // `Ty::Error` and pass through unchanged.)
-            .map(|loc| erase_infer(&resolve_fully(&mut table, &in_group[loc])))
-            .collect(),
+        signatures,
+        needs_annotation,
+        results,
     }
 }
 
-/// Poison each of `recorded` that is open in what `own` produces.
-fn poison_produced(table: &mut InPlaceUnificationTable<TyVar>, own: &Ty, recorded: &[TyVar]) {
-    let mut produced = rustc_hash::FxHashSet::default();
-    own.produced_vars(&mut produced);
-    for &var in recorded {
-        let root = resolve_fully(table, &Ty::Infer(var));
-        if matches!(root, Ty::Infer(root) if produced.contains(&root)) {
-            poison(table, &root);
+/// What member `item` writes of its type, lowered into `table` with
+/// everything else fresh: its annotation and its fn literal's parameters
+/// and return.
+fn written(db: &dyn Db, item: crate::ItemId<'_>, table: &mut InPlaceUnificationTable<TyVar>) -> Ty {
+    use crate::body::ExprData;
+    let file = item.file(db);
+    let mut lower = |type_ref: Option<&crate::item_tree::TypeRef>| match type_ref {
+        Some(type_ref) => lower_type_ref_in(db, file, type_ref, table, &ParamScope::default()),
+        None => Ty::Infer(table.new_key(TyVarValue::Unknown)),
+    };
+    let annotation = crate::item_data(db, item)
+        .as_ref()
+        .and_then(|it| it.type_ref.as_ref())
+        .map(|type_ref| lower(Some(type_ref)));
+    let body = crate::body::body(db, item);
+    let literal = match body.root.map(|root| &body.exprs[root]) {
+        Some(ExprData::FnLiteral {
+            params, ret_type, ..
+        }) => {
+            let params = params
+                .iter()
+                .map(|param| crate::infer::literal_param_ty(db, file, body, param, &mut lower))
+                .collect();
+            Some(Ty::fn_type_with(false, params, lower(ret_type.as_ref())))
+        }
+        _ => None,
+    };
+    match (annotation, literal) {
+        // Both are written (`: _ = fn (n: usize) ...`): each fills the
+        // other's holes. A conflict between them is the member's own
+        // body's error, so the annotation alone stands then.
+        (Some(annotation), Some(literal)) => {
+            let mut constraints = Constraints::default();
+            let snapshot = constraints.snapshot(table);
+            if constraints.unify_exported(table, &annotation, &literal) {
+                constraints.commit(table, snapshot);
+            } else {
+                constraints.rollback_to(table, snapshot);
+            }
+            annotation
+        }
+        (Some(written), None) | (None, Some(written)) => written,
+        (None, None) => lower(None),
+    }
+}
+
+/// Why member `item` is wrong as a whole before its body is checked, if it
+/// is.
+fn wrong_as_a_whole(db: &dyn Db, item: crate::ItemId<'_>) -> Wrong {
+    if crate::body::body(db, item).root.is_none() {
+        return Wrong::OwnError;
+    }
+    let broken = crate::item_data(db, item)
+        .as_ref()
+        .and_then(|it| it.type_ref.as_ref())
+        .is_some_and(|type_ref| {
+            lower_type_ref_in(
+                db,
+                item.file(db),
+                type_ref,
+                &mut InPlaceUnificationTable::new(),
+                &ParamScope::default(),
+            )
+            .contains_error()
+        });
+    if broken { Wrong::Contract } else { Wrong::No }
+}
+
+/// See [`wrong_as_a_whole`].
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Wrong {
+    No,
+    /// Its body has no value.
+    OwnError,
+    /// Its written annotation is broken.
+    Contract,
+}
+
+/// The members' signatures as the group decides them, in a table of
+/// their own (no body's variables are in it).
+struct Solver {
+    table: InPlaceUnificationTable<TyVar>,
+    /// Errors abstain: a body's own mistake decides nothing about a member.
+    constraints: Constraints,
+    /// Per member, its decided signature.
+    decided: Vec<Ty>,
+    /// Per member, its own body's copy of its signature.
+    own: Vec<Ty>,
+    /// Per member, the variables its body met an error on.
+    met_error: Vec<Vec<TyVar>>,
+    /// Per body, its uses of members decided before it was checked: what
+    /// they fill in, kept apart until all of them fill together.
+    fills: Vec<Vec<(usize, Ty)>>,
+}
+
+impl Solver {
+    /// An instance of member `m`'s decided signature in another table: each
+    /// variable becomes the one `vars` has for it, else a new one `mint`
+    /// makes of its kind, so the links between them survive.
+    fn instance(
+        &mut self,
+        m: usize,
+        vars: &mut FxHashMap<TyVar, Ty>,
+        mint: &mut impl FnMut(TyVarValue) -> Ty,
+    ) -> Ty {
+        let decided = resolve_fully(&mut self.table, &self.decided[m]);
+        export_ty(&decided, &mut |var| {
+            let kind = self.table.probe_value(var);
+            vars.entry(var).or_insert_with(|| mint(kind)).clone()
+        })
+    }
+
+    /// Check body `b`, with a copy of the signature of each member it
+    /// mentions: fresh for itself, what a member of its `cycle` writes,
+    /// else an instance of what the member's body decided.
+    fn check<'db>(
+        &mut self,
+        db: &'db dyn Db,
+        bodies: &[crate::ItemId<'db>],
+        member_locs: &[ItemLoc],
+        mentioned: &[usize],
+        cycle: &[usize],
+        b: usize,
+    ) -> InferCtx<'db> {
+        let mut table = InPlaceUnificationTable::new();
+        let mut vars: FxHashMap<TyVar, Ty> = FxHashMap::default();
+        let copies = mentioned
+            .iter()
+            .map(|&m| {
+                let copy = if m == b {
+                    Ty::Infer(table.new_key(TyVarValue::Unknown))
+                } else if cycle.contains(&m) {
+                    // What its annotation writes is final here too; only
+                    // its holes are the cycle's to decide.
+                    written(db, bodies[m], &mut table)
+                } else {
+                    self.instance(m, &mut vars, &mut |kind| Ty::Infer(table.new_key(kind)))
+                };
+                (member_locs[m].clone(), copy)
+            })
+            .collect();
+        let mut ctx = crate::infer::check_item_body(db, bodies[b], table, copies, true);
+        // The body's own joins are settled by the body alone.
+        ctx.solve();
+        ctx
+    }
+
+    /// Move body `b`'s copies into the solver's table, one variable per
+    /// variable of the body's table so the links between them survive: its
+    /// own copy into [`Self::own`], its uses of members outside its
+    /// `cycle` into [`Self::fills`]. Returns its uses of the cycle's
+    /// members.
+    fn export(
+        &mut self,
+        ctx: &mut InferCtx<'_>,
+        member_locs: &[ItemLoc],
+        mentioned: &[usize],
+        cycle: &[usize],
+        b: usize,
+    ) -> Vec<(usize, Ty)> {
+        let mut vars: FxHashMap<TyVar, Ty> = FxHashMap::default();
+        let mut internal = Vec::new();
+        for &m in mentioned {
+            let copy = ctx.copies()[&member_locs[m]].clone();
+            let resolved = ctx.resolve(&copy);
+            let moved = export_ty(&resolved, &mut |var| {
+                vars.entry(var)
+                    .or_insert_with(|| Ty::Infer(self.table.new_key(ctx.var_kind(var))))
+                    .clone()
+            });
+            if m == b {
+                self.own[m] = if ctx.root_has_error() {
+                    Ty::Error
+                } else {
+                    moved
+                };
+            } else if cycle.contains(&m) {
+                internal.push((m, moved));
+            } else {
+                self.fills[b].push((m, moved));
+            }
+        }
+        if b < self.own.len() {
+            let errors = ctx.left_unbound().to_vec();
+            self.met_error[b] = errors
+                .into_iter()
+                .filter_map(|var| match ctx.resolve(&Ty::Infer(var)) {
+                    Ty::Infer(root) => match vars.get(&root) {
+                        Some(Ty::Infer(moved)) => Some(*moved),
+                        _ => None,
+                    },
+                    _ => None,
+                })
+                .collect();
+        }
+        internal
+    }
+
+    fn unify_uses(&mut self, uses: &[Vec<(usize, Ty)>]) {
+        unify_uses(
+            &mut self.table,
+            &mut self.constraints,
+            &mut self.decided,
+            uses,
+        );
+    }
+}
+
+/// The cycles of `calls` (its strongly connected components), each sorted,
+/// callees before their callers.
+fn call_cycles(calls: &[Vec<usize>]) -> Vec<Vec<usize>> {
+    let mut state = Tarjan {
+        edges: calls,
+        include: &vec![true; calls.len()],
+        index: vec![None; calls.len()],
+        low: vec![0; calls.len()],
+        on_stack: vec![false; calls.len()],
+        stack: Vec::new(),
+        next_index: 0,
+        groups: Vec::new(),
+    };
+    for node in 0..calls.len() {
+        if state.index[node].is_none() {
+            state.visit(node);
+        }
+    }
+    // Tarjan finishes a component only after everything it reaches.
+    state.groups
+}
+
+/// Unify each body's `uses` with the members' `decided` signatures,
+/// together. Members linked by a shared variable succeed or fail as one,
+/// whatever order they come in. When a unit fails, the members whose own
+/// uses disagree are left undecided (`{error}`) and the rest are tried
+/// again; when no member's uses disagree alone, the whole unit is.
+fn unify_uses(
+    table: &mut InPlaceUnificationTable<TyVar>,
+    constraints: &mut Constraints,
+    decided: &mut [Ty],
+    uses: &[Vec<(usize, Ty)>],
+) {
+    // Each used member's uses; members nobody uses here are untouched.
+    let mut uses_of: FxHashMap<usize, Vec<&Ty>> = FxHashMap::default();
+    for (m, ty) in uses.iter().flatten() {
+        uses_of.entry(*m).or_default().push(ty);
+    }
+    let mut used: Vec<usize> = uses_of.keys().copied().collect();
+    used.sort_unstable();
+    // Link the used members through the variables their signatures and
+    // uses share.
+    let mut unit: FxHashMap<usize, usize> = used.iter().map(|&m| (m, m)).collect();
+    fn root(unit: &mut FxHashMap<usize, usize>, i: usize) -> usize {
+        let parent = unit[&i];
+        if parent == i {
+            return i;
+        }
+        let r = root(unit, parent);
+        unit.insert(i, r);
+        r
+    }
+    let mut owner: FxHashMap<TyVar, usize> = FxHashMap::default();
+    for &m in &used {
+        let mut vars = rustc_hash::FxHashSet::default();
+        resolve_fully(table, &decided[m]).open_vars(&mut vars);
+        for ty in &uses_of[&m] {
+            resolve_fully(table, ty).open_vars(&mut vars);
+        }
+        for var in vars {
+            let other = *owner.entry(var).or_insert(m);
+            let (a, b) = (root(&mut unit, m), root(&mut unit, other));
+            unit.insert(a, b);
+        }
+    }
+    let mut units: Vec<Vec<usize>> = Vec::new();
+    let mut unit_at: FxHashMap<usize, usize> = FxHashMap::default();
+    for &m in &used {
+        let head = root(&mut unit, m);
+        let at = *unit_at.entry(head).or_insert_with(|| {
+            units.push(Vec::new());
+            units.len() - 1
+        });
+        units[at].push(m);
+    }
+    for mut members in units {
+        while !members.is_empty() {
+            let snapshot = constraints.snapshot(table);
+            if agree(table, constraints, decided, &uses_of, &members) {
+                constraints.commit(table, snapshot);
+                break;
+            }
+            constraints.rollback_to(table, snapshot);
+            let disagreeing: Vec<usize> = members
+                .iter()
+                .copied()
+                .filter(|&m| !probe_agree(table, constraints, decided, &uses_of, &[m]))
+                .collect();
+            let disagreeing = if disagreeing.is_empty() {
+                // The conflict is only through shared variables: blame the
+                // members whose removal lets the rest agree, or all of them
+                // if none does.
+                let needed = in_conflict(table, constraints, decided, &uses_of, &members);
+                if needed.is_empty() {
+                    members.clone()
+                } else {
+                    needed
+                }
+            } else {
+                disagreeing
+            };
+            for &m in &disagreeing {
+                decided[m] = Ty::Error;
+            }
+            members.retain(|m| !disagreeing.contains(m));
         }
     }
 }
 
-/// Commit a member's signature variable to `Ty::Error`. `unify_values`
-/// lets a committed `Ty::Error` win over the (wrong) type the variable was
-/// already committed to, so this undoes even an earlier guess; the poisoned
-/// signature resolves to `{error}` and the needs-annotation diagnostic
-/// takes over.
-fn poison(table: &mut InPlaceUnificationTable<TyVar>, sig: &Ty) {
-    if let Ty::Infer(var) = sig {
-        table.union_value(*var, TyVarValue::Known(Ty::Error));
-    }
+/// The `members` whose removal lets the rest agree.
+fn in_conflict(
+    table: &mut InPlaceUnificationTable<TyVar>,
+    constraints: &mut Constraints,
+    decided: &[Ty],
+    uses_of: &FxHashMap<usize, Vec<&Ty>>,
+    members: &[usize],
+) -> Vec<usize> {
+    members
+        .iter()
+        .copied()
+        .filter(|&m| {
+            let rest: Vec<usize> = members.iter().copied().filter(|&o| o != m).collect();
+            probe_agree(table, constraints, decided, uses_of, &rest)
+        })
+        .collect()
+}
+
+/// Whether the uses of `members` agree with their decided signatures,
+/// leaving the table as it was.
+fn probe_agree(
+    table: &mut InPlaceUnificationTable<TyVar>,
+    constraints: &mut Constraints,
+    decided: &[Ty],
+    uses_of: &FxHashMap<usize, Vec<&Ty>>,
+    members: &[usize],
+) -> bool {
+    let snapshot = constraints.snapshot(table);
+    let agrees = agree(table, constraints, decided, uses_of, members);
+    constraints.rollback_to(table, snapshot);
+    agrees
+}
+
+/// Unify the uses of each of `members` with its decided signature.
+fn agree(
+    table: &mut InPlaceUnificationTable<TyVar>,
+    constraints: &mut Constraints,
+    decided: &[Ty],
+    uses_of: &FxHashMap<usize, Vec<&Ty>>,
+    members: &[usize],
+) -> bool {
+    members.iter().all(|&m| {
+        uses_of[&m]
+            .iter()
+            .all(|ty| unify_use(table, constraints, &decided[m], ty))
+    })
+}
+
+/// Unify one use with a member's decided signature. Exact, safety
+/// included: a body's copy is the member's type, not a value meeting a
+/// position, so where the body passed it as an `unsafe fn` its own safety
+/// stayed open for this to decide (#168).
+fn unify_use(
+    table: &mut InPlaceUnificationTable<TyVar>,
+    constraints: &mut Constraints,
+    decided: &Ty,
+    use_ty: &Ty,
+) -> bool {
+    constraints.unify_exported(table, decided, use_ty)
 }
