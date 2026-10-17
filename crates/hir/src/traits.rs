@@ -668,20 +668,23 @@ pub struct BoundDotOffer {
     pub sig: Ty,
     /// How the dot reaches the member: as written, or through a written borrow.
     pub reach: crate::ty::DotReach,
+    /// The call is refused for want of a `&mut` ([`crate::ty::DotOffer`]).
+    pub refused: bool,
 }
 
 /// What a receiver of type `receiver_ty` may be offered after the dot,
 /// when it is rigid — the bounds of the param it resolves to, narrowed by
 /// resolution's own rule ([`narrow_by_name`]) and kept when
-/// [`crate::ty::dot_reach`] reaches it, including the borrow-`Self`
+/// [`crate::ty::dot_offer`] reaches it, including the borrow-`Self`
 /// requirements an owned receiver reaches through a written `.&`/`.&mut`.
 ///
 /// Reads the receiver exactly as `infer_dot_call` reads it: a BORROW
 /// reaches the referent's bounds (inside a generic body `T.&mut::<@z>` is
-/// the very shape a `Self.&mut`-taking requirement is called on), and the
-/// borrow's mutability is the receiver shape [`crate::ty::dot_reach`]
-/// judges against. `owner` is the body being edited — a param of any other
-/// binder cannot occur in it, and gets nothing rather than a guess.
+/// the very shape a `Self.&mut`-taking requirement is called on).
+/// `exclusive` is whether the receiver can provide a `&mut`; a requirement
+/// that needs one it cannot is offered refused ([`crate::ty::dot_offer`]).
+/// `owner` is the body being edited — a param of any other binder cannot
+/// occur in it, and gets nothing rather than a guess.
 ///
 /// TWO recorded divergences from what a call at that dot would resolve to,
 /// each ruled deliberately:
@@ -704,12 +707,12 @@ pub fn bound_dot_offers<'db>(
     db: &'db dyn Db,
     owner: crate::ItemId<'db>,
     receiver_ty: &Ty,
+    exclusive: bool,
 ) -> Vec<BoundDotOffer> {
     let member_recv = match receiver_ty {
         Ty::Borrow { referent, .. } => &**referent,
         _ => receiver_ty,
     };
-    let receiver_shape = crate::ty::ReceiverShape::of(receiver_ty);
     let Ty::Param(param) = member_recv else {
         return Vec::new();
     };
@@ -743,14 +746,17 @@ pub fn bound_dot_offers<'db>(
         let Some(sig) = lower_requirement_sig(db, trait_, req, trait_, self_ty.clone()) else {
             continue;
         };
-        let reach = crate::ty::dot_reach_of(&sig, &self_ty, receiver_shape);
-        if let Some(reach) = reach {
-            out.push(BoundDotOffer {
-                name: candidate.name.to_owned(),
-                sig,
-                reach,
-            });
-        }
+        let Some(offer) = crate::ty::self_position_of(&sig, &self_ty)
+            .and_then(|position| crate::ty::dot_offer(receiver_ty, exclusive, position))
+        else {
+            continue;
+        };
+        out.push(BoundDotOffer {
+            name: candidate.name.to_owned(),
+            sig,
+            reach: offer.reach,
+            refused: offer.refused,
+        });
     }
     out
 }
