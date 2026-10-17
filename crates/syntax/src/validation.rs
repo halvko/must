@@ -198,9 +198,37 @@ pub(crate) fn validate(root: &SyntaxNode) -> Vec<SyntaxError> {
             // (see `grammar::type_core`'s AMP arm). `T.&raw` stays a distinct
             // node (`RawPtrType`).
             reject_prefix_borrow_type(&borrow_type, &mut errors);
+        } else if let Some(addr_of) = ast::AddrOfExpr::cast(node.clone()) {
+            reject_raw_mut(addr_of.raw_token(), addr_of.mut_token(), &mut errors);
+        } else if let Some(raw_ptr) = ast::RawPtrType::cast(node.clone()) {
+            reject_raw_mut(raw_ptr.raw_token(), raw_ptr.mut_token(), &mut errors);
         }
     }
     errors
+}
+
+/// The migration diagnostic for `x.&raw mut` / `T.&raw mut`, with a fix that deletes the `mut`.
+fn reject_raw_mut(
+    raw: Option<SyntaxToken>,
+    mut_token: Option<SyntaxToken>,
+    errors: &mut Vec<SyntaxError>,
+) {
+    let (Some(raw), Some(mut_token)) = (raw, mut_token) else {
+        return;
+    };
+    errors.push(SyntaxError {
+        message: "`.&raw mut` is spelled `.&raw`: there is one raw pointer kind, and whether \
+                  a write through it is allowed depends on the place it was taken from"
+            .to_owned(),
+        range: mut_token.text_range(),
+        fix: Some(Fix {
+            label: "Remove `mut`".to_owned(),
+            edits: vec![TextEdit {
+                range: TextRange::new(raw.text_range().end(), mut_token.text_range().end()),
+                insert: String::new(),
+            }],
+        }),
+    });
 }
 
 /// The semantically-supported member contexts: inherent members
@@ -1600,7 +1628,7 @@ fn reject_stray_type_binder(
     });
 }
 
-/// `unsafe extern static read: unsafe fn(u8.&raw mut, usize) -> isize;`
+/// `unsafe extern static read: unsafe fn(u8.&raw, usize) -> isize;`
 fn validate_extern_static(item: &ast::StaticItem, errors: &mut Vec<SyntaxError>) {
     let Some(head) = item.head() else {
         return;

@@ -624,7 +624,7 @@ static main = fn { print(
         // noise, no UB.
         check(
             r#"
-type HeapVec = struct::<T> { ptr: T.&raw mut, len: usize, cap: usize };
+type HeapVec = struct::<T> { ptr: T.&raw, len: usize, cap: usize };
 static heapvec_new = fn::<T>() -> HeapVec::<T> {
     HeapVec::<T>(struct { ptr = dangling::<T>(), len = 0, cap = 0 })
 };
@@ -786,8 +786,8 @@ static f = fn(o: Opt) -> usize {
     fn arena_exhaustion_is_a_value_at_cli_level() {
         check(
             r#"
-type ArenaState = struct::<T> { base: T.&raw mut, cap: usize, cursor: usize };
-type Arena = struct::<T> { state: ArenaState::<T>.&raw mut };
+type ArenaState = struct::<T> { base: T.&raw, cap: usize, cursor: usize };
+type Arena = struct::<T> { state: ArenaState::<T>.&raw };
 static arena_new = fn::<T>(cap: usize) -> Arena::<T> {
     let state = match alloc_array::<ArenaState::<T>>(1) {
         AllocResult::Ok(p) => p,

@@ -462,7 +462,7 @@ static overwrite_referent = fn::<@a>(m: Res.&mut::<@a>) -> () { m.* = make(2); }
     // is the caller's word.
     check_linear(
         r#"
-static overwrite_raw = fn(p: Res.&raw mut) -> () { unsafe { p.* = make(2); }; };
+static overwrite_raw = fn(p: Res.&raw) -> () { unsafe { p.* = make(2); }; };
 "#,
         expect![[r#""#]],
     );
@@ -1555,7 +1555,7 @@ static take = fn(b: Box::<Res>) -> () {
 /// so the refusal cases below have nowhere to live except a copy.
 const STRING_PRELUDE: &str = r#"
 type String = struct {
-    ptr: u8.&raw mut,
+    ptr: u8.&raw,
     len: usize,
     cap: usize,
 } only move with {
@@ -1618,7 +1618,7 @@ static leak = fn(text: str) -> () {
 };
 "#,
         expect![[r#"
-            996..1054: `s` is not consumed on this path; its type has no `forget` capability, so every path must consume it (`s` is born here and must be consumed at 1006..1007)
+            992..1050: `s` is not consumed on this path; its type has no `forget` capability, so every path must consume it (`s` is born here and must be consumed at 1002..1003)
         "#]],
     );
 }
@@ -1634,7 +1634,7 @@ static double = fn(text: str) -> () {
 };
 "#,
         expect![[r#"
-            1048..1049: `s` was already consumed (`s` is born here and must be consumed at 1008..1009) (first consumed here at 1034..1035)
+            1044..1045: `s` was already consumed (`s` is born here and must be consumed at 1004..1005) (first consumed here at 1030..1031)
         "#]],
     );
 }
@@ -1653,8 +1653,8 @@ static halve = fn(p: Pair) -> String {
 static half_only = fn(p: Pair) -> String { p.left };
 "#,
         expect![[r#"
-            1069..1072: cannot move out of a borrow: `String` cannot be copied
-            1230..1236: cannot copy a value that must be consumed out of a place; take the whole value apart instead (`let Name(struct { .. }) = value;`)
+            1065..1068: cannot move out of a borrow: `String` cannot be copied
+            1226..1232: cannot copy a value that must be consumed out of a place; take the whole value apart instead (`let Name(struct { .. }) = value;`)
         "#]],
     );
 }
@@ -1716,7 +1716,7 @@ static leaks_the_payload = fn(text: str) -> () {
 };
 "#,
         expect![[r#"
-            2276..2279: `s` is not consumed on this path; its type has no `forget` capability, so every path must consume it (`s` is born here and must be consumed at 2270..2271)
+            2272..2275: `s` is not consumed on this path; its type has no `forget` capability, so every path must consume it (`s` is born here and must be consumed at 2266..2267)
         "#]],
     );
 }
@@ -1810,7 +1810,7 @@ static main = fn(c: bool) -> Res {
 /// here, so `..` in `drop` has a forgettable field to actually skip.
 const READER_PRELUDE: &str = r#"
 type Reader = struct {
-    buf: u8.&raw mut,
+    buf: u8.&raw,
     cap: usize,
     eof: bool,
 } only move with {
@@ -1858,7 +1858,7 @@ static leak = fn() -> () {
 };
 "#,
         expect![[r#"
-            505..536: `r` is not consumed on this path; its type has no `forget` capability, so every path must consume it (`r` is born here and must be consumed at 515..516)
+            501..532: `r` is not consumed on this path; its type has no `forget` capability, so every path must consume it (`r` is born here and must be consumed at 511..512)
         "#]],
     );
 }
@@ -1872,7 +1872,7 @@ fn a_reader_drop_that_only_reads_a_field_is_refused() {
     check_diagnostics(
         r#"
 type Reader = struct {
-    buf: u8.&raw mut,
+    buf: u8.&raw,
     cap: usize,
 } only move with {
     impl Self {
@@ -1883,7 +1883,7 @@ type Reader = struct {
 };
 "#,
         expect![[r#"
-            130..194: `r` is not consumed on this path; its type has no `forget` capability, so every path must consume it (`r` is born here and must be consumed at 115..116)
+            126..190: `r` is not consumed on this path; its type has no `forget` capability, so every path must consume it (`r` is born here and must be consumed at 111..112)
         "#]],
     );
 }

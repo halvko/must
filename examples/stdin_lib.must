@@ -34,7 +34,7 @@
 // A declaration, not a value: no `=`. The leading `unsafe` vouches that the
 // host's `read` has this signature; the `unsafe fn` type makes each call need
 // an `unsafe` block, since `read` writes through the pointer.
-unsafe extern static read: unsafe fn(u8.&raw mut, usize) -> isize;
+unsafe extern static read: unsafe fn(u8.&raw, usize) -> isize;
 
 // The FIRST wrapper above the boundary, and the only job it has: turn one
 // machine word into something the type system makes you handle. Everything
@@ -43,7 +43,7 @@ type Fill = enum {
     // The new end of the filled region — a pointer, not a count, because
     // `offset` hands one back directly and pointers are what the scan below
     // walks.
-    More(u8.&raw mut),
+    More(u8.&raw),
     End,
     Failed,
 };
@@ -51,7 +51,7 @@ type Fill = enum {
 // The arms below are QUALIFIED. `::Failed` reads better, but an `if`/`else`
 // leaf has no expected type of its own to resolve the sigil against — the
 // join's result type is decided after the leaves are inferred, not before.
-static fill = fn(at: u8.&raw mut, room: usize) -> Fill {
+static fill = fn(at: u8.&raw, room: usize) -> Fill {
     // A zero-length request is not a question, so it cannot be answered
     // `End` — asking it would make a full buffer look like end-of-input.
     if room == 0 {
@@ -91,11 +91,11 @@ type Option = enum::<T> { Some(T), None };
 // that — every path must call `drop`, panic-diverging paths excepted (a
 // `panic` never falls off the end, so it owes nothing there).
 type Reader = struct {
-    buf: u8.&raw mut,   // the allocation head, and what `drop` frees
+    buf: u8.&raw,   // the allocation head, and what `drop` frees
     cap: usize,
-    start: u8.&raw mut, // first byte of the line being assembled
-    cur: u8.&raw mut,   // next byte to look at
-    end: u8.&raw mut,   // one past the last byte read (never dereferenced)
+    start: u8.&raw, // first byte of the line being assembled
+    cur: u8.&raw,   // next byte to look at
+    end: u8.&raw,   // one past the last byte read (never dereferenced)
     len: usize,         // bytes of the current line so far — `cur - start`
     eof: bool,
     line: str,
@@ -197,7 +197,7 @@ type Reader = struct {
 // sequence is an error the program should see rather than a claim it should
 // make. `str_from_utf8_unchecked` is right where the bytes' provenance
 // already guarantees UTF-8; here nothing does.
-static bless = fn(at: u8.&raw mut, len: usize) -> str {
+static bless = fn(at: u8.&raw, len: usize) -> str {
     match unsafe { str_from_utf8(at, len) } {
         ::Ok(s) => s,
         ::Err => panic("stdin_lib: standard input is not valid UTF-8"),

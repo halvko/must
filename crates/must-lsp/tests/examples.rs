@@ -315,13 +315,12 @@ fn errors_checks_dirty_with_the_documented_count() {
             106 |     p.*
                 |     ^^^
 
-            error: cannot take `.&raw mut` of `x`: it is not declared `mut`
-              --> examples/errors.must:118:13
+            error: `.&raw mut` is spelled `.&raw`: there is one raw pointer kind, and whether a write through it is allowed depends on the place it was taken from
+              --> examples/errors.must:118:20
                 |
             118 |     let p = x.&raw mut;
-                |             ^
-               = help: Make `x` mutable
-               = note: `x` is declared without `mut` here (examples/errors.must:116:9)
+                |                    ^^^
+               = help: Remove `mut`
 
             error: type mismatch: expected `Buf::<8>`, found `Buf::<9>`
               --> examples/errors.must:126:36
@@ -380,10 +379,10 @@ fn errors_checks_dirty_with_the_documented_count() {
                 |                                                        ^^^^^^^^^^^
                = note: `scaled` is defined here (examples/errors.must:195:9)
 
-            error: raw borrows are spelled postfix: `x.&raw` / `x.&raw mut`
+            error: raw borrows are spelled postfix: `x.&raw`
               --> examples/errors.must:207:13
                 |
-            207 |     let p = &raw mut x;
+            207 |     let p = &raw x;
                 |             ^
 
             error: `return` inside a `const` block is not supported yet: it would have to leave the enclosing `fn` body, and a `const` block is compiled as a body of its own
@@ -459,10 +458,10 @@ fn errors_checks_dirty_with_the_documented_count() {
                = help: Rewrite as postfix
 
             error: calling the `extern` item `host_read` requires an `unsafe { ... }` block; nothing on this side of the boundary can check what it does
-              --> examples/errors.must:341:61
+              --> examples/errors.must:341:57
                 |
-            341 | static call_outside_unsafe = fn (p: u8.&raw mut) -> isize { host_read(p, 8) };
-                |                                                             ^^^^^^^^^^^^^^^
+            341 | static call_outside_unsafe = fn (p: u8.&raw) -> isize { host_read(p, 8) };
+                |                                                         ^^^^^^^^^^^^^^^
 
             error: an `extern static` has no initializer: the declaration is the whole contract, and an `extern` item sets nothing to anything
               --> examples/errors.must:350:69
@@ -990,7 +989,7 @@ fn pointers_runs() {
         const: C.&raw == C.&raw is false — each mention is its own copy
         write-through: p.* = 42 updated the local x to 42
         aliasing: writing through the copy q is seen through p
-        field pointer: r.a.&raw mut wrote only r.a
+        field pointer: r.a.&raw wrote only r.a
     "#]],
     );
 }

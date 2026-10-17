@@ -296,7 +296,7 @@ ast_enum!(
 );
 
 ast_node!(
-    /// `x.&raw` / `x.&raw mut` — postfix address-of, the dual of `.*`:
+    /// `x.&raw` — postfix address-of, the dual of `.*`:
     /// takes the address of a place, producing a raw pointer, and chains
     /// like field access. hir restricts the receiver to places (a variable,
     /// a chain of its fields and elements, a `static`/`const` item, or a
@@ -323,10 +323,10 @@ ast_node!(
     UnsafeBlockExpr: UNSAFE_BLOCK_EXPR
 );
 ast_node!(
-    /// `T.&raw` / `T.&raw mut` — a postfix raw pointer type, mirroring the
+    /// `T.&raw` — the postfix raw pointer type, mirroring the
     /// expression-side postfix address-of. The retired prefix spelling
-    /// `&raw T` superset-parses into this node too (with a migration
-    /// diagnostic).
+    /// `&raw T` and the retired `T.&raw mut` superset-parse into this node
+    /// too (each with a migration diagnostic).
     RawPtrType: RAW_PTR_TYPE
 );
 ast_node!(
@@ -1594,11 +1594,13 @@ impl ConstArg {
 }
 
 impl RawPtrType {
+    pub fn raw_token(&self) -> Option<SyntaxToken> {
+        token(&self.syntax, RAW_KW)
+    }
+    /// The `mut` of `T.&raw mut`, parsed so validation can report it (#183);
+    /// later stages ignore it.
     pub fn mut_token(&self) -> Option<SyntaxToken> {
         token(&self.syntax, MUT_KW)
-    }
-    pub fn is_mut(&self) -> bool {
-        self.mut_token().is_some()
     }
     /// The pointee type.
     pub fn ty(&self) -> Option<Type> {
@@ -1610,11 +1612,10 @@ impl AddrOfExpr {
     pub fn raw_token(&self) -> Option<SyntaxToken> {
         token(&self.syntax, RAW_KW)
     }
+    /// The `mut` of `x.&raw mut`, parsed so validation can report it (#183);
+    /// later stages ignore it.
     pub fn mut_token(&self) -> Option<SyntaxToken> {
         token(&self.syntax, MUT_KW)
-    }
-    pub fn is_mut(&self) -> bool {
-        self.mut_token().is_some()
     }
     /// The place whose address is taken.
     pub fn expr(&self) -> Option<Expr> {

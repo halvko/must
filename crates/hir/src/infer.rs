@@ -912,28 +912,6 @@ pub enum InferenceDiagnostic {
         /// The turbofish mention expression.
         expr: ExprId,
     },
-    /// A flavor-polymorphic builtin ([`Builtin::flavor_polymorphic`])
-    /// applied to something that is not a raw pointer. These builtins
-    /// accept `T.&raw` AND `T.&raw mut` in the same position, so the
-    /// argument cannot be checked against one expected type — the mismatch
-    /// gets its own diagnostic.
-    BuiltinExpectsRawPtr {
-        /// The call expression (where MIR refuses the operation).
-        call: ExprId,
-        /// The offending argument (carries the squiggle).
-        arg: ExprId,
-        builtin: Builtin,
-        found: Ty,
-    },
-    /// A flavor-polymorphic builtin ([`Builtin::flavor_polymorphic`])
-    /// mentioned without being called. Its pointer parameter may be
-    /// `T.&raw` or `T.&raw mut`, so it has no ONE function type to be a
-    /// value at.
-    BuiltinNotFirstClass {
-        /// The referencing expression.
-        expr: ExprId,
-        builtin: Builtin,
-    },
     /// A field access or dot-call whose receiver is a BORROW. Reserved,
     /// not rejected: reaching through would be auto-deref, which stays
     /// reserved, and the explicit `r.*` escape already works.
@@ -953,8 +931,8 @@ pub enum InferenceDiagnostic {
         /// parameter", "a type", ...).
         what: &'static str,
     },
-    /// `.&mut` of a place whose ROOT binding is not `mut` — the safe twin
-    /// of [`Self::AddrOfMutImmutable`], same transitive-mutability rule.
+    /// `.&mut` of a place whose ROOT binding is not `mut` — the same
+    /// transitive-mutability rule assignments use.
     BorrowMutImmutable {
         /// The whole borrow expression (where MIR refuses the value).
         borrow: ExprId,
@@ -975,8 +953,8 @@ pub enum InferenceDiagnostic {
         constness: Constness,
     },
     /// `.&mut` reached through a SHARED borrow (`r.*.&mut` where
-    /// `r: T.&::<@a>`) — exactly the raw rule one flavor up: a shared
-    /// borrow must not launder into a write permission.
+    /// `r: T.&::<@a>`): a shared borrow must not launder into a write
+    /// permission.
     BorrowMutThroughShared {
         borrow: ExprId,
         /// The governing borrow's (shared) type.
@@ -1000,7 +978,7 @@ pub enum InferenceDiagnostic {
         /// The referent type that cannot be copied.
         ty: Ty,
     },
-    /// `.&raw`/`.&raw mut` of a NAME that has no value with storage — a
+    /// `.&raw` of a NAME that has no value with storage — a
     /// const parameter, a type, a trait, a builtin. Any other operand is a
     /// place or is materialized (M12).
     AddrOfNonPlace {
@@ -1011,54 +989,12 @@ pub enum InferenceDiagnostic {
         /// What it resolved to, as the message spells it.
         what: &'static str,
     },
-    /// `p.*.x.&raw mut` (a `.&raw mut` of a deref-rooted place) where a
-    /// SHARED step governs the chain — a `T.&raw` or a `T.&`, at the
-    /// outermost deref or deeper. Minting a mutating address through it
-    /// would launder the shared flavor into a write permission. The
-    /// write-side twin is [`Self::AssignThroughShared`]; `.&raw` (shared)
-    /// through any pointer is fine.
-    AddrOfMutThroughShared {
-        /// The whole address-of expression (carries the squiggle, and
-        /// where MIR refuses the value).
-        addr_of: ExprId,
-        /// The governing (shared) step's type.
-        ty: Ty,
-    },
-    /// `.&raw mut` of a place whose ROOT binding is not `mut` — the same
-    /// transitive-mutability rule assignments use: the root is what's
-    /// judged, there is no per-field `mut`.
-    AddrOfMutImmutable {
-        /// The whole address-of expression (where MIR refuses the value).
-        addr_of: ExprId,
-        /// The root name expression inside the place (carries the
-        /// squiggle).
-        root: ExprId,
-        binding: BindingId,
-        /// The binding's name, for rendering without the body in hand.
-        name: String,
-        /// The whole place as written (`x`, or `x.f.g` for a field chain).
-        place: String,
-    },
-    /// `.&raw mut` of a top-level item: a `static` has one place but
-    /// `static mut` stays deferred, and a `const` is copied into each use —
-    /// there is no place to hand out mutably either way. (`.&raw` — shared —
-    /// of both is fine: a static's one place, a const use's own copy.)
-    AddrOfMutItem {
-        /// The whole address-of expression (where MIR refuses the value).
-        addr_of: ExprId,
-        /// The root name expression (carries the squiggle).
-        root: ExprId,
-        item: ItemLoc,
-        constness: Constness,
-    },
     /// `p.* = v;` (or `p.*.x = v;`, any deref-rooted chain) where a
-    /// SHARED step governs the chain: writing needs `T.&raw mut` or
-    /// `T.&mut` at every step it travels through. (`p` itself need not be
-    /// a `mut` binding: writing through it does not reassign it. A deeper
-    /// deref of a RAW mut pointer stops the walk — reading one out is a
-    /// copy, and a copy carries the whole permission — but a deeper
-    /// `T.&mut` does not: reading one out is a reborrow, which the place
-    /// holding it must be allowed to grant.)
+    /// SHARED borrow governs the chain: writing needs `T.&mut` at every
+    /// safe step it travels through. (`p` itself need not be a `mut`
+    /// binding: writing through it does not reassign it. A raw pointer
+    /// stops the walk; a deeper `T.&mut` does not — see
+    /// [`InferCtx::shared_step_governing`].)
     AssignThroughShared {
         /// The governing deref expression (the target itself for
         /// `p.* = v;`, the chain's outermost deref otherwise).
@@ -1576,7 +1512,6 @@ impl InferenceDiagnostic {
             | InferenceDiagnostic::IndexOutOfBounds { expr, .. }
             | InferenceDiagnostic::EmptyArrayNeedsAnnotation { expr }
             | InferenceDiagnostic::ArrayConstArg { expr }
-            | InferenceDiagnostic::BuiltinNotFirstClass { expr, .. }
             | InferenceDiagnostic::NoSuchMember { expr, .. }
             | InferenceDiagnostic::NotDotCallable { expr, .. }
             | InferenceDiagnostic::MemberWantsBorrowReceiver { expr, .. }
@@ -1608,10 +1543,6 @@ impl InferenceDiagnostic {
             | InferenceDiagnostic::BorrowMutItem { root, .. } => *root,
             InferenceDiagnostic::BorrowMutThroughShared { borrow, .. }
             | InferenceDiagnostic::BorrowThroughRawPointer { borrow, .. } => *borrow,
-            InferenceDiagnostic::BuiltinExpectsRawPtr { arg, .. } => *arg,
-            InferenceDiagnostic::AddrOfMutImmutable { root, .. }
-            | InferenceDiagnostic::AddrOfMutItem { root, .. } => *root,
-            InferenceDiagnostic::AddrOfMutThroughShared { addr_of, .. } => *addr_of,
             InferenceDiagnostic::AssignThroughShared { target, .. } => *target,
             InferenceDiagnostic::UnreachableArm { match_expr, .. }
             | InferenceDiagnostic::NonEnumScrutineeVariantPat { match_expr, .. }
@@ -2176,21 +2107,6 @@ impl InferenceDiagnostic {
                 "cannot infer the element type of an empty array; add a type annotation".to_owned()
             }
             InferenceDiagnostic::ArrayConstArg { .. } => crate::diag::ARRAY_CONST_ARG.to_owned(),
-            InferenceDiagnostic::BuiltinExpectsRawPtr { builtin, found, .. } => {
-                format!(
-                    "`{}` expects a raw pointer (`T.&raw` or `T.&raw mut`) here, found `{}`",
-                    builtin.name(),
-                    found.display()
-                )
-            }
-            InferenceDiagnostic::BuiltinNotFirstClass { builtin, .. } => {
-                format!(
-                    "`{}` must be called directly; its pointer parameter accepts both \
-                     `T.&raw` and `T.&raw mut`, so it has no one function type to be \
-                     a value at",
-                    builtin.name()
-                )
-            }
             InferenceDiagnostic::DotThroughBorrow {
                 name, receiver_ty, ..
             } => format!(
@@ -2220,14 +2136,8 @@ impl InferenceDiagnostic {
                 }
             },
             InferenceDiagnostic::BorrowMutThroughShared { ty, .. } => format!(
-                "cannot borrow `.&mut` through `{}`: an exclusive borrow needs {} parent",
+                "cannot borrow `.&mut` through `{}`: an exclusive borrow needs a `.&mut` parent",
                 ty.display(),
-                // The governing step may be a RAW pointer when a `.&mut`
-                // sits behind one: `pb.*.*.&mut` for `pb: T.&mut.&raw`.
-                match ty {
-                    Ty::Borrow { .. } => "a `.&mut`",
-                    _ => "a `.&raw mut`",
-                }
             ),
             InferenceDiagnostic::BorrowThroughRawPointer { ty, .. } => format!(
                 "cannot mint a safe borrow through `{}`: a raw pointer carries no region \
@@ -2244,37 +2154,9 @@ impl InferenceDiagnostic {
                     "`.&raw` cannot take the address of `{name}`: it is {what}, not a value with storage"
                 )
             }
-            InferenceDiagnostic::AddrOfMutThroughShared { ty, .. } => format!(
-                "cannot take `.&raw mut` through `{}`: minting a mutating address needs {}",
-                ty.display(),
-                exclusive_flavor(ty)
-            ),
-            InferenceDiagnostic::AddrOfMutImmutable { name, place, .. } => {
-                if place == name {
-                    format!("cannot take `.&raw mut` of `{name}`: it is not declared `mut`")
-                } else {
-                    // A field chain: the root binding carries the blame —
-                    // mutability is transitive, exactly as for assignments.
-                    format!("cannot take `.&raw mut` of `{place}`: `{name}` is not declared `mut`")
-                }
-            }
-            InferenceDiagnostic::AddrOfMutItem {
-                item, constness, ..
-            } => match constness {
-                Constness::Static => format!(
-                    "cannot take `.&raw mut` of `{}`: `static mut` is not supported yet",
-                    item.display_name()
-                ),
-                Constness::Const => format!(
-                    "cannot take `.&raw mut` of `{}`: a `const` is copied into each use, \
-                     so there is no place to modify",
-                    item.display_name()
-                ),
-            },
             InferenceDiagnostic::AssignThroughShared { ty, .. } => format!(
-                "cannot assign through `{}`: writing needs {}",
-                ty.display(),
-                exclusive_flavor(ty)
+                "cannot assign through `{}`: writing needs a `.&mut` borrow",
+                ty.display()
             ),
             InferenceDiagnostic::TraitNotValue { name, .. } => {
                 format!("`{name}` is a trait, not a value")
@@ -2445,9 +2327,9 @@ fn shared_step(body: &Body, place: ExprId, ty_of: &mut dyn FnMut(ExprId) -> Ty) 
         ExprData::Field { receiver, .. } => shared_step(body, *receiver, ty_of),
         ExprData::Index { base, .. } => shared_step(body, *base, ty_of),
         ExprData::Deref { receiver } => match ty_of(*receiver) {
-            Ty::RawPtr { mutable: true, .. } => None,
+            Ty::RawPtr { .. } => None,
             Ty::Borrow { mutable: true, .. } => shared_step(body, *receiver, ty_of),
-            shared @ (Ty::RawPtr { .. } | Ty::Borrow { .. }) => Some(shared),
+            shared @ Ty::Borrow { .. } => Some(shared),
             // An unknown or broken receiver: the read already
             // carries its own diagnostic.
             _ => None,
@@ -2898,22 +2780,21 @@ impl<'a, 'db> InferCtx<'a, 'db> {
             .try_reborrow(self.table, actual, expected, expr)
     }
 
-    /// The SHARED step governing a place chain, if there is one: `None`
+    /// The SHARED borrow governing a place chain, if there is one: `None`
     /// when the place may be written through (or when nothing is known
-    /// about it yet), `Some(ty)` for the pointer or borrow whose shared
-    /// flavor refuses. The one judgement behind every "cannot write
-    /// through this" rule — assignment, `.&mut`, `.&raw mut`, and the
-    /// implicit mutable reborrow.
+    /// about it yet), `Some(ty)` for the `.&` that refuses. The one
+    /// judgement behind every "cannot write through this" rule —
+    /// assignment, `.&mut`, and the implicit mutable reborrow.
     ///
-    /// Fields and elements are transparent. A deref is where a flavor
+    /// Fields and elements are transparent. A deref is where a pointer
     /// enters, and the two worlds part there:
     ///
-    /// * `T.&raw mut` grants the permission and STOPS. Reading a raw
-    ///   pointer out of a place COPIES it, and a copy carries the full
-    ///   permission — that laundering is the raw world's own, gated by
-    ///   `unsafe` rather than by this walk.
-    /// * `T.&raw` and `T.&` stop too, refusing: a shared flavor never
-    ///   becomes a write permission.
+    /// * `T.&raw` grants the permission and STOPS. Reading a raw pointer
+    ///   out of a place COPIES it, and its write permission is the
+    ///   provenance of the place it was taken from (#183) — judged by the
+    ///   abstract machine, gated by `unsafe`, never by this walk.
+    /// * `T.&` stops too, refusing: a shared borrow never becomes a write
+    ///   permission.
     /// * `T.&mut` RECURSES into the place that holds it. Reading a
     ///   `.&mut` out is a REBORROW, not a copy (M07's affinity), so the
     ///   holder must itself be reachable exclusively — `bb.*.* = 5`
@@ -3258,8 +3139,8 @@ impl<'a, 'db> InferCtx<'a, 'db> {
                     self.mint_wildcard_regions(inner, referent),
                 )
             }
-            (TypeRef::RawPtr { inner, .. }, Ty::RawPtr { mutable, pointee }) => {
-                Ty::raw_ptr(*mutable, self.mint_wildcard_regions(inner, pointee))
+            (TypeRef::RawPtr { inner, .. }, Ty::RawPtr { pointee }) => {
+                Ty::raw_ptr(self.mint_wildcard_regions(inner, pointee))
             }
             (TypeRef::Array { elem, .. }, Ty::Array { elem: lowered, len }) => {
                 Ty::array(self.mint_wildcard_regions(elem, lowered), len.clone())
@@ -3626,8 +3507,7 @@ impl<'a, 'db> InferCtx<'a, 'db> {
                 }
                 | InferenceDiagnostic::BorrowMutThroughShared { ty, .. }
                 | InferenceDiagnostic::BorrowThroughRawPointer { ty, .. }
-                | InferenceDiagnostic::MoveOutOfBorrow { ty, .. }
-                | InferenceDiagnostic::AddrOfMutThroughShared { ty, .. } => {
+                | InferenceDiagnostic::MoveOutOfBorrow { ty, .. } => {
                     *ty = resolve_finished(self.table, ty);
                 }
                 InferenceDiagnostic::PatNamedTypeMismatch {
@@ -3635,9 +3515,6 @@ impl<'a, 'db> InferCtx<'a, 'db> {
                 } => {
                     *expected = resolve_finished(self.table, expected);
                     *actual = resolve_finished(self.table, actual);
-                }
-                InferenceDiagnostic::BuiltinExpectsRawPtr { found, .. } => {
-                    *found = resolve_finished(self.table, found);
                 }
                 InferenceDiagnostic::UnsatisfiedBound { ty, .. }
                 | InferenceDiagnostic::NoTraitImpl { ty, .. } => {
@@ -3685,8 +3562,6 @@ impl<'a, 'db> InferCtx<'a, 'db> {
                 | InferenceDiagnostic::FnConstArg { .. }
                 | InferenceDiagnostic::TypeConstArgUnsupported { .. }
                 | InferenceDiagnostic::AddrOfNonPlace { .. }
-                | InferenceDiagnostic::AddrOfMutImmutable { .. }
-                | InferenceDiagnostic::AddrOfMutItem { .. }
                 | InferenceDiagnostic::BorrowNonPlace { .. }
                 | InferenceDiagnostic::BorrowMutImmutable { .. }
                 | InferenceDiagnostic::BorrowMutItem { .. }
@@ -3696,7 +3571,6 @@ impl<'a, 'db> InferCtx<'a, 'db> {
                 | InferenceDiagnostic::CannotInferNumberType { .. }
                 | InferenceDiagnostic::IntLiteralOutOfRange { .. }
                 | InferenceDiagnostic::PatIntLiteralTooLarge { .. }
-                | InferenceDiagnostic::BuiltinNotFirstClass { .. }
                 | InferenceDiagnostic::NotDotCallable { .. }
                 | InferenceDiagnostic::MemberWantsBorrowReceiver { .. }
                 | InferenceDiagnostic::MemberNotCalled { .. }
@@ -4130,22 +4004,6 @@ impl<'a, 'db> InferCtx<'a, 'db> {
                         cause,
                     );
                 }
-                // The flavor-polymorphic builtins (see
-                // [`Builtin::flavor_polymorphic`]) are intercepted like
-                // construction heads: their callee has no one function type
-                // to infer, so the call itself is the special case (see
-                // `infer_builtin_special_call`).
-                if let Some(Resolution::Builtin(builtin)) = self.resolutions.get(*callee)
-                    && builtin.flavor_polymorphic()
-                {
-                    let builtin = *builtin;
-                    return {
-                        let ty = self.infer_builtin_special_call(expr, builtin, args);
-                        let ty = self.check(expr, ty, expected, cause);
-                        self.result.type_of_expr.insert(expr, ty.clone());
-                        ty
-                    };
-                }
                 // TR01 short form: `Trait::member(args...)` — intercepted
                 // before the callee is inferred (a bare `Trait::member`
                 // VALUE is the reserved named-Self territory; the direct
@@ -4487,8 +4345,8 @@ impl<'a, 'db> InferCtx<'a, 'db> {
                             // and writes through pointers (`p.* = v;`,
                             // `p.*.x = v;`): one walk judges them all. A
                             // deref makes a new root: the judgement there
-                            // is the pointer's `.&raw mut`-ness, not any
-                            // binding's `mut`-ness (`p` itself need not be
+                            // is the pointer's, not any binding's
+                            // `mut`-ness (`p` itself need not be
                             // `mut` — writing through it does not reassign
                             // it).
                             if let ExprData::Field { .. }
@@ -4932,7 +4790,7 @@ impl<'a, 'db> InferCtx<'a, 'db> {
                 self.carry_borrow_projection(expr, base, &element);
                 element
             }
-            // `place.&raw` / `place.&raw mut`: the operand reads like any
+            // `place.&raw`: the operand reads like any
             // expression (so field chains get their diagnostics on the
             // way), then the place rules are judged on its structure.
             // `place.&` / `place.&mut` — a SAFE borrow. Same two-phase shape
@@ -4962,17 +4820,15 @@ impl<'a, 'db> InferCtx<'a, 'db> {
                     Ty::borrow(mutable, region, place_ty)
                 }
             }
-            ExprData::AddrOf { mutable, place } => {
-                let mutable = *mutable;
+            ExprData::AddrOf { place } => {
                 let place = *place;
                 let fresh = self.fresh_var();
                 let place_ty = self.infer_expr(place, &fresh);
-                self.check_addr_of_place(expr, mutable, place);
-                Ty::raw_ptr(mutable, place_ty)
+                self.check_addr_of_place(expr, place);
+                Ty::raw_ptr(place_ty)
             }
-            // `p.*`: reads through the pointer — `T.&raw` and `T.&raw mut`
-            // both deref-read to `T` (writing is the assignment path's
-            // judgement).
+            // `p.*`: reads through the pointer — `T.&raw` deref-reads to
+            // `T` (writing is the assignment path's judgement).
             ExprData::Deref { receiver } => {
                 let receiver = *receiver;
                 let fresh = self.fresh_var();
@@ -7414,18 +7270,6 @@ impl<'a, 'db> InferCtx<'a, 'db> {
         }
     }
 
-    /// The place rules for `place.&raw` / `place.&raw mut`, judged on the
-    /// operand's structure after it was read-typed: the accepted places
-    /// are a variable, a chain of its fields and elements, a
-    /// `static`/`const` item (a `const` use's own copy — const=copied,
-    /// now observable), or a deref-rooted chain (`p.*.x.&raw mut` — a
-    /// pointer into the pointee, the original allocation's address with
-    /// an extended path). The `mut` flavor additionally requires the ROOT
-    /// binding to be `mut` — the same transitive-mutability rule
-    /// assignments use — refuses items (`static mut` is deferred; a
-    /// `const` has no place to hand out mutably), and, for deref-rooted
-    /// places, requires every step the chain travels through to grant a
-    /// write permission ([`InferCtx::shared_step_governing`]).
     /// Give a materialized temporary's local (M12) the root's type. A
     /// root without a mark is broken source and stays silent.
     fn type_temp_root(&mut self, root: ExprId) {
@@ -7440,73 +7284,34 @@ impl<'a, 'db> InferCtx<'a, 'db> {
         }
     }
 
-    fn check_addr_of_place(&mut self, addr_of: ExprId, mutable: bool, place: ExprId) {
-        // The whole chain's write permission, needed only by the `mut`
-        // flavor: a shared address of a shared place is what `.&raw` is
-        // for.
-        let governing = mutable.then(|| self.shared_step_governing(place)).flatten();
+    /// The place rules for `place.&raw`: a variable, a chain of its
+    /// fields and elements, a `static`/`const` item (a `const` use's own
+    /// copy), or a deref-rooted chain (`p.*.x.&raw`). There is no
+    /// write-permission rule: a write's permission comes from the
+    /// provenance of the place, which the abstract machine judges (#183).
+    fn check_addr_of_place(&mut self, addr_of: ExprId, place: ExprId) {
         let root = self.place_root(place);
         match &self.body.exprs[root] {
             ExprData::NameRef(root_name) => {
-                match self.resolutions.get(root) {
-                    Some(Resolution::Local(binding)) => {
-                        if mutable && let Some((name, place)) = self.immutable_root(*binding, place)
-                        {
-                            self.result
-                                .diagnostics
-                                .push(InferenceDiagnostic::AddrOfMutImmutable {
-                                    addr_of,
-                                    root,
-                                    binding: *binding,
-                                    name,
-                                    place,
-                                });
-                        }
-                    }
-                    Some(Resolution::Item(loc)) => {
-                        if mutable {
-                            let constness = self.item_constness(loc);
-                            self.result
-                                .diagnostics
-                                .push(InferenceDiagnostic::AddrOfMutItem {
-                                    addr_of,
-                                    root,
-                                    item: loc.clone(),
-                                    constness,
-                                });
-                        }
-                    }
-                    // Unresolved/ambiguous roots carry their own
-                    // diagnostics from the read.
-                    Some(resolution) => {
-                        if let Some(what) = non_place_what(resolution) {
-                            self.result
-                                .diagnostics
-                                .push(InferenceDiagnostic::AddrOfNonPlace {
-                                    expr: addr_of,
-                                    name: root_name.clone(),
-                                    what,
-                                });
-                        }
-                    }
-                    None => {}
-                }
-            }
-            // `p.*....&raw [mut]`: a pointer into the pointee — the
-            // result is the original allocation's address with an
-            // extended path. The `mut` flavor is judged by
-            // [`InferCtx::shared_step_governing`]: a shared step anywhere
-            // in the chain, `T.&raw` or `T.&`, must not launder into a
-            // write permission.
-            ExprData::Deref { .. } => {
-                if let Some(ty) = governing {
+                // Locals and items are places. Unresolved/ambiguous roots
+                // carry their own diagnostics from the read.
+                if let Some(resolution) = self.resolutions.get(root)
+                    && let Some(what) = non_place_what(resolution)
+                {
                     self.result
                         .diagnostics
-                        .push(InferenceDiagnostic::AddrOfMutThroughShared { addr_of, ty });
+                        .push(InferenceDiagnostic::AddrOfNonPlace {
+                            expr: addr_of,
+                            name: root_name.clone(),
+                            what,
+                        });
                 }
             }
-            // Broken source: the parse error covers it.
-            ExprData::Missing => {}
+            // `p.*....&raw`: a pointer into the pointee — the result is
+            // the original allocation's address with an extended path; a
+            // deref-rooted place is always one. Broken source: the parse
+            // error covers it.
+            ExprData::Deref { .. } | ExprData::Missing => {}
             _ => self.type_temp_root(root),
         }
     }
@@ -8693,10 +8498,7 @@ impl<'a, 'db> InferCtx<'a, 'db> {
     /// A mention of a builtin, bare (`args: None`) or turbofished. The
     /// monomorphic builtins keep their one fixed type; the scheme-shaped
     /// ones ([`builtin_generics`]) run the exact same instantiation
-    /// machinery as generic fn items; the flavor-polymorphic builtins have
-    /// no first-class type at all — their one legal position, a direct
-    /// call, is intercepted in the `Call` arm before the callee would be
-    /// inferred, so reaching here IS the error.
+    /// machinery as generic fn items.
     fn infer_builtin_mention(
         &mut self,
         expr: ExprId,
@@ -8712,151 +8514,7 @@ impl<'a, 'db> InferCtx<'a, 'db> {
             self.refuse_item_args(expr, builtin.name(), args);
             return builtin_type(self.db, builtin);
         }
-        if builtin.flavor_polymorphic() {
-            self.result
-                .diagnostics
-                .push(InferenceDiagnostic::BuiltinNotFirstClass { expr, builtin });
-            return Ty::Error;
-        }
         builtin_type(self.db, builtin)
-    }
-
-    /// A direct call of a flavor-polymorphic builtin — the checker special
-    /// case the ruled spec asks for: `add`/`offset` preserve their pointer
-    /// argument's flavor (`.&raw mut` in → `.&raw mut` out), `copy` accepts
-    /// either flavor for `src`, and the blesses accept either for the
-    /// buffer they read while pinning its pointee to `u8`; no one `fn` type
-    /// says any of that. Everything else about the call is the ordinary
-    /// machinery (argument expectations with causes, arity as
-    /// `ArgCountMismatch`).
-    fn infer_builtin_special_call(
-        &mut self,
-        call: ExprId,
-        builtin: Builtin,
-        args: &[ExprId],
-    ) -> Ty {
-        let expected_arity = match builtin {
-            Builtin::Add
-            | Builtin::Offset
-            | Builtin::StrFromUtf8
-            | Builtin::StrFromUtf8Unchecked => 2,
-            Builtin::Copy => 3,
-            _ => unreachable!("not a flavor-polymorphic builtin"),
-        };
-        if args.len() != expected_arity {
-            self.result
-                .diagnostics
-                .push(InferenceDiagnostic::ArgCountMismatch {
-                    expr: call,
-                    expected: expected_arity,
-                    found: args.len(),
-                });
-            for &arg in args {
-                let fresh = self.fresh_var();
-                self.infer_expr(arg, &fresh);
-            }
-            return Ty::Error;
-        }
-        // The flavor-polymorphic pointer argument: inferred freely, then
-        // judged — a checked expectation would have to pick one flavor.
-        let ptr_arg = |this: &mut Self, arg: ExprId| {
-            let fresh = this.fresh_var();
-            let ty = this.infer_expr(arg, &fresh);
-            match this.resolve_shallow(&ty) {
-                Ty::RawPtr { mutable, pointee } => Some((mutable, pointee)),
-                // Broken or diverging: silent, like every infectious type.
-                Ty::Error | Ty::Never => None,
-                found => {
-                    this.result
-                        .diagnostics
-                        .push(InferenceDiagnostic::BuiltinExpectsRawPtr {
-                            call,
-                            arg,
-                            builtin,
-                            found,
-                        });
-                    None
-                }
-            }
-        };
-        match builtin {
-            // `add(p, i)`: pointer to element `i` past `p`, same
-            // allocation, same flavor. `offset(p, i)` is the signed
-            // sibling — element arithmetic both directions, `i: isize`.
-            Builtin::Add | Builtin::Offset => {
-                let ptr = ptr_arg(self, args[0]);
-                let index_ty = match builtin {
-                    Builtin::Add => Ty::Int(IntKind::Usize),
-                    _ => Ty::Int(IntKind::Isize),
-                };
-                self.infer_expr_with(
-                    args[1],
-                    &index_ty,
-                    Some(Cause::CallSite { call, arg: args[1] }),
-                );
-                match ptr {
-                    Some((mutable, pointee)) => Ty::RawPtr { mutable, pointee },
-                    None => Ty::Error,
-                }
-            }
-            // `copy(src, dst, n)`: `src` may be either flavor, `dst` must
-            // be `.&raw mut`, and the pointees must agree — `dst` is
-            // checked against `<src's pointee>.&raw mut` so the mismatch
-            // diagnostics are the ordinary type-mismatch ones.
-            Builtin::Copy => {
-                let elem = self.fresh_var();
-                if let Some((_, pointee)) = ptr_arg(self, args[0]) {
-                    self.adopt(&elem, pointee.as_ref());
-                }
-                self.infer_expr_with(
-                    args[1],
-                    &Ty::raw_ptr(true, elem),
-                    Some(Cause::CallSite { call, arg: args[1] }),
-                );
-                self.infer_expr_with(
-                    args[2],
-                    &Ty::Int(IntKind::Usize),
-                    Some(Cause::CallSite { call, arg: args[2] }),
-                );
-                Ty::Unit
-            }
-            // `str_from_utf8(p, len)` / `str_from_utf8_unchecked(p, len)`:
-            // `len` bytes at `p`, taken as text. `p` may be either flavor
-            // (reading is what happens to it) but its pointee is pinned to
-            // `u8` — the boundary is BYTES-FIRST, and a bless over some
-            // other element type would be a layout claim, not a text one.
-            Builtin::StrFromUtf8 | Builtin::StrFromUtf8Unchecked => {
-                if let Some((mutable, pointee)) = ptr_arg(self, args[0]) {
-                    let byte = Ty::Int(IntKind::U8);
-                    if !self.adopt(&byte, pointee.as_ref()) {
-                        let found = Ty::RawPtr {
-                            mutable,
-                            pointee: pointee.clone(),
-                        };
-                        self.result
-                            .diagnostics
-                            .push(InferenceDiagnostic::TypeMismatch {
-                                expr: args[0],
-                                expected: Ty::raw_ptr(mutable, byte),
-                                actual: found,
-                                reasons: vec![Cause::CallSite { call, arg: args[0] }],
-                            });
-                    }
-                }
-                self.infer_expr_with(
-                    args[1],
-                    &Ty::Int(IntKind::Usize),
-                    Some(Cause::CallSite { call, arg: args[1] }),
-                );
-                match builtin {
-                    Builtin::StrFromUtf8 => {
-                        Ty::Named(NamedTy::plain(crate::utf8_result_loc(self.db)))
-                    }
-                    _ => Ty::Str,
-                }
-            }
-            _ => unreachable!("not a flavor-polymorphic builtin"),
-        }
     }
 
     /// Infer every const-argument value freely — the error paths, where no
@@ -10567,17 +10225,6 @@ fn place_positions(body: &Body) -> rustc_hash::FxHashSet<ExprId> {
     set
 }
 
-/// The exclusive flavor a write would need at a place step of this type —
-/// the one rule, spelled in each world's own syntax. Used by the three
-/// "cannot write through this" messages so they read as the twins they
-/// are.
-fn exclusive_flavor(ty: &Ty) -> &'static str {
-    match ty {
-        Ty::Borrow { .. } => "a `.&mut` borrow",
-        _ => "a `.&raw mut` pointer",
-    }
-}
-
 /// Dig through block and `const` block wrappers to the value-producing
 /// sub-expression that should carry a squiggle — both are transparent, so
 /// blame belongs on whatever is actually inside.
@@ -10604,8 +10251,8 @@ pub fn builtin_type(db: &dyn Db, builtin: Builtin) -> Ty {
 /// question, [`Builtin::requires_unsafe`] — so a builtin cannot be unsafe to
 /// call by name and safe to call through a binding, or vice versa, and so a
 /// new unsafe builtin gets the right VALUE type by answering the property it
-/// already has to answer. Non-fn shapes (the flavor-polymorphic builtins,
-/// which have no one fn type and are not first-class) pass through.
+/// already has to answer. Non-fn shapes (the error-recovery `{error}` of a
+/// scheme-shaped builtin) pass through.
 fn priced(builtin: Builtin, ty: Ty) -> Ty {
     match ty {
         Ty::Fn(f) if builtin.requires_unsafe() => {
@@ -10633,36 +10280,38 @@ fn builtin_type_unpriced(db: &dyn Db, builtin: Builtin) -> Ty {
         // `s.len()` — the receiver is the only parameter, so `next_char`'s
         // receiver-LAST shape is the whole signature here.
         Builtin::StrLen => Ty::fn_type(vec![Ty::Str], Ty::Int(IntKind::Usize)),
-        // `str_bytes(s, dst)` — a written destination is `u8.&raw mut` and
-        // nothing else, so unlike the blesses this one HAS a `fn` type and
-        // is first-class like `print`.
-        Builtin::StrBytes => Ty::fn_type(
-            vec![Ty::Str, Ty::raw_ptr(true, Ty::Int(IntKind::U8))],
-            Ty::Unit,
+        // `str_bytes(s, dst)` — `s.len()` bytes of `s`, written to `dst`.
+        Builtin::StrBytes => {
+            Ty::fn_type(vec![Ty::Str, Ty::raw_ptr(Ty::Int(IntKind::U8))], Ty::Unit)
+        }
+        // The blesses: `len` bytes at `p`, taken as text. The pointee is
+        // `u8` — the boundary is BYTES-FIRST, and a bless over some other
+        // element type would be a layout claim, not a text one.
+        Builtin::StrFromUtf8 => Ty::fn_type(
+            vec![Ty::raw_ptr(Ty::Int(IntKind::U8)), Ty::Int(IntKind::Usize)],
+            Ty::Named(NamedTy::plain(crate::utf8_result_loc(db))),
+        ),
+        Builtin::StrFromUtf8Unchecked => Ty::fn_type(
+            vec![Ty::raw_ptr(Ty::Int(IntKind::U8)), Ty::Int(IntKind::Usize)],
+            Ty::Str,
         ),
         // The generic builtins have no ONE type — every mention
         // instantiates [`builtin_scheme`] instead (see the `NameRef` and
-        // `GenericApp` arms); the flavor-polymorphic builtins have no fn
-        // type at all (special-cased at the call, `BuiltinNotFirstClass`
-        // elsewhere). Reached only on error-recovery paths, where the
-        // infectious silent type is right.
+        // `GenericApp` arms). Reached only on error-recovery paths, where
+        // the infectious silent type is right.
         Builtin::AllocArray
         | Builtin::DeallocArray
         | Builtin::Add
         | Builtin::Offset
         | Builtin::Copy
-        | Builtin::Dangling
-        // The blesses read a RANGE through either raw flavor, exactly like
-        // `copy`'s source — no one `fn` type says that either.
-        | Builtin::StrFromUtf8
-        | Builtin::StrFromUtf8Unchecked => Ty::Error,
+        | Builtin::Dangling => Ty::Error,
     }
 }
 
 /// The generic binder of a scheme-shaped builtin (`alloc_array`,
-/// `dealloc_array`, `dangling` — one type param `T`), or `None` for the
-/// monomorphic (`print`, `panic`) and flavor-polymorphic
-/// ([`Builtin::flavor_polymorphic`]) ones. Mirrors [`crate::item_data`]'s
+/// `dealloc_array`, `dangling`, `add`, `offset`, `copy` — one type param
+/// `T`), or `None` for the monomorphic ones (`print`, `panic`, the
+/// blesses). Mirrors [`crate::item_data`]'s
 /// shape for generic items so mentions run the exact same instantiation
 /// machinery.
 fn builtin_generics(builtin: Builtin) -> Option<&'static [GenericParamData]> {
@@ -10683,14 +10332,14 @@ fn builtin_generics(builtin: Builtin) -> Option<&'static [GenericParamData]> {
             }]
         });
     match builtin {
-        Builtin::AllocArray | Builtin::DeallocArray | Builtin::Dangling => {
-            Some(ONE_TYPE_PARAM.as_slice())
-        }
-        Builtin::Print
-        | Builtin::Panic
+        Builtin::AllocArray
+        | Builtin::DeallocArray
+        | Builtin::Dangling
         | Builtin::Add
         | Builtin::Offset
-        | Builtin::Copy
+        | Builtin::Copy => Some(ONE_TYPE_PARAM.as_slice()),
+        Builtin::Print
+        | Builtin::Panic
         | Builtin::ReadLine
         | Builtin::NextChar
         | Builtin::StrLen
@@ -10723,16 +10372,32 @@ fn builtin_scheme(db: &dyn Db, builtin: Builtin) -> (ItemLoc, Ty) {
                 args: vec![GenericArg::Ty(t)],
             }),
         ),
-        Builtin::DeallocArray => Ty::fn_type(
-            vec![Ty::raw_ptr(true, t), Ty::Int(IntKind::Usize)],
+        Builtin::DeallocArray => {
+            Ty::fn_type(vec![Ty::raw_ptr(t), Ty::Int(IntKind::Usize)], Ty::Unit)
+        }
+        Builtin::Dangling => Ty::fn_type(Vec::new(), Ty::raw_ptr(t)),
+        // `add(p, i)`: pointer to element `i` past `p`, same allocation.
+        // `offset(p, i)` is the signed sibling — element arithmetic both
+        // directions, `i: isize`.
+        Builtin::Add => Ty::fn_type(
+            vec![Ty::raw_ptr(t.clone()), Ty::Int(IntKind::Usize)],
+            Ty::raw_ptr(t),
+        ),
+        Builtin::Offset => Ty::fn_type(
+            vec![Ty::raw_ptr(t.clone()), Ty::Int(IntKind::Isize)],
+            Ty::raw_ptr(t),
+        ),
+        // `copy(src, dst, n)`: `n` elements, memmove semantics.
+        Builtin::Copy => Ty::fn_type(
+            vec![
+                Ty::raw_ptr(t.clone()),
+                Ty::raw_ptr(t),
+                Ty::Int(IntKind::Usize),
+            ],
             Ty::Unit,
         ),
-        Builtin::Dangling => Ty::fn_type(Vec::new(), Ty::raw_ptr(true, t)),
         Builtin::Print
         | Builtin::Panic
-        | Builtin::Add
-        | Builtin::Offset
-        | Builtin::Copy
         | Builtin::ReadLine
         | Builtin::NextChar
         | Builtin::StrLen
@@ -10930,10 +10595,9 @@ fn instantiate_scheme(
                 .collect(),
             instantiate_scheme(&f.ret, item, subst, const_subst),
         ),
-        Ty::RawPtr { mutable, pointee } => Ty::raw_ptr(
-            *mutable,
-            instantiate_scheme(pointee, item, subst, const_subst),
-        ),
+        Ty::RawPtr { pointee } => {
+            Ty::raw_ptr(instantiate_scheme(pointee, item, subst, const_subst))
+        }
         // A borrow's REFERENT is an ordinary scheme position: `fn::<@b,
         // T>(v: T.&mut::<@b>)` must instantiate `T` here, or the parameter
         // stays rigid and every borrowed argument mismatches against a
@@ -11013,9 +10677,7 @@ fn substitute_regions(ty: &Ty, item: &ItemLoc, subst: &FxHashMap<u32, Region>) -
                 .collect(),
             substitute_regions(&f.ret, item, subst),
         ),
-        Ty::RawPtr { mutable, pointee } => {
-            Ty::raw_ptr(*mutable, substitute_regions(pointee, item, subst))
-        }
+        Ty::RawPtr { pointee } => Ty::raw_ptr(substitute_regions(pointee, item, subst)),
         Ty::Array { elem, len } => Ty::array(substitute_regions(elem, item, subst), len.clone()),
         Ty::Record(rec) => Ty::record(
             rec.fields

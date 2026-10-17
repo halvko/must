@@ -312,7 +312,7 @@ pub enum Builtin {
     Panic,
     /// `alloc_array::<T>(n)` — one fresh heap allocation of `n`
     /// uninitialized elements. SAFE (allocating cannot UB); returns the
-    /// result-shaped [`ALLOC_RESULT_NAME`] enum (`Ok(T.&raw mut)` /
+    /// result-shaped [`ALLOC_RESULT_NAME`] enum (`Ok(T.&raw)` /
     /// `Err`) — the interpreter never produces `Err` (it cannot
     /// meaningfully OOM), but the signature is stable for the codegen era.
     /// Refused in const contexts (heap values wait for an interning
@@ -325,24 +325,23 @@ pub enum Builtin {
     /// `add(p, i)` — pointer to element `i` past `p`, within the same
     /// allocation. UNSAFE: it carries a real precondition — advancing a
     /// pointer that does not address an array element with `i > 0` is
-    /// detected UB at the call. Flavor-preserving (`.&raw mut` in →
-    /// `.&raw mut` out) — a checker special case, not expressible as one
-    /// `fn` type. Takes a `usize`; [`Builtin::Offset`] is the signed
-    /// sibling, mirroring Rust's `add`/`offset` split.
+    /// detected UB at the call. Generic in the pointee
+    /// (`fn::<T>(T.&raw, usize) -> T.&raw`); [`Builtin::Offset`] is the
+    /// signed sibling, mirroring Rust's `add`/`offset` split.
     Add,
     /// `offset(p, i)` — the signed sibling of [`Builtin::Add`]: element
     /// arithmetic in both directions, `i: isize`. UNSAFE like `add`, with
     /// one extra precondition: a result index below the allocation's start
     /// (index < 0) is detected UB at the call (the abstract machine cannot
     /// represent it — the same class as `add`'s non-array-element rule).
-    /// Everything else mirrors `add`, flavor preservation included.
+    /// Everything else mirrors `add`.
     Offset,
     /// `copy(src, dst, n)` — element-count bulk copy, memmove semantics
     /// (overlap is DEFINED). UNSAFE (writes through a raw pointer).
     /// Copying an uninitialized element propagates the marker silently —
     /// only reading one *as a value* traps.
     Copy,
-    /// `dangling::<T>()` — a `T.&raw mut` that was never valid (one
+    /// `dangling::<T>()` — a `T.&raw` that was never valid (one
     /// reserved never-live allocation per machine). SAFE; any deref is
     /// detected UB.
     Dangling,
@@ -377,8 +376,7 @@ pub enum Builtin {
     /// UNSAFE, and the marker is about the POINTER, not the text: that `p`
     /// addresses `len` readable bytes is the caller's claim and nothing
     /// checks it. "Checked" names the other half — whether those bytes
-    /// spell a string is answered, not assumed. Flavor-polymorphic in `p`
-    /// (either raw flavor reads), like `copy`'s source.
+    /// spell a string is answered, not assumed.
     ///
     /// PURE, and therefore const-legal: reading bytes and deciding whether
     /// they are UTF-8 observes nothing outside its own arguments.
@@ -409,10 +407,7 @@ pub enum Builtin {
     /// UNSAFE, and the marker is about the DESTINATION, exactly as
     /// [`Builtin::StrFromUtf8`]'s is about the source: that `dst` addresses
     /// `s.len()` WRITABLE bytes is the caller's claim and nothing checks
-    /// it. Unlike the blesses this one is not flavor-polymorphic — a
-    /// destination is written, so it is `u8.&raw mut` and nothing else,
-    /// which also makes it the one `str` byte builtin with an ordinary
-    /// first-class `fn` type.
+    /// it.
     ///
     /// PURE in the sense const contexts care about (it writes only through
     /// a pointer whose target already exists), so it is const-legal on
@@ -586,43 +581,6 @@ impl Builtin {
             Builtin::AllocArray | Builtin::DeallocArray => ConstLegality::HeapFence,
         }
     }
-
-    /// Whether this builtin takes a pointer argument in BOTH raw flavors —
-    /// `T.&raw` and `T.&raw mut` in the same position, which no one `fn`
-    /// type says. Such a builtin is not first-class (a mention that is not
-    /// a call has no type to be a value at) and its call is intercepted by
-    /// the checker instead of being checked against a signature.
-    ///
-    /// Exhaustive on purpose, like [`Builtin::const_legality`] and
-    /// [`Builtin::requires_unsafe`]: a new builtin's pointer shape is a
-    /// decision, not something it inherits by being left off a list.
-    pub fn flavor_polymorphic(self) -> bool {
-        match self {
-            // Each reads (the blesses) or moves (`add`/`offset`) through a
-            // pointer whose flavor the caller chose, and `copy` reads its
-            // source the same way — no one `fn` type says that.
-            Builtin::Add
-            | Builtin::Offset
-            | Builtin::Copy
-            | Builtin::StrFromUtf8
-            | Builtin::StrFromUtf8Unchecked => true,
-            // A single fixed flavor each, so an ordinary `fn` type says
-            // it: `str_bytes` WRITES through `u8.&raw mut` only,
-            // `dealloc_array` frees a `.&raw mut` allocation only, and
-            // `dangling` PRODUCES a pointer rather than taking one.
-            Builtin::StrBytes | Builtin::DeallocArray | Builtin::Dangling => false,
-            // No pointer argument to be polymorphic in at all:
-            // `alloc_array` takes a count, `next_char`/`len` read through
-            // the receiver's own representation, and
-            // `print`/`panic`/`read_line` take no pointer either.
-            Builtin::Print
-            | Builtin::Panic
-            | Builtin::AllocArray
-            | Builtin::ReadLine
-            | Builtin::NextChar
-            | Builtin::StrLen => false,
-        }
-    }
 }
 
 /// The [`ItemLoc`] of the compiler-provided declaration `name`, in the
@@ -642,7 +600,7 @@ pub fn prelude_loc(db: &dyn Db, name: &str) -> ItemLoc {
 
 /// The result-shaped return of `alloc_array` (and the library convention
 /// for fallible allocators built over it): a compiler-provided generic enum
-/// `AllocResult::<T> = enum { Ok(T.&raw mut), Err }`.
+/// `AllocResult::<T> = enum { Ok(T.&raw), Err }`.
 pub const ALLOC_RESULT_NAME: &str = "AllocResult";
 
 /// The result-shaped return of `read_line` (P04): a compiler-provided
@@ -756,16 +714,16 @@ impl SyntheticDecl {
 pub fn synthetic_decls() -> &'static [SyntheticDecl] {
     static DECLS: std::sync::LazyLock<Vec<SyntheticDecl>> = std::sync::LazyLock::new(|| {
         vec![
-            // `AllocResult::<T> = enum { Ok(T.&raw mut), Err }` — the one
+            // `AllocResult::<T> = enum { Ok(T.&raw), Err }` — the one
             // generic row. `AllocResult::<T>` only ever holds a POINTER to a
-            // `T` (`Ok(T.&raw mut)`), never a `T`, so a linear `T` costs
+            // `T` (`Ok(T.&raw)`), never a `T`, so a linear `T` costs
             // it nothing — and a data-side parameter asks for no
             // capability anyway (T22).
             SyntheticDecl {
                 name: ALLOC_RESULT_NAME,
                 generics: vec![type_param("T")],
                 variants: vec![
-                    ("Ok".to_owned(), vec![raw_ptr_mut("T")]),
+                    ("Ok".to_owned(), vec![raw_ptr("T")]),
                     ("Err".to_owned(), Vec::new()),
                 ],
             },
@@ -812,10 +770,9 @@ fn path(name: &str) -> TypeRef {
     TypeRef::Path(name.to_owned())
 }
 
-/// `T.&raw mut` — a mutable raw pointer to a named type.
-fn raw_ptr_mut(name: &str) -> TypeRef {
+/// `T.&raw` — a raw pointer to a named type.
+fn raw_ptr(name: &str) -> TypeRef {
     TypeRef::RawPtr {
-        mutable: true,
         inner: Box::new(path(name)),
     }
 }
