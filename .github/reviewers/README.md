@@ -9,15 +9,17 @@ posts their findings as one review of inline comments, and keeps one summary
 comment on the PR with a section per reviewer, rewritten in place each round.
 
 Each push that changes the PR's patch starts another round (a rebase
-alone does not), as do reopening it and marking it ready, until five
-rounds have run (`MAX_ROUNDS` in the workflow). Past that, a push still
-gets a round from each reviewer whose latest round raised findings, so the
-change answering them is reviewed; once none did, the summary comment says
-the PR needs a human look. In a later round a reviewer checks that its
+alone does not), as does reopening it, until five rounds have run
+(`MAX_ROUNDS` in the workflow). Past that, a push still gets a round from
+each reviewer whose latest round raised findings, so the change answering
+them is reviewed; once none did, the summary comment says the PR needs a
+human look. In a later round a reviewer checks that its
 earlier findings were fixed, replying in their threads where needed, and
 reviews what changed for new problems. Adding the `review` label asks for
 a round at any time and starts a fresh budget of five, counting that
 round; it is meant for humans, and comes off again when the round ends.
+Marking a draft ready for review does the same, since the rounds before it
+reviewed a change that was not ready.
 
 The `review gate` status on the PR's head says whether the reviewers are
 done with it. It is red while a thread a reviewer opened is unresolved, and
