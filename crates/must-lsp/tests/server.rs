@@ -1282,6 +1282,58 @@ static main = fn () -> () {
     drop(client);
 }
 
+#[test]
+fn dot_completion_tags_a_refused_call_deprecated() {
+    let mut client = TestClient::start();
+    let file = uri("file:///refused_completion.must");
+
+    client.open(
+        &file,
+        r#"
+type Counter = struct { n: usize } with {
+    impl Self {
+        get = fn::<@a>(s: Self.&::<@a>) -> usize { s.*.n };
+        add = fn::<@a>(s: Self.&mut::<@a>) -> () { s.*.n = 1; };
+    }
+};
+static main = fn () -> () {
+    let c: Counter = Counter(struct { n = 1 });
+    c.
+};
+"#,
+    );
+    client.next_diagnostics();
+
+    // After `c.` on line 9: `c` is immutable, so `.&mut.add()` is refused.
+    let response = client.request::<lsp_types::request::Completion>(lsp_types::CompletionParams {
+        text_document_position: lsp_types::TextDocumentPositionParams {
+            text_document: lsp_types::TextDocumentIdentifier { uri: file.clone() },
+            position: lsp_types::Position::new(9, 6),
+        },
+        work_done_progress_params: Default::default(),
+        partial_result_params: Default::default(),
+        context: None,
+    });
+    let Some(lsp_types::CompletionResponse::Array(items)) = response else {
+        panic!("expected a plain array of completion items, got {response:?}");
+    };
+    let tags = |label: &str| {
+        items
+            .iter()
+            .find(|it| it.label == label)
+            .unwrap_or_else(|| panic!("member `{label}` is offered"))
+            .tags
+            .clone()
+    };
+    assert_eq!(tags("get"), None);
+    assert_eq!(
+        tags("add"),
+        Some(vec![lsp_types::CompletionItemTag::DEPRECATED])
+    );
+
+    drop(client);
+}
+
 /// `InitializeParams` advertising (or not) `snippetSupport` — the one
 /// capability snippet insertion gates on (`GlobalState::new`'s
 /// `snippet_support`).

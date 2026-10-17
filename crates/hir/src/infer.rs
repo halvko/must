@@ -2431,11 +2431,32 @@ pub fn mut_borrow_refused<'db>(db: &'db dyn Db, item: ItemId<'db>, place: ExprId
         ExprData::Deref { receiver } if matches!(types.get(*receiver), Some(Ty::RawPtr { .. })) => {
             true
         }
-        _ => {
-            let mut ty_of = |expr| types.get(expr).cloned().unwrap_or(Ty::Error);
-            shared_step(body, place, &mut ty_of).is_some()
-        }
+        _ => mut_reborrow_refused(db, item, place),
     }
+}
+
+/// Whether the dot receiver at `place`, walked by `receiver`, can provide a
+/// `&mut`. A borrow can if every layer is `&mut` and `place` is not read
+/// through a shared borrow; an owned value can if `place.&mut` is allowed.
+pub fn dot_receiver_exclusive<'db>(
+    db: &'db dyn Db,
+    item: ItemId<'db>,
+    place: ExprId,
+    receiver: &crate::ty::DerefReceiver,
+) -> bool {
+    match receiver.receiver {
+        Ty::Borrow { .. } => receiver.layers_exclusive && !mut_reborrow_refused(db, item, place),
+        _ => !mut_borrow_refused(db, item, place),
+    }
+}
+
+/// Whether a `&mut` reborrow through the borrow `place` is refused because
+/// the place is read through a shared borrow (`s.*.c` with `s: S.&`),
+/// whatever the root's `mut`ness.
+fn mut_reborrow_refused<'db>(db: &'db dyn Db, item: ItemId<'db>, place: ExprId) -> bool {
+    let types = &infer(db, item).type_of_expr;
+    let mut ty_of = |expr| types.get(expr).cloned().unwrap_or(Ty::Error);
+    shared_step(body(db, item), place, &mut ty_of).is_some()
 }
 
 /// [`InferCtx::shared_step_governing`]'s walk, reading each deref's

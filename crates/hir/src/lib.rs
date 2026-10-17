@@ -54,10 +54,11 @@ pub use trap_sites::{
     BodyError, ErrorOwners, TrapSite, error_owners, range_traps, trap_sites_for_pats,
 };
 pub use ty::{
-    ConstArgValue, DotReach, FnTy, GenericArg, IntKind, IntValue, NamedTy, ReceiverShape, Region,
-    RegionVar, ResolvedVariant, SelfPosition, Ty, annotation_text, dispatches_on, dot_reach,
-    enum_variants, member_self_position, member_self_ty, receiver_takes, render_variant, signature,
-    substitute_args, type_underlying, type_underlying_for, variant_payloads_for, widens_to,
+    ConstArgValue, DerefReceiver, DotOffer, DotReach, FnTy, GenericArg, IntKind, IntValue, NamedTy,
+    ReceiverShape, RecordTy, Region, RegionVar, ResolvedVariant, SelfPosition, Ty, annotation_text,
+    deref_receiver, dispatches_on, dot_offer, dot_reach, enum_variants, member_self_position,
+    member_self_ty, receiver_takes, render_variant, signature, substitute_args, type_underlying,
+    type_underlying_for, variant_payloads_for, widens_to,
 };
 pub use unsafe_check::UnsafeCheckDiagnostic;
 

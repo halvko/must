@@ -1582,6 +1582,41 @@ impl ReceiverShape {
     }
 }
 
+/// The receiver a dot reaches through written `.*`s.
+pub struct DerefReceiver {
+    /// The borrow layers above [`Self::receiver`], one `.*` each.
+    pub layers: usize,
+    /// `ty`'s innermost borrow layer, or `ty` itself when it is no borrow.
+    pub receiver: Ty,
+    /// Whether every borrow layer, [`Self::receiver`]'s included, is `&mut`;
+    /// true when `ty` is no borrow.
+    pub layers_exclusive: bool,
+}
+
+/// `ty`'s [`DerefReceiver`]. Raw pointers are not walked.
+pub fn deref_receiver(ty: &Ty) -> DerefReceiver {
+    let mut layers = 0;
+    let mut receiver = ty;
+    let mut layers_exclusive = true;
+    while let Ty::Borrow {
+        mutable, referent, ..
+    } = receiver
+        && let Ty::Borrow { .. } = &**referent
+    {
+        layers += 1;
+        layers_exclusive &= *mutable;
+        receiver = referent;
+    }
+    if let Ty::Borrow { mutable, .. } = receiver {
+        layers_exclusive &= *mutable;
+    }
+    DerefReceiver {
+        layers,
+        receiver: receiver.clone(),
+        layers_exclusive,
+    }
+}
+
 /// Where `Self` sits in an already-lowered signature, given the type
 /// standing for `Self` — the structural test over a `Ty` rather than over a
 /// declaration, so a trait REQUIREMENT's freshly-lowered signature and a
@@ -1675,6 +1710,31 @@ pub fn dot_reach(receiver: ReceiverShape, position: SelfPosition) -> Option<DotR
 /// requirement's freshly-lowered signature.
 pub fn dot_callable(sig: &Ty, self_ty: &Ty, receiver: ReceiverShape) -> bool {
     dot_reach_of(sig, self_ty, receiver) == Some(DotReach::Direct)
+}
+
+/// What the dot offers for a member with this `Self` position.
+pub struct DotOffer {
+    pub reach: DotReach,
+    /// The position takes `Self.&mut` and the receiver can't provide one:
+    /// the call is refused (P16).
+    pub refused: bool,
+}
+
+/// The dot's [`DotOffer`] for a member with this `Self` position, on a
+/// receiver of type `receiver` that can (`exclusive`) or can't provide a
+/// `&mut`. Reach depends on owned vs borrow alone, so a member refused for
+/// want of `&mut` is offered refused, not hidden.
+pub fn dot_offer(receiver: &Ty, exclusive: bool, position: SelfPosition) -> Option<DotOffer> {
+    // Any borrow reaches both borrow positions; whether it can give the
+    // `&mut` one is `exclusive`'s question.
+    let reach_shape = match receiver {
+        Ty::Borrow { .. } => ReceiverShape::Borrow { mutable: true },
+        _ => ReceiverShape::Owned,
+    };
+    Some(DotOffer {
+        reach: dot_reach(reach_shape, position)?,
+        refused: position == (SelfPosition::Borrow { mutable: true }) && !exclusive,
+    })
 }
 
 /// [`dot_reach`] judged from a SIGNATURE and the type standing for its
