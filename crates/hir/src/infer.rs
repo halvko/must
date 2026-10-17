@@ -19,7 +19,7 @@ use crate::body::{
     body,
 };
 use crate::constraint::{
-    self, Cause, Constraints, Join, RegionConstraint, RegionConstraintReason, Witness,
+    self, Cause, Constraints, Join, RegionConstraint, RegionConstraintReason, Relation, Witness,
     is_unresolved_number, resolve_args_fully, resolve_finished, resolve_fully,
 };
 use crate::item_tree::RegionRef;
@@ -30,10 +30,10 @@ use crate::scopes::{Builtin, Resolution, resolutions, type_scope};
 use crate::traits::BoundDotCandidate;
 use crate::ty::{
     ConstArgValue, GenericArg, IntKind, IntValue, NamedTy, ParamScope, ReceiverShape, Region,
-    ResolvedVariant, SelfPosition, Ty, TyVar, TyVarValue, builtin_type_by_name, dot_callable,
-    enum_variants, generic_param_scope, lower_type_ref_in, member_self_position, member_self_ty,
-    receiver_takes, self_position_of, signature, signature_needs_annotation, substitute_args,
-    type_underlying_for,
+    ResolvedVariant, Safety, SelfPosition, Ty, TyVar, TyVarValue, builtin_type_by_name,
+    dot_callable, enum_variants, generic_param_scope, lower_type_ref_in, member_self_position,
+    member_self_ty, receiver_takes, self_position_of, signature, signature_needs_annotation,
+    substitute_args, type_underlying_for,
 };
 use crate::{ItemId, ItemLoc, Severity, TypeRef, item_loc};
 
@@ -2584,6 +2584,12 @@ pub(crate) struct InferCtx<'a, 'db> {
     /// initializers, call arguments, statements, conditions, …) it is
     /// `None` and an `if` there resolves as its own join.
     witness_sink: Option<usize>,
+    /// Inside an `unsafe { }` block of the function being checked (a
+    /// function literal resets it, as `unsafe_check` does).
+    in_unsafe: bool,
+    /// The callee safety of each call outside `unsafe { }`, settled to safe
+    /// when the body's joins have solved ([`Constraints::settle_safety`]).
+    safe_calls: Vec<Safety>,
     /// The loop-context stack: for each `loop` currently being inferred
     /// (innermost last), the index of the join sink its `break` values are
     /// witnesses of. Function literals and `const` blocks RESET it (a
@@ -2843,6 +2849,8 @@ impl<'a, 'db> InferCtx<'a, 'db> {
             scope_depth: 0,
             join_sinks: Vec::new(),
             witness_sink: None,
+            in_unsafe: false,
+            safe_calls: Vec::new(),
             loop_sinks: Vec::new(),
             return_targets: Vec::new(),
             type_params: ParamScope::default(),
@@ -3350,6 +3358,8 @@ impl<'a, 'db> InferCtx<'a, 'db> {
     pub(crate) fn solve(&mut self) {
         let diagnostics = self.constraints.solve(self.table);
         self.result.diagnostics.extend(diagnostics);
+        let called = std::mem::take(&mut self.safe_calls);
+        self.constraints.settle_safety(self.table, called);
     }
 
     fn finish(mut self) -> InferenceResult {
@@ -5024,7 +5034,9 @@ impl<'a, 'db> InferCtx<'a, 'db> {
             // separate unit): `loop { unsafe { break p.* } }` is fine.
             ExprData::Unsafe { body: inner } => {
                 self.witness_sink = sink;
+                let outer = std::mem::replace(&mut self.in_unsafe, true);
                 let ty = self.infer_expr_with(*inner, expected, cause);
+                self.in_unsafe = outer;
                 self.result.type_of_expr.insert(expr, ty.clone());
                 return ty;
             }
@@ -5133,7 +5145,9 @@ impl<'a, 'db> InferCtx<'a, 'db> {
                     ty: ret.clone(),
                     cause: ret_cause,
                 });
+                let outer = std::mem::replace(&mut self.in_unsafe, false);
                 let body_ty = self.infer_expr_with(fn_body, &ret, ret_cause);
+                self.in_unsafe = outer;
                 self.return_targets.pop();
                 self.loop_sinks = saved_loops;
                 self.scope_depth -= 1;
@@ -5525,18 +5539,15 @@ impl<'a, 'db> InferCtx<'a, 'db> {
             Ty::Infer(var) => {
                 let params: Vec<Ty> = args.iter().map(|_| self.fresh_var()).collect();
                 let ret = self.fresh_var();
-                // A call learns the callee's SHAPE and must not invent its
-                // SAFETY — but committing the variable to a `Ty::Fn` means
-                // naming one, so the answer is asked for rather than
-                // guessed: a join that has not solved yet is the one thing
-                // that can still be holding the value, and its witnesses
-                // know. Anything else (a mutually-recursive item signature,
-                // the usual case here) is safe, and can only be safe: an
-                // inferred signature is never an `extern` item's.
-                let unsafe_to_call = self
-                    .constraints
-                    .pending_join_mints_unsafe_fn(self.table, var);
-                let shape = Ty::fn_type_with(unsafe_to_call, params.clone(), ret.clone());
+                // A call learns the callee's SHAPE and not its SAFETY:
+                // whatever produces the value decides that (a join that
+                // solves later, a cycle mate's body). Outside `unsafe { }`
+                // it is settled safe once this body's joins have solved.
+                let safety = Safety::Infer(self.table.new_key(TyVarValue::Unknown));
+                let shape = Ty::fn_type_safety(safety, params.clone(), ret.clone());
+                if !self.in_unsafe {
+                    self.safe_calls.push(safety);
+                }
                 if self.adopt(&Ty::Infer(var), &shape) {
                     for (i, &arg) in args.iter().enumerate() {
                         self.infer_expr(arg, &params[i]);
@@ -5559,6 +5570,9 @@ impl<'a, 'db> InferCtx<'a, 'db> {
                 }
             }
             Ty::Fn(f) => {
+                if !self.in_unsafe {
+                    self.safe_calls.push(f.safety);
+                }
                 if f.params.len() != args.len() {
                     self.result
                         .diagnostics
@@ -10367,28 +10381,19 @@ impl<'a, 'db> InferCtx<'a, 'db> {
             if self.try_reborrow(expr, &actual, expected) {
                 return self.resolve_shallow(expected);
             }
-        } else if self
-            .constraints
-            .relate(self.table, &actual, expected, expr, cause)
-        {
-            return actual;
-        }
-        let resolved_actual = self.resolve_shallow(&actual);
-        let resolved_expected = self.resolve_shallow(expected);
-        // SAFE fn → UNSAFE fn, the one directed conversion on function
-        // types and the only one there will be: a value that needs no
-        // vouching is welcome in a position willing to vouch. Nothing is
-        // recorded for MIR — this converts no bits, it only declines a
-        // permission the position was not going to use. The judgement
-        // itself lives in `Constraints`, because the JOIN solver is a
-        // check site too and has to make exactly this call.
-        if self.constraints.coerce_fn_to_unsafe(
-            self.table,
-            &resolved_actual,
-            &resolved_expected,
-            expr,
-        ) {
-            return resolved_expected;
+        } else {
+            match self
+                .constraints
+                .relate_value(self.table, &actual, expected, expr, cause)
+            {
+                Relation::Equal => return actual,
+                // SAFE fn → UNSAFE fn: a value that needs no vouching is
+                // welcome where the position is willing to vouch. Converts no
+                // bits, so nothing is recorded for MIR. A converted value
+                // reads as the EXPECTED type, so hover shows `unsafe fn(...)`.
+                Relation::Converted => return self.resolve_shallow(expected),
+                Relation::Mismatch => {}
+            }
         }
         let mut reasons: Vec<Cause> = cause.into_iter().collect();
         // When a turbofish pinned the expected side, say so: direct checks

@@ -145,13 +145,19 @@
   returning and forgetting one are free. The type is the only thing that travels with a value
   through a `let`, an argument, a return or a field, so the call site always knows. Coercion
   is one-way, safe to unsafe, applied at check sites and never inferred backwards through a
-  variable. It is shallow: no variance, so a formed
+  variable. While a function's safety is unknown it is a variable, solved like the rest of the
+  type: unifying two fn types makes their safeties equal, every check site relates them by safe
+  `<=` unsafe (a free position gets a safety of its own), a call outside `unsafe { }` makes its
+  callee safe once the body's joins have solved, and one nothing forces to unsafe is safe. So an
+  `unsafe fn` position never decides that the value going into it is unsafe, and the order of a
+  body's uses doesn't matter (#168). A relation still open when its body is solved becomes an
+  equality, since a later body in the same group sees the variables but not the direction
+  between them. It is shallow: no variance, so a formed
   `struct { go: fn() }` does not convert, while a record LITERAL does, field by field,
   because a literal's fields are checked one at a time against the annotation. It has no
   runtime consequence: the conversion moves no bits, it declines a permission. A join takes
-  the LUB wherever it has a check site or a consuming call to convert at; an unannotated,
-  unconsumed mixed-safety join has neither, so it is a branch disagreement asking for an
-  annotation. One population gets the type without writing it: every builtin that requires the
+  the LUB: a safe branch converts into it, so a mixed-safety join is an `unsafe fn`. One
+  population gets the type without writing it: every builtin that requires the
   marker and has a first-class fn type (`dealloc_array`, `str_bytes`). An `extern` item writes it
   when its signature calls for one — the declaration is the whole contract, and the type says
   exactly what is true of it, `unsafe` included only where the call really costs something

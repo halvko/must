@@ -1558,7 +1558,7 @@ impl LowerCtx<'_> {
                     _ => hir::FnTy {
                         params: Vec::new(),
                         ret: Ty::Error,
-                        unsafe_to_call: true,
+                        safety: hir::Safety::Unsafe,
                     },
                 };
                 Operand::Const(Const::ExternFn {

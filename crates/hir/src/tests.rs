@@ -16036,16 +16036,16 @@ fn a_join_of_unsafe_fns_is_an_unsafe_fn_and_its_call_is_gated() {
     // the call that has to commit `g`'s variable to a function shape — and
     // a call has no business naming a safety. Guessing safe here refused a
     // value every branch produced, blaming `fn(...)`, a shape nothing in
-    // the source asked for. The witnesses are asked instead.
+    // the source asked for. The safety stays open, and the join decides it.
     check_unsafe_fn(
-        "static gated = fn(c: bool, p: u8.&raw mut, n: usize) -> isize { \
-             let g = if c { read } else { read }; g(p, n) \
-         };\n\
-         static ok = fn(c: bool, p: u8.&raw mut, n: usize) -> isize { \
-             let g = if c { read } else { read }; unsafe { g(p, n) } \
-         };",
+        r#"static gated = fn(c: bool, p: u8.&raw mut, n: usize) -> isize {
+    let g = if c { read } else { read }; g(p, n)
+};
+static ok = fn(c: bool, p: u8.&raw mut, n: usize) -> isize {
+    let g = if c { read } else { read }; unsafe { g(p, n) }
+};"#,
         expect![[r#"
-            236..243: calling a value of `unsafe fn` type requires an `unsafe { ... }` block
+            240..247: calling a value of `unsafe fn` type requires an `unsafe { ... }` block
         "#]],
     );
 }
@@ -16057,28 +16057,166 @@ fn a_join_of_safe_functions_stays_safe_when_called() {
     // have made this the bug, in the direction that demands markers nobody
     // owes.)
     check_unsafe_fn(
-        "static other = fn(buf: u8.&raw mut, len: usize) -> isize { 1 };\n\
-         static f = fn(c: bool, p: u8.&raw mut, n: usize) -> isize { \
-             let g = if c { safe_read } else { other }; g(p, n) \
-         };",
+        r#"static other = fn(buf: u8.&raw mut, len: usize) -> isize { 1 };
+static f = fn(c: bool, p: u8.&raw mut, n: usize) -> isize {
+    let g = if c { safe_read } else { other }; g(p, n)
+};"#,
         expect![[r#""#]],
     );
 }
 
 #[test]
-fn a_match_join_and_a_loop_break_join_mint_the_same_way() {
-    // The sink is shared machinery, so the fix has to be too: `match` arms
-    // and `break` values reach the same mint by the same path.
+fn a_match_join_and_a_loop_break_join_decide_safety_the_same_way() {
+    // The sink is shared machinery: `match` arms and `break` values decide
+    // the call's open safety by the same path.
     check_unsafe_fn(
-        "static by_match = fn(k: char, p: u8.&raw mut, len: usize) -> isize { \
-             let g = match k { \'a\' => read, _ => read }; g(p, len) \
-         };\n\
-         static by_break = fn(c: bool, p: u8.&raw mut, len: usize) -> isize { \
-             let g = loop { if c { break read; }; break read; }; g(p, len) \
-         };",
+        r#"static by_match = fn(k: char, p: u8.&raw mut, len: usize) -> isize {
+    let g = match k { 'a' => read, _ => read }; g(p, len)
+};
+static by_break = fn(c: bool, p: u8.&raw mut, len: usize) -> isize {
+    let g = loop { if c { break read; }; break read; }; g(p, len)
+};"#,
         expect![[r#"
-            248..257: calling a value of `unsafe fn` type requires an `unsafe { ... }` block
-            382..391: calling a value of `unsafe fn` type requires an `unsafe { ... }` block
+            252..261: calling a value of `unsafe fn` type requires an `unsafe { ... }` block
+            390..399: calling a value of `unsafe fn` type requires an `unsafe { ... }` block
+        "#]],
+    );
+}
+
+#[test]
+fn an_unsafe_fn_position_does_not_make_its_value_unsafe_in_either_order() {
+    // Passing a value where an `unsafe fn` is expected says it MAY be unsafe
+    // to call, not that it is: a safe one fits too. Nothing here decides
+    // `f`'s safety, so it is a safe `fn()` and the call needs no block,
+    // whichever comes first.
+    check_unsafe_fn(
+        r#"static before = fn(f) -> () { let g: unsafe fn() = f; f(); };
+static after = fn(f) -> () { f(); let g: unsafe fn() = f; };"#,
+        expect![[r#""#]],
+    );
+}
+
+#[test]
+fn a_safe_alias_in_a_call_cycle_stays_callable_after_an_unsafe_fn_use() {
+    // #168. `q` is an unannotated alias inside the cycle `p → q → r → p`,
+    // so `p` meets it before its type is known. Meeting the `unsafe fn()`
+    // parameter must leave its safety open for the group to decide (safe,
+    // from `r`), or `q()` reads as a call to an `unsafe fn`.
+    check_unsafe_fn(
+        r#"static vouch = fn(f: unsafe fn()) -> () { };
+static r = fn() -> () { p(); };
+static q = r;
+static p = fn() -> () { vouch(q); q(); };
+static r2 = fn() -> () { p2(); };
+static q2 = r2;
+static p2 = fn() -> () { let f: unsafe fn() = q2; q2(); };"#,
+        expect![[r#""#]],
+    );
+}
+
+#[test]
+fn a_hole_parameter_called_outside_unsafe_refuses_an_unsafe_argument() {
+    // `p` calls `f` outside `unsafe { }`, so `p`'s own body decides `f` is
+    // safe; a caller checked later must not reopen that, or `p` would call
+    // `read` with no block. In `vouched` the call is inside one, so the
+    // caller is free to pass an `unsafe fn`.
+    check_unsafe_fn(
+        r#"static p = fn(f, b: u8.&raw mut) -> () { let n: usize = 1; let x: isize = f(b, n); };
+static q = fn(b: u8.&raw mut) -> () { p(read, b); };
+static vouched = fn(f, b: u8.&raw mut) -> () {
+    let n: usize = 1;
+    let x: isize = unsafe { f(b, n) };
+};
+static r = fn(b: u8.&raw mut) -> () { vouched(read, b); };"#,
+        expect![[r#"
+            261..265: type mismatch: expected `fn(u8.&raw mut, usize) -> isize`, found `unsafe fn(u8.&raw mut, usize) -> isize`
+        "#]],
+    );
+}
+
+#[test]
+fn a_caller_checked_first_cannot_make_a_called_parameter_unsafe() {
+    // The same as above with the caller first in item order: `read` is still
+    // refused.
+    // TODO: halvko/must#164: the group checks members in item order, so the
+    // conflict poisons `p` instead of landing at `q`'s argument.
+    check_unsafe_fn(
+        r#"static q = fn(b) -> () { p(read, b); };
+static p = fn(f, b: u8.&raw mut) -> () { let n: usize = 1; let x: isize = f(b, n); };"#,
+        expect![[r#"
+            160..161: not enough information to infer the type of `p`; add a type annotation to its definition (defined here at 182..183)
+        "#]],
+    );
+}
+
+#[test]
+fn a_returned_alias_of_a_parameter_keeps_its_safety_across_bodies() {
+    // `g` and the result take `f`'s safety through edges that end with
+    // `p`'s body, so they become equations there: when `q` passes `read`,
+    // the function `p` returns is unsafe too, and calling it needs a block.
+    check_unsafe_fn(
+        r#"static p = fn(f, b: u8.&raw mut) {
+    let n: usize = 1;
+    let x: isize = unsafe { f(b, n) };
+    let g = f;
+    g
+};
+static q = fn(b: u8.&raw mut) -> () {
+    let n: usize = 1;
+    let k = p(read, b);
+    let y: isize = k(b, n);
+};"#,
+        expect![[r#"
+            358..365: calling a value of `unsafe fn` type requires an `unsafe { ... }` block
+        "#]],
+    );
+}
+
+#[test]
+fn a_hole_parameter_only_passed_on_takes_an_unsafe_argument() {
+    // Nothing in `stash` calls `f`, so its safety stays open for its
+    // callers to fill.
+    check_unsafe_fn(
+        r#"static stash = fn(f) -> () { let g: unsafe fn(u8.&raw mut, usize) -> isize = f; };
+static use_it = fn() -> () { stash(read) };"#,
+        expect![[r#""#]],
+    );
+}
+
+#[test]
+fn unsafety_does_not_flow_back_into_a_value_through_a_binding() {
+    // `m` gets `f`'s shape with a safety of its own, so assigning `read` to
+    // it makes `m` unsafe and leaves `f` safe: the call on `f` needs no
+    // block in either order.
+    check_unsafe_fn(
+        r#"static before = fn(f, b: u8.&raw mut) -> () {
+    let n: usize = 1;
+    let x: isize = f(b, n);
+    let mut m = f;
+    m = read;
+};
+static after = fn(f, b: u8.&raw mut) -> () {
+    let n: usize = 1;
+    let mut m = read;
+    m = f;
+    let x: isize = f(b, n);
+};"#,
+        expect![[r#""#]],
+    );
+}
+
+#[test]
+fn an_open_safety_decided_unsafe_is_refused_by_a_safe_parameter() {
+    // The other direction: `g` is open until the join makes it unsafe, and
+    // then a safe `fn` parameter refuses it.
+    check_unsafe_fn(
+        r#"static takes_safe = fn(g: fn(u8.&raw mut, usize) -> isize) -> () { };
+static f = fn(c: bool) -> () {
+    let g = if c { read } else { safe_read };
+    takes_safe(g)
+};"#,
+        expect![[r#"
+            255..259: type mismatch: expected `fn(u8.&raw mut, usize) -> isize`, found `unsafe fn(u8.&raw mut, usize) -> isize` (this call requires `fn(u8.&raw mut, usize) -> isize` at 286..296) (this argument needs to be `fn(u8.&raw mut, usize) -> isize` at 297..298)
         "#]],
     );
 }
@@ -16104,27 +16242,26 @@ fn a_join_mixing_a_safe_fn_and_an_unsafe_fn_settles_on_the_unsafe_one() {
 }
 
 #[test]
-fn a_chain_of_pending_joins_is_followed_to_its_unsafe_witness() {
-    // The witness question is TRANSITIVE, because joins are: `g`'s
-    // witnesses are `h`, whose own join has not solved either, so a
-    // one-hop question would see no function at all and mint safe —
-    // reproducing the refusal above one `let` further away.
+fn a_chain_of_joins_decides_the_calls_open_safety_as_unsafe() {
+    // `g`'s witnesses are `h`, whose join has not solved either when `g` is
+    // called; the safety the call left open is decided once both joins
+    // have.
     check_unsafe_fn(
-        "static gated = fn(c: bool, d: bool, p: u8.&raw mut, n: usize) -> isize { \
-             let h = if d { read } else { read }; \
-             let g = if c { h } else { h }; g(p, n) \
-         };\n\
-         static mixed = fn(c: bool, d: bool, p: u8.&raw mut, n: usize) -> isize { \
-             let h = if d { read } else { read }; \
-             let g = if c { h } else { safe_read }; g(p, n) \
-         };\n\
-         static ok = fn(c: bool, d: bool, p: u8.&raw mut, n: usize) -> isize { \
-             let h = if d { read } else { read }; \
-             let g = if c { h } else { h }; unsafe { g(p, n) } \
-         };",
+        r#"static gated = fn(c: bool, d: bool, p: u8.&raw mut, n: usize) -> isize {
+    let h = if d { read } else { read };
+    let g = if c { h } else { h }; g(p, n)
+};
+static mixed = fn(c: bool, d: bool, p: u8.&raw mut, n: usize) -> isize {
+    let h = if d { read } else { read };
+    let g = if c { h } else { safe_read }; g(p, n)
+};
+static ok = fn(c: bool, d: bool, p: u8.&raw mut, n: usize) -> isize {
+    let h = if d { read } else { read };
+    let g = if c { h } else { h }; unsafe { g(p, n) }
+};"#,
         expect![[r#"
-            276..283: calling a value of `unsafe fn` type requires an `unsafe { ... }` block
-            436..443: calling a value of `unsafe fn` type requires an `unsafe { ... }` block
+            284..291: calling a value of `unsafe fn` type requires an `unsafe { ... }` block
+            452..459: calling a value of `unsafe fn` type requires an `unsafe { ... }` block
         "#]],
     );
 }
@@ -16160,17 +16297,19 @@ fn a_converted_fn_takes_the_type_of_the_position_it_landed_in() {
 }
 
 #[test]
-fn an_unconsumed_mixed_safety_join_is_a_branch_disagreement() {
-    // The LUB is taken where the join has somewhere to convert AT — a check
-    // site, or a consuming call that mints the callee shape. With neither,
-    // the family vote runs instead, and a fn type is its own family with
-    // the flag inside its identity: two branches tie, so the join is
-    // reported as the branch disagreement it is and the message names the
-    // fix (an annotation; a call would do as well).
+fn an_unconsumed_mixed_safety_join_is_an_unsafe_fn() {
+    // A safe branch's safety is its own variable once it flows into the
+    // join, so it does not vote against the unsafe one: the join is the
+    // least type both convert to, `unsafe fn`, with or without a check site
+    // or a call to convert at. Calling it then needs the block.
     check_unsafe_fn(
-        "static f = fn(c: bool) -> () { let g = if c { read } else { safe_read }; };",
+        r#"static f = fn(c: bool) -> () { let g = if c { read } else { safe_read }; };
+static called = fn(c: bool, p: u8.&raw mut) -> isize {
+    let g = if c { read } else { safe_read };
+    g(p, 1)
+};"#,
         expect![[r#"
-            195..204: `if` branches have incompatible types: `unsafe fn(u8.&raw mut, usize) -> isize` vs `fn(u8.&raw mut, usize) -> isize`; add a type annotation to decide between them (this branch has type `unsafe fn(u8.&raw mut, usize) -> isize` at 181..185)
+            316..323: calling a value of `unsafe fn` type requires an `unsafe { ... }` block
         "#]],
     );
 }
@@ -16183,14 +16322,14 @@ fn a_join_converts_a_safe_branch_at_an_unsafe_fn_annotation() {
     // because each reaches the witness loop with a different axiom behind
     // the expectation: an annotation, an argument, a return type.
     check_unsafe_fn(
-        "static takes = fn(g: unsafe fn(u8.&raw mut, usize) -> isize) -> () { };\n\
-         static annotated = fn(c: bool) -> () { \
-             let g: unsafe fn(u8.&raw mut, usize) -> isize = if c { read } else { safe_read }; \
-         };\n\
-         static argument = fn(c: bool) -> () { takes(if c { read } else { safe_read }) };\n\
-         static returned = fn(c: bool) -> unsafe fn(u8.&raw mut, usize) -> isize { \
-             if c { read } else { safe_read } \
-         };",
+        r#"static takes = fn(g: unsafe fn(u8.&raw mut, usize) -> isize) -> () { };
+static annotated = fn(c: bool) -> () {
+    let g: unsafe fn(u8.&raw mut, usize) -> isize = if c { read } else { safe_read };
+};
+static argument = fn(c: bool) -> () { takes(if c { read } else { safe_read }) };
+static returned = fn(c: bool) -> unsafe fn(u8.&raw mut, usize) -> isize {
+    if c { read } else { safe_read }
+};"#,
         expect![[r#""#]],
     );
 }

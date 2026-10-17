@@ -511,7 +511,7 @@ impl Analysis {
             // exactly one possible answer to ▶, the unsafe-block refusal.
             // Offering a button whose only outcome is a diagnostic is worse
             // than offering none.
-            if f.unsafe_to_call {
+            if f.unsafe_to_call() {
                 continue;
             }
             let Some(name_node) = hir::item_source(&self.db, item).and_then(|it| it.name()) else {

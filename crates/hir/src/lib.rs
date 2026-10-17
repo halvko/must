@@ -55,9 +55,10 @@ pub use trap_sites::{
 };
 pub use ty::{
     ConstArgValue, DotReach, FnTy, GenericArg, IntKind, IntValue, NamedTy, ReceiverShape, Region,
-    RegionVar, ResolvedVariant, SelfPosition, Ty, annotation_text, dispatches_on, dot_reach,
-    enum_variants, member_self_position, member_self_ty, receiver_takes, render_variant, signature,
-    substitute_args, type_underlying, type_underlying_for, variant_payloads_for, widens_to,
+    RegionVar, ResolvedVariant, Safety, SelfPosition, Ty, annotation_text, dispatches_on,
+    dot_reach, enum_variants, member_self_position, member_self_ty, receiver_takes, render_variant,
+    signature, substitute_args, type_underlying, type_underlying_for, variant_payloads_for,
+    widens_to,
 };
 pub use unsafe_check::UnsafeCheckDiagnostic;
 
