@@ -248,6 +248,10 @@ pub struct Frame {
     /// frame returns: `x.&raw` is the address of that frame slot, for that
     /// frame's lifetime.
     promoted: FxHashMap<LocalId, AllocId>,
+    /// A closure call's borrows of its places (#175), its own and the ones
+    /// it inherits: a closure called while this frame runs borrows a
+    /// place from here when this call borrowed it.
+    closure_borrows: Vec<Value>,
     /// Caller linkage: the local the return value lands in, and the block
     /// the caller resumes at (`None` = the callee's type promised to
     /// diverge). `None` overall marks the bottom frame of an execution.
@@ -714,9 +718,11 @@ impl<'db, M: Mode> Machine<'db, M> {
 
     /// The borrows one call of a closure is handed (#175): each of its
     /// places borrowed afresh, `.&mut` where the closure writes it, as a
-    /// child of the pointer the closure was bound with. The loan check
-    /// keeps a place's storage alive while a closure reaching it is;
-    /// a dead one here is the backstop's catch.
+    /// child of the pointer the closure was bound with — or, while a call
+    /// that borrowed the same place for a closure runs, of that call's
+    /// borrow: a closure reached by another runs under its borrows. The
+    /// loan check keeps a place's storage alive while a closure reaching
+    /// it is; a dead one here is the backstop's catch.
     fn borrow_captures(
         &mut self,
         captures: &[(Value, bool)],
@@ -734,7 +740,23 @@ impl<'db, M: Mode> Machine<'db, M> {
                     Some((loc.clone(), origin)),
                 ));
             }
-            let tag = self.mint_borrow(*tag, *alloc, path, *mutable, loc, origin)?;
+            // Inside a call that borrowed this place for a closure, a
+            // closure it reaches borrows from that call's borrow.
+            let parent = self
+                .frames
+                .iter()
+                .rev()
+                .flat_map(|frame| frame.closure_borrows.iter())
+                .find_map(|borrow| match borrow {
+                    Value::Ptr {
+                        alloc: held,
+                        path: held_path,
+                        tag,
+                    } if held == alloc && held_path == path => Some(*tag),
+                    _ => None,
+                })
+                .unwrap_or(*tag);
+            let tag = self.mint_borrow(parent, *alloc, path, *mutable, loc, origin)?;
             out.push(Value::Ptr {
                 alloc: *alloc,
                 path: path.clone(),
@@ -792,6 +814,7 @@ impl<'db, M: Mode> Machine<'db, M> {
             locals,
             promoted: FxHashMap::default(),
             return_to,
+            closure_borrows: Vec::new(),
         });
         Ok(())
     }
@@ -927,8 +950,13 @@ impl<'db, M: Mode> Machine<'db, M> {
                 match callee {
                     Value::Fn(f) => {
                         let mut args = args;
+                        // Its own places are its hidden parameters; the
+                        // ones it inherits are borrowed for its call only.
+                        let mut borrows = Vec::new();
                         if let Some(captures) = &f.captures {
-                            args.extend(self.borrow_captures(captures, &loc, origin)?);
+                            borrows = self.borrow_captures(captures, &loc, origin)?;
+                            let own = self.lowered(&f.item).bodies[f.body].outer.len();
+                            args.extend(borrows[..own].iter().cloned());
                         }
                         self.push_frame(
                             f.item,
@@ -937,6 +965,9 @@ impl<'db, M: Mode> Machine<'db, M> {
                             f.const_args,
                             Some((*dest, *target)),
                         )?;
+                        if let Some(frame) = self.frames.last_mut() {
+                            frame.closure_borrows = borrows;
+                        }
                     }
                     Value::Builtin(_) | Value::ExternFn { .. } => {
                         let result = match callee {

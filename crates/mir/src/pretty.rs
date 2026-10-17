@@ -120,7 +120,7 @@ fn render_value_expr(value: &ValueExpr) -> String {
             path
         }
         // `closure fn#1(x, &mut y)`: the places each call borrows, with
-        // the flavor it borrows them in.
+        // the flavor it borrows them in (inherited ones included).
         ValueExpr::Closure { body, captures } => {
             let places = captures
                 .iter()

@@ -3,12 +3,13 @@
 //! places a statement names, local liveness, and where refusals are
 //! reported.
 
-use hir::ExprId;
+use hir::{BindingId, ExprId};
+use la_arena::Arena;
 use rustc_hash::FxHashSet;
 
 use crate::{
-    BlockId, BodyId, CheckTrap, LocalId, MirBody, Operand, Place, ProjElem, StatementKind,
-    TerminatorKind, ValueExpr,
+    BlockId, BodyId, Capture, CheckTrap, LocalId, MirBody, Operand, OuterClosure, Place, ProjElem,
+    StatementKind, TerminatorKind, ValueExpr,
 };
 
 /// A location in one body: before statement `index` of `block`, or before
@@ -446,15 +447,33 @@ impl<'a, D> Findings<'a, D> {
 /// hold a closure is unified with what it is computed from, and each class
 /// holds the closures bound into it — flow-insensitive and coarse on
 /// purpose: a class only ever widens what a call is judged to touch.
-pub(crate) struct ClosureFlow<'b> {
-    /// Each bound closure: its [`ValueExpr::Closure`]'s origin and places.
-    closures: Vec<(ExprId, &'b [crate::Capture])>,
+///
+/// In a closure's body, an outer place holds what the enclosing frame
+/// bound into it ([`MirBody::outer_closures`]). A closure reaching a place
+/// that may hold closures reaches their places too: each closure's places
+/// here are its own and every closure it may run.
+pub(crate) struct ClosureFlow {
+    closures: Vec<HeldClosure>,
     /// Per local: indexes into `closures`.
     held: Vec<Vec<usize>>,
 }
 
-impl<'b> ClosureFlow<'b> {
-    pub(crate) fn of(body: &'b MirBody) -> ClosureFlow<'b> {
+struct HeldClosure {
+    /// The `fn` literal.
+    origin: ExprId,
+    /// Its places here, one per binding: its own first (for a closure this
+    /// body binds, in [`ValueExpr::Closure`] order), then the ones it
+    /// inherits.
+    captures: Vec<Capture>,
+    /// Bindings it reaches that have no place here, with whether it writes
+    /// each.
+    unseen: Vec<(BindingId, bool)>,
+    /// The statement binding it, for a closure this body binds.
+    bound_at: Option<(BlockId, usize)>,
+}
+
+impl ClosureFlow {
+    pub(crate) fn of(body: &MirBody) -> ClosureFlow {
         fn find(parent: &mut [usize], mut x: usize) -> usize {
             while parent[x] != x {
                 parent[x] = parent[parent[x]];
@@ -474,14 +493,28 @@ impl<'b> ClosureFlow<'b> {
         };
         let mut closures = Vec::new();
         let mut bound_into = Vec::new();
-        for (_, data) in body.blocks.iter() {
-            for stmt in &data.statements {
+        for outer in &body.outer_closures {
+            bound_into.push((outer.local, closures.len()));
+            closures.push(HeldClosure {
+                origin: outer.origin,
+                captures: outer.captures.clone(),
+                unseen: outer.unseen.clone(),
+                bound_at: None,
+            });
+        }
+        for (block, data) in body.blocks.iter() {
+            for (index, stmt) in data.statements.iter().enumerate() {
                 let StatementKind::Assign { dest, value } = &stmt.kind else {
                     continue;
                 };
                 if let ValueExpr::Closure { captures, .. } = value {
                     bound_into.push((dest.local, closures.len()));
-                    closures.push((stmt.origin, captures.as_slice()));
+                    closures.push(HeldClosure {
+                        origin: stmt.origin,
+                        captures: captures.clone(),
+                        unseen: Vec::new(),
+                        bound_at: Some((block, index)),
+                    });
                     continue;
                 }
                 value_places(value, &mut |place| {
@@ -505,7 +538,64 @@ impl<'b> ClosureFlow<'b> {
         let held = (0..count)
             .map(|index| by_root[find(&mut parent, index)].clone())
             .collect();
-        ClosureFlow { closures, held }
+        let mut flow = ClosureFlow { closures, held };
+        flow.inherit();
+        flow
+    }
+
+    /// Each closure reaches what the closures its places may hold reach,
+    /// to a fixpoint: a held closure runs inside the call that reaches it.
+    fn inherit(&mut self) {
+        let mut changed = true;
+        while changed {
+            changed = false;
+            for k in 0..self.closures.len() {
+                let reached: Vec<usize> = self.closures[k]
+                    .captures
+                    .iter()
+                    .flat_map(|capture| self.held[local_index(capture.place.local)].iter())
+                    .copied()
+                    .filter(|&j| j != k)
+                    .collect();
+                for j in reached {
+                    let (captures, unseen) = (
+                        self.closures[j].captures.clone(),
+                        self.closures[j].unseen.clone(),
+                    );
+                    let closure = &mut self.closures[k];
+                    for capture in captures {
+                        match closure
+                            .captures
+                            .iter_mut()
+                            .find(|own| own.binding == capture.binding)
+                        {
+                            Some(own) if capture.mutable && !own.mutable => {
+                                own.mutable = true;
+                                changed = true;
+                            }
+                            Some(_) => {}
+                            None => {
+                                closure.captures.push(capture);
+                                changed = true;
+                            }
+                        }
+                    }
+                    for (binding, mutable) in unseen {
+                        match closure.unseen.iter_mut().find(|(b, _)| *b == binding) {
+                            Some((_, own)) if mutable && !*own => {
+                                *own = true;
+                                changed = true;
+                            }
+                            Some(_) => {}
+                            None => {
+                                closure.unseen.push((binding, mutable));
+                                changed = true;
+                            }
+                        }
+                    }
+                }
+            }
+        }
     }
 
     /// The closures an operand may hold.
@@ -516,11 +606,101 @@ impl<'b> ClosureFlow<'b> {
         }
     }
 
-    pub(crate) fn captures(&self, closure: usize) -> &'b [crate::Capture] {
-        self.closures[closure].1
+    pub(crate) fn captures(&self, closure: usize) -> &[Capture] {
+        &self.closures[closure].captures
+    }
+
+    /// Every binding a closure reaches, with whether it writes it: its
+    /// places here and the ones it reaches out of this body's sight.
+    pub(crate) fn bindings(&self, closure: usize) -> impl Iterator<Item = (BindingId, bool)> + '_ {
+        let closure = &self.closures[closure];
+        closure
+            .captures
+            .iter()
+            .map(|capture| (capture.binding, capture.mutable))
+            .chain(closure.unseen.iter().copied())
     }
 
     pub(crate) fn origin(&self, closure: usize) -> ExprId {
-        self.closures[closure].0
+        self.closures[closure].origin
+    }
+}
+
+/// Completes each closure's places once the whole item is lowered (#175):
+/// a closure that reaches a place holding closures also borrows their
+/// places for each call ([`ValueExpr::Closure`]), and its body learns what
+/// those closures reach in its own terms ([`MirBody::outer_closures`]).
+/// A body is done before the closure bodies it binds, which its findings
+/// seed.
+pub(crate) fn inherit_closure_places(bodies: &mut Arena<MirBody>) {
+    let mut bound: FxHashSet<BodyId> = FxHashSet::default();
+    for (_, body) in bodies.iter() {
+        for (_, data) in body.blocks.iter() {
+            for stmt in &data.statements {
+                if let StatementKind::Assign {
+                    value: ValueExpr::Closure { body, .. },
+                    ..
+                } = &stmt.kind
+                {
+                    bound.insert(*body);
+                }
+            }
+        }
+    }
+    let mut queue: Vec<BodyId> = bodies
+        .iter()
+        .map(|(id, _)| id)
+        .filter(|id| !bound.contains(id))
+        .collect();
+    while let Some(id) = queue.pop() {
+        let flow = ClosureFlow::of(&bodies[id]);
+        for (k, closure) in flow.closures.iter().enumerate() {
+            let Some((block, index)) = closure.bound_at else {
+                continue;
+            };
+            let StatementKind::Assign {
+                value:
+                    ValueExpr::Closure {
+                        body: inner,
+                        captures,
+                    },
+                ..
+            } = &mut bodies[id].blocks[block].statements[index].kind
+            else {
+                unreachable!("bound_at names a closure binding");
+            };
+            let inner = *inner;
+            *captures = closure.captures.clone();
+            let outer = bodies[inner].outer.clone();
+            let mut seeds = Vec::new();
+            for (capture, slot) in flow.captures(k).iter().zip(&outer) {
+                for &held in &flow.held[local_index(capture.place.local)] {
+                    let mut seed = OuterClosure {
+                        local: slot.local,
+                        origin: flow.origin(held),
+                        captures: Vec::new(),
+                        unseen: Vec::new(),
+                    };
+                    for (binding, mutable) in flow.bindings(held) {
+                        match outer.iter().find(|outer| outer.binding == binding) {
+                            Some(outer) => seed.captures.push(Capture {
+                                place: Place {
+                                    local: outer.local,
+                                    projection: vec![ProjElem::Deref],
+                                },
+                                mutable,
+                                binding,
+                            }),
+                            None => seed.unseen.push((binding, mutable)),
+                        }
+                    }
+                    if !seed.captures.is_empty() || !seed.unseen.is_empty() {
+                        seeds.push(seed);
+                    }
+                }
+            }
+            bodies[inner].outer_closures = seeds;
+            queue.push(inner);
+        }
     }
 }

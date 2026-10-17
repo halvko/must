@@ -10021,3 +10021,165 @@ static main = fn() -> usize {
         "#]],
     );
 }
+
+/// A higher-order fn wrapping its closure parameter in a closure of its
+/// own: the parameter's places are the caller's, out of this body's
+/// reach, so the wrapper reaches nothing it could conflict with.
+#[test]
+fn a_closure_reaches_a_closure_parameter() {
+    check_run(
+        r#"
+static twice = fn::<@a>(f: fn @a () -> ()) -> () { f(); f(); };
+static twice_twice = fn::<@a>(f: fn @a () -> ()) -> () {
+    twice(fn() -> () { f(); f(); });
+};
+static main = fn() -> usize {
+    let mut n: usize = 0;
+    twice_twice(fn() -> () { n = n + 1; });
+    n
+};
+"#,
+        "main()",
+        expect![[r#"
+            => 4
+        "#]],
+    );
+}
+
+/// A closure reaching a closure made in the same body runs it under its
+/// own borrows: it may read the place the held closure just wrote.
+#[test]
+fn a_closure_reaches_a_closure_of_the_same_body() {
+    check_run(
+        r#"
+static main = fn() -> usize {
+    let mut n: usize = 0;
+    let bump = fn() -> () { n = n + 1; };
+    let bumped = fn() -> usize { bump(); bump(); n };
+    let a = bumped();
+    a * 10 + bumped()
+};
+"#,
+        "main()",
+        expect![[r#"
+            => 24
+        "#]],
+    );
+}
+
+/// Calling a closure that reaches one writing a place writes the place:
+/// a live borrow of it is invalidated, as if it wrote the place itself.
+#[test]
+fn calling_a_closure_that_reaches_a_writer_invalidates_a_live_borrow() {
+    check_run(
+        r#"
+static main = fn() -> usize {
+    let mut n: usize = 0;
+    let bump = fn() -> () { n = n + 1; };
+    let go = fn() -> () { bump(); };
+    let r = n.&;
+    go();
+    r.*
+};
+"#,
+        "main()",
+        expect![[r#"
+            error[Trap]: calling a closure that writes `n` here invalidates a borrow of it that is still live: the borrow is used after this point, and reading through it then would read through an invalidated borrow
+        "#]],
+    );
+}
+
+/// Inside the reaching closure, calling the held one is a use of the
+/// places both reach: a borrow of one held across the call is refused.
+#[test]
+fn a_borrow_held_across_a_reached_closure_is_refused() {
+    check_run(
+        r#"
+static main = fn() -> usize {
+    let mut n: usize = 0;
+    let bump = fn() -> () { n = n + 1; };
+    let peek = fn() -> usize { let r = n.&; bump(); r.* };
+    peek()
+};
+"#,
+        "main()",
+        expect![[r#"
+            error[Trap]: calling a closure that writes `n` here invalidates a borrow of it that is still live: the borrow is used after this point, and reading through it then would read through an invalidated borrow
+        "#]],
+    );
+}
+
+/// Two held closures handed to one call from inside a closure that sees
+/// neither's place: they still both write it, so the call is refused.
+#[test]
+fn held_closures_overlapping_out_of_sight_are_refused() {
+    check_run(
+        r#"
+static both = fn::<@a, @b>(f: fn @a () -> (), g: fn @b () -> ()) -> () { f(); g(); };
+static main = fn() -> usize {
+    let mut n: usize = 0;
+    let one = fn() -> () { n = n + 1; };
+    let two = fn() -> () { n = n + 2; };
+    let go = fn() -> () { both(one, two); };
+    go();
+    n
+};
+"#,
+        "main()",
+        expect![[r#"
+            error[Trap]: this call is handed two closures that both reach `n`, one of them writes it: the callee may run one inside the other, and neither would have `n` to itself
+        "#]],
+    );
+}
+
+/// A closure two functions out, reached from a nested closure: the
+/// middle closure inherits its place, and the inner call borrows from
+/// the middle one's borrow.
+#[test]
+fn a_nested_closure_reaches_a_closure_two_functions_out() {
+    check_run(
+        r#"
+static main = fn() -> usize {
+    let mut n: usize = 1;
+    let triple = fn() -> () { n = n * 3; };
+    let outer = fn() -> () {
+        let inner = fn() -> () { triple(); triple(); };
+        inner();
+        n = n + 1;
+    };
+    outer();
+    n
+};
+"#,
+        "main()",
+        expect![[r#"
+            => 10
+        "#]],
+    );
+}
+
+/// Calling a closure that reaches one whose place was moved out reads the
+/// moved-out place: the move check refuses the call.
+#[test]
+fn calling_a_closure_that_reaches_one_after_its_place_was_moved_out_traps() {
+    check_run(
+        r#"
+type Tok = struct { n: usize } only move with {
+    impl Self {
+        done = fn(t: Self) -> usize { let Tok(struct { n }) = t; n };
+    }
+};
+static main = fn() -> usize {
+    let t = Tok(struct { n = 3 });
+    let f = fn() -> usize { t.n };
+    let g = fn() -> usize { f() };
+    let k = t.done();
+    k + g()
+};
+"#,
+        "main()",
+        expect![[r#"
+            error[Trap]: `t` was already consumed
+        "#]],
+    );
+}

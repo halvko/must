@@ -1712,10 +1712,23 @@ capture-free functions; passing a closure to one offers a quick fix that
 writes the region in.
 
 A closure only borrows its outer places, so it cannot move one out, and a
-borrow of one does not outlive the call it was taken in. Not yet supported:
-a closure reaching a place that holds another closure, keeping a closure
-for later (escaping closures, which will name what they capture), and
-closures in the wasm backend.
+borrow of one does not outlive the call it was taken in.
+
+A closure may reach a place that holds another closure, and call it. The
+held closure runs inside the call, so calling the outer one is a use of
+the held one's places too: a write there is a write by the outer closure,
+and a borrow it holds across that inner call is invalidated as by any
+other write. A closure handed in as a parameter reaches its caller's
+places, out of this function's reach, so wrapping one is always fine:
+
+```must
+static each_twice = fn::<@a>(xs: [usize; 4], f: fn @a (usize) -> ()) -> () {
+    each(xs, fn (x) { f(x); f(x); });
+};
+```
+
+Not yet supported: keeping a closure for later (escaping closures, which
+will name what they capture), and closures in the wasm backend.
 
 === Outlives clauses
 

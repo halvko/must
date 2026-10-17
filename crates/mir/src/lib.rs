@@ -82,6 +82,25 @@ pub struct MirBody {
     /// hidden parameter, at the end of `params`, holding a borrow of the
     /// place for the length of one call. Empty for every other body.
     pub outer: Vec<OuterPlace>,
+    /// What the closures the outer places may hold reach (#175), in this
+    /// body's terms: calling or handing on such a place is a use of these.
+    /// Empty for every other body.
+    pub outer_closures: Vec<OuterClosure>,
+}
+
+/// A closure an outer place may hold, as a closure body sees it: the
+/// enclosing frame bound it, so only the places this body reaches too are
+/// places here; the rest are named by binding, for the overlap check.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OuterClosure {
+    /// The hidden parameter of the outer place that may hold it.
+    pub local: LocalId,
+    /// The closure's `fn` literal.
+    pub origin: ExprId,
+    pub captures: Vec<Capture>,
+    /// Bindings it reaches that this body does not, with whether it
+    /// writes each.
+    pub unseen: Vec<(hir::BindingId, bool)>,
 }
 
 /// One outer place of a closure body: the hidden parameter its mentions
@@ -362,6 +381,13 @@ pub enum ValueExpr {
     /// (`.&mut` when `mutable`), so the value holds no loan between calls
     /// — only a claim that the places' storage outlives it, which the loan
     /// check enforces as a pin minted here.
+    ///
+    /// After those come the places it inherits: the places of the
+    /// closures its outer places may hold, which run inside its calls.
+    /// Each call borrows those too (none is handed to `body` as a
+    /// parameter), so a held closure called inside borrows them from this
+    /// call's borrows. An outer place a held closure writes is borrowed
+    /// `.&mut` here even if `body` only reads it.
     Closure {
         body: BodyId,
         captures: Vec<Capture>,
@@ -373,6 +399,9 @@ pub enum ValueExpr {
 pub struct Capture {
     pub place: Place,
     pub mutable: bool,
+    /// The binding the place stores: one capture per binding, so two
+    /// captures of the same binding are the same place.
+    pub binding: hir::BindingId,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -547,11 +576,6 @@ pub enum MirDiagnostic {
     /// out of it by name: the closure is handed a borrow of the place
     /// for each call, and a move out of a borrow is not one (#175).
     MoveOutOfOuterPlace { expr: ExprId, name: String },
-    /// A closure reaches an outer place that holds a closure (#175). The
-    /// held closure's own places are not visible from here, so its calls
-    /// could not be checked; refused until closures carry their places in
-    /// their type.
-    ReachesClosure { expr: ExprId, name: String },
 }
 
 impl MirDiagnostic {
@@ -567,18 +591,13 @@ impl MirDiagnostic {
                 "cannot move `{name}` out of the enclosing function: a closure only \
                  borrows the places it reaches, for the length of each call"
             ),
-            MirDiagnostic::ReachesClosure { name, .. } => format!(
-                "this closure reaches `{name}`, which holds a closure; a closure that \
-                 reaches another closure is not supported yet"
-            ),
         }
     }
 
     pub fn expr(&self) -> ExprId {
         match self {
             MirDiagnostic::UnsupportedCapture { expr, .. }
-            | MirDiagnostic::MoveOutOfOuterPlace { expr, .. }
-            | MirDiagnostic::ReachesClosure { expr, .. } => *expr,
+            | MirDiagnostic::MoveOutOfOuterPlace { expr, .. } => *expr,
         }
     }
 }
