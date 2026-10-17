@@ -2457,24 +2457,36 @@ fn shared_step(body: &Body, place: ExprId, ty_of: &mut dyn FnMut(ExprId) -> Ty) 
 }
 
 #[salsa::tracked(returns(ref))]
-pub fn infer<'db>(db: &'db dyn Db, item: ItemId<'db>) -> InferenceResult {
-    let mut table = InPlaceUnificationTable::new();
-    let no_group = FxHashMap::default();
-    check_item_body(db, item, &mut table, &no_group, false).finish()
+pub fn infer<'db>(db: &'db dyn Db, item: ItemId<'db>) -> std::sync::Arc<InferenceResult> {
+    // A body an inference group covers (a member, or a fully typed body
+    // feeding one) is checked once, by its group, alongside the bodies it
+    // shares variables with.
+    if let Some(result) = crate::groups::group_result(db, item) {
+        return result;
+    }
+    std::sync::Arc::new(
+        check_item_body(
+            db,
+            item,
+            InPlaceUnificationTable::new(),
+            FxHashMap::default(),
+            false,
+        )
+        .finish(),
+    )
 }
 
-/// Checks `item`'s own body against its annotation and returns the
-/// context, unfinished. Shared by [`infer`] and by a fully typed body
-/// feeding an inference group ([`crate::groups::infer_group`]), so both read
-/// the body the same way. `grouped` is true when the body is checked inside
-/// an inference group (see [`Constraints::new`]).
-pub(crate) fn check_item_body<'a, 'db>(
+/// Checks `item`'s body against its annotation and returns the context,
+/// unfinished. `in_group` maps each group member the body mentions (itself
+/// included, if a member) to this body's copy of its signature, whose
+/// variables are in `table`. `grouped`: see [`Constraints::new`].
+pub(crate) fn check_item_body<'db>(
     db: &'db dyn Db,
     item: ItemId<'db>,
-    table: &'a mut InPlaceUnificationTable<TyVar>,
-    in_group: &'a FxHashMap<ItemLoc, Ty>,
+    mut table: InPlaceUnificationTable<TyVar>,
+    in_group: FxHashMap<ItemLoc, Ty>,
     grouped: bool,
-) -> InferCtx<'a, 'db> {
+) -> InferCtx<'db> {
     let body = body(db, item);
     let file = item.file(db);
     let mut ctx;
@@ -2508,10 +2520,11 @@ pub(crate) fn check_item_body<'a, 'db>(
             db,
             file,
             ty_ref.unwrap_or(&TypeRef::Hole),
-            table,
+            &mut table,
             &type_params,
         );
         let cause = ty_ref.is_some().then_some(Cause::ItemAnnotation);
+        let own = in_group.get(&item_loc(db, item)).cloned();
         ctx = InferCtx::new(
             db,
             file,
@@ -2521,11 +2534,16 @@ pub(crate) fn check_item_body<'a, 'db>(
             in_group,
             grouped,
         );
+        // A group member's own copy of its signature is the type its body
+        // checks against: a recursive mention reads the same variable.
+        if let Some(own) = own {
+            ctx.adopt(&own, &expected);
+        }
         ctx.type_params = type_params;
         ctx.own_generics = generics;
         ctx.own_item = Some(item_loc(db, item));
         ctx.own_signature = Some(expected.clone());
-        ctx.infer_expr_with(root, &expected, cause);
+        ctx.root_ty = Some(ctx.infer_expr_with(root, &expected, cause));
     } else {
         ctx = InferCtx::new(
             db,
@@ -2555,18 +2573,26 @@ enum ReturnTarget {
     ConstBlock,
 }
 
-pub(crate) struct InferCtx<'a, 'db> {
+pub(crate) struct InferCtx<'db> {
     db: &'db dyn Db,
     /// The file the body's annotations resolve type names in.
     file: SourceFile,
     body: &'db Body,
     resolutions: &'db ArenaMap<ExprId, Resolution>,
-    table: &'a mut InPlaceUnificationTable<TyVar>,
+    /// This body's own unification table: no other body's variables are
+    /// in it, so inference groups can run several bodies side by side.
+    table: InPlaceUnificationTable<TyVar>,
     result: InferenceResult,
-    /// Signature variables of this item's binding group (interprocedural
-    /// inference): references to these items use the shared variable
+    /// This body's copies of the signatures of its binding group's members
+    /// (interprocedural inference): references to these items use the copy
     /// instead of the `signature` query, which would cycle.
-    in_group: &'a FxHashMap<ItemLoc, Ty>,
+    in_group: FxHashMap<ItemLoc, Ty>,
+    /// The type the body's root expression was inferred to.
+    root_ty: Option<Ty>,
+    /// Each mention of a member of [`Self::in_group`], in traversal order,
+    /// with how many diagnostics the body had reported when it was met: the
+    /// group decides only after the traversal whether it needs annotating.
+    group_mentions: Vec<(ExprId, usize)>,
     /// Deferred joins and cause provenance, solved by [`InferCtx::solve`].
     constraints: Constraints,
     /// Function-literal nesting depth (0 at the item initializer's top
@@ -2827,16 +2853,16 @@ struct JoinSink {
     witnesses: Vec<Witness>,
 }
 
-impl<'a, 'db> InferCtx<'a, 'db> {
+impl<'db> InferCtx<'db> {
     pub(crate) fn new(
         db: &'db dyn Db,
         file: SourceFile,
         body: &'db Body,
         resolutions: &'db ArenaMap<ExprId, Resolution>,
-        table: &'a mut InPlaceUnificationTable<TyVar>,
-        in_group: &'a FxHashMap<ItemLoc, Ty>,
+        table: InPlaceUnificationTable<TyVar>,
+        in_group: FxHashMap<ItemLoc, Ty>,
         grouped: bool,
-    ) -> InferCtx<'a, 'db> {
+    ) -> InferCtx<'db> {
         InferCtx {
             db,
             file,
@@ -2845,6 +2871,8 @@ impl<'a, 'db> InferCtx<'a, 'db> {
             table,
             result: InferenceResult::default(),
             in_group,
+            root_ty: None,
+            group_mentions: Vec::new(),
             constraints: Constraints::new(grouped),
             scope_depth: 0,
             join_sinks: Vec::new(),
@@ -2903,7 +2931,7 @@ impl<'a, 'db> InferCtx<'a, 'db> {
     /// which obligations it incurs.
     fn try_reborrow(&mut self, expr: ExprId, actual: &Ty, expected: &Ty) -> bool {
         self.constraints
-            .try_reborrow(self.table, actual, expected, expr)
+            .try_reborrow(&mut self.table, actual, expected, expr)
     }
 
     /// The SHARED step governing a place chain, if there is one: `None`
@@ -3229,7 +3257,13 @@ impl<'a, 'db> InferCtx<'a, 'db> {
     /// through the free function — that is what makes `x: T` inside a
     /// generic body resolve to the rigid param.
     fn lower_type_ref(&mut self, type_ref: &TypeRef) -> Ty {
-        let ty = lower_type_ref_in(self.db, self.file, type_ref, self.table, &self.type_params);
+        let ty = lower_type_ref_in(
+            self.db,
+            self.file,
+            type_ref,
+            &mut self.table,
+            &self.type_params,
+        );
         // Signature lowering has no inference context, so it turns every
         // `@_` into `Region::Error`. Inside a BODY the wildcard is exactly
         // what it says — an existential — so mint one here. Body
@@ -3346,23 +3380,154 @@ impl<'a, 'db> InferCtx<'a, 'db> {
             .collect()
     }
 
-    /// See [`Constraints::left_unbound`].
+    /// The variables this body left unbound where they met an error (see
+    /// [`Constraints::new`]).
     pub(crate) fn left_unbound(&self) -> &[TyVar] {
         self.constraints.left_unbound()
     }
 
-    /// Solve the deferred constraints. Must run after traversal in *every*
-    /// mode: group inference discards the resulting diagnostics (the
-    /// per-item query re-derives them) but needs the unifications for
-    /// join-typed signatures to come out concrete.
-    pub(crate) fn solve(&mut self) {
-        let diagnostics = self.constraints.solve(self.table);
-        self.result.diagnostics.extend(diagnostics);
-        let called = std::mem::take(&mut self.safe_calls);
-        self.constraints.settle_safety(self.table, called);
+    /// Commit every open variable in [`Self::left_unbound`] to `{error}`,
+    /// so the body stays silent about it, as a body checked alone does.
+    /// The diagnostics' types are rendered first, from what the group
+    /// decided.
+    pub(crate) fn poison_left_unbound(&mut self) {
+        self.resolve_diagnostic_types();
+        for var in self.constraints.left_unbound().to_vec() {
+            if matches!(
+                resolve_fully(&mut self.table, &Ty::Infer(var)),
+                Ty::Infer(_)
+            ) {
+                self.table.union_value(var, TyVarValue::Known(Ty::Error));
+            }
+        }
     }
 
-    fn finish(mut self) -> InferenceResult {
+    /// Whether an error is written into the type of the body's value
+    /// itself (`static a = missing;`), not just met by its variables.
+    pub(crate) fn root_has_error(&mut self) -> bool {
+        match self.root_ty.clone() {
+            Some(root) => resolve_fully(&mut self.table, &root).contains_error(),
+            None => false,
+        }
+    }
+
+    /// This body's copy of each group member it mentions (see
+    /// [`check_item_body`]).
+    pub(crate) fn copies(&self) -> &FxHashMap<ItemLoc, Ty> {
+        &self.in_group
+    }
+
+    /// `ty` resolved in this body's table.
+    pub(crate) fn resolve(&mut self, ty: &Ty) -> Ty {
+        resolve_fully(&mut self.table, ty)
+    }
+
+    /// Unify one of this body's types with a type exported from its
+    /// inference group, whose regions are not this body's. Where the
+    /// exported type is `{error}`, what this body left open in its own
+    /// type becomes `{error}` too, so nothing in the body reports what the
+    /// group already couldn't decide (errors are infectious and silent).
+    pub(crate) fn adopt_exported(&mut self, ours: &Ty, exported: &Ty) -> bool {
+        self.poison_under_errors(ours, exported);
+        self.constraints
+            .unify_exported(&mut self.table, ours, exported)
+    }
+
+    fn poison_under_errors(&mut self, ours: &Ty, exported: &Ty) {
+        match (self.resolve_shallow(ours), exported) {
+            (ours, Ty::Error) => {
+                let mut open = rustc_hash::FxHashSet::default();
+                resolve_fully(&mut self.table, &ours).open_vars(&mut open);
+                for var in open {
+                    self.constraints.leave_unbound(var);
+                }
+            }
+            (Ty::Fn(ours), Ty::Fn(exported)) if ours.params.len() == exported.params.len() => {
+                for (ours, exported) in ours.params.iter().zip(&exported.params) {
+                    self.poison_under_errors(ours, exported);
+                }
+                self.poison_under_errors(&ours.ret, &exported.ret);
+            }
+            (Ty::Record(ours), Ty::Record(exported))
+                if ours.fields.len() == exported.fields.len() =>
+            {
+                for ((_, ours), (_, exported)) in ours.fields.iter().zip(&exported.fields) {
+                    self.poison_under_errors(ours, exported);
+                }
+            }
+            (Ty::Array { elem: ours, .. }, Ty::Array { elem: exported, .. })
+            | (
+                Ty::RawPtr { pointee: ours, .. },
+                Ty::RawPtr {
+                    pointee: exported, ..
+                },
+            )
+            | (
+                Ty::Borrow { referent: ours, .. },
+                Ty::Borrow {
+                    referent: exported, ..
+                },
+            ) => {
+                self.poison_under_errors(&ours, exported);
+            }
+            (Ty::Named(ours), Ty::Named(exported)) if ours.decl == exported.decl => {
+                for (ours, exported) in ours.args.iter().zip(&exported.args) {
+                    if let (GenericArg::Ty(ours), GenericArg::Ty(exported)) = (ours, exported) {
+                        self.poison_under_errors(ours, exported);
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
+    /// The kind of an unbound variable of this body's table.
+    pub(crate) fn var_kind(&mut self, var: TyVar) -> TyVarValue {
+        self.table.probe_value(var)
+    }
+
+    /// A fresh variable of `kind` in this body's table.
+    pub(crate) fn new_var(&mut self, kind: TyVarValue) -> Ty {
+        Ty::Infer(self.table.new_key(kind))
+    }
+
+    /// Report each use of a group member that `needs_annotation` says its
+    /// group could not determine, in traversal order among the body's
+    /// other diagnostics, as a use of an item outside the group reports it.
+    pub(crate) fn report_undetermined_members(
+        &mut self,
+        mut needs_annotation: impl FnMut(&ItemLoc) -> bool,
+    ) {
+        let mentions = std::mem::take(&mut self.group_mentions);
+        for (expr, at) in mentions.into_iter().rev() {
+            let Some(Resolution::Item(item)) = self.resolutions.get(expr) else {
+                continue;
+            };
+            if needs_annotation(item) {
+                self.result.diagnostics.insert(
+                    at,
+                    InferenceDiagnostic::NeedsAnnotation {
+                        expr,
+                        item: item.clone(),
+                        // A generic body never joins a group.
+                        generic_caller: false,
+                    },
+                );
+            }
+        }
+    }
+
+    /// Solve the deferred joins. An inference group calls it after each
+    /// body's traversal, so a body's joins are settled by the body alone,
+    /// before its copies of other members' signatures are merged.
+    pub(crate) fn solve(&mut self) {
+        let diagnostics = self.constraints.solve(&mut self.table);
+        self.result.diagnostics.extend(diagnostics);
+        let called = std::mem::take(&mut self.safe_calls);
+        self.constraints.settle_safety(&mut self.table, called);
+    }
+
+    pub(crate) fn finish(mut self) -> InferenceResult {
         self.solve();
         // Bound obligations, after every join and axiom has spoken: each
         // resolves into a dictionary entry — a concrete impl's member set,
@@ -3391,7 +3556,7 @@ impl<'a, 'db> InferCtx<'a, 'db> {
         let pending = std::mem::take(&mut self.pending_instantiations);
         for instantiation in pending {
             for (index, var, needs_forget) in instantiation.params {
-                let resolved = resolve_fully(self.table, &var);
+                let resolved = resolve_fully(&mut self.table, &var);
                 // A body writes `T: forget` when it genuinely drops a `T`
                 // on the floor; this is the promise that keeps it honest.
                 // Hand such a body a value that must be consumed and the
@@ -3425,7 +3590,7 @@ impl<'a, 'db> InferCtx<'a, 'db> {
                 // no-defining-use error (annotate the number), reported by
                 // the pass below; repeating it as a cannot-infer-`T` here
                 // would be noise.
-                if is_unresolved_number(self.table, &var) {
+                if is_unresolved_number(&mut self.table, &var) {
                     continue;
                 }
                 // A type parameter left open only by the item's own
@@ -3438,7 +3603,7 @@ impl<'a, 'db> InferCtx<'a, 'db> {
                     let holes = signature_holes.get_or_insert_with(|| {
                         let mut holes = rustc_hash::FxHashSet::default();
                         if let Some(sig) = &self.own_signature {
-                            resolve_fully(self.table, sig).open_vars(&mut holes);
+                            resolve_fully(&mut self.table, sig).open_vars(&mut holes);
                         }
                         holes
                     });
@@ -3461,7 +3626,7 @@ impl<'a, 'db> InferCtx<'a, 'db> {
         // the array sibling of the loop above.
         let pending = std::mem::take(&mut self.pending_empty_arrays);
         for (expr, elem) in pending {
-            if resolve_fully(self.table, &elem).contains_infer() {
+            if resolve_fully(&mut self.table, &elem).contains_infer() {
                 self.result
                     .diagnostics
                     .push(InferenceDiagnostic::EmptyArrayNeedsAnnotation { expr });
@@ -3476,7 +3641,7 @@ impl<'a, 'db> InferCtx<'a, 'db> {
         let pending = std::mem::take(&mut self.pending_number_literals);
         let mut reported_number_roots: Vec<TyVar> = Vec::new();
         for literal in pending {
-            match constraint::resolve_shallow(self.table, &literal.var) {
+            match constraint::resolve_shallow(&mut self.table, &literal.var) {
                 Ty::Int(kind) => {
                     let fits =
                         IntValue::from_literal(kind, literal.value, literal.negated).is_some();
@@ -3528,22 +3693,23 @@ impl<'a, 'db> InferCtx<'a, 'db> {
         let reborrows = self.constraints.take_reborrows();
         self.finish_deref_reads(&reborrows);
         self.finish_mut_reborrows(&reborrows);
+        self.resolve_diagnostic_types();
         let mut result = std::mem::take(&mut self.result);
         for (_, ty) in result.type_of_expr.iter_mut() {
-            *ty = resolve_finished(self.table, ty);
+            *ty = resolve_finished(&mut self.table, ty);
         }
         for (_, ty) in result.type_of_binding.iter_mut() {
-            *ty = resolve_finished(self.table, ty);
+            *ty = resolve_finished(&mut self.table, ty);
         }
         // `ResolvedVariant`s persisted outside any `Ty` carry generic args
         // of their own — resolve them too, both for MIR (payload
         // substitution needs the pinned args) and for value-determinism (an
         // unresolved canonical variable index would break backdating).
         for (_, variant) in result.variant_of_expr.iter_mut() {
-            variant.args = resolve_args_fully(self.table, &variant.args);
+            variant.args = resolve_args_fully(&mut self.table, &variant.args);
         }
         for (_, variant) in result.variant_of_pat.iter_mut() {
-            variant.args = resolve_args_fully(self.table, &variant.args);
+            variant.args = resolve_args_fully(&mut self.table, &variant.args);
         }
         result.region_count = self.constraints.region_count();
         result.region_constraints = self.constraints.take_region_edges();
@@ -3558,7 +3724,35 @@ impl<'a, 'db> InferCtx<'a, 'db> {
             }
             result.loan_regions.insert(expr, region);
         }
-        for diag in result.diagnostics.iter_mut() {
+        for (_, ty) in result.type_of_pat.iter_mut() {
+            *ty = resolve_finished(&mut self.table, ty);
+        }
+        // Expectations: resolve like `type_of_expr`, but *drop* what
+        // doesn't resolve to a concrete type — an unbound variable means
+        // the position had no real expectation, and an `{error}` means the
+        // expectation itself came from broken code (see the field's doc
+        // for why both must go).
+        //
+        // Exception: expectations in `number_expectations` keep `{number}`.
+        let recorded = std::mem::take(&mut result.expectation_of_expr);
+        for (expr, ty) in recorded.iter() {
+            let mut resolved = resolve_finished(&mut self.table, ty);
+            if resolved.contains_infer() || resolved.contains_error() {
+                if !self.number_expectations.contains(&expr) {
+                    continue;
+                }
+                resolved = Ty::UnresolvedNumber;
+            }
+            result.expectation_of_expr.insert(expr, resolved);
+        }
+        result
+    }
+
+    /// Resolve the types the diagnostics carry, so they render what the
+    /// body (and its group) decided. Idempotent: what it renders holds no
+    /// variable.
+    fn resolve_diagnostic_types(&mut self) {
+        for diag in self.result.diagnostics.iter_mut() {
             match diag {
                 InferenceDiagnostic::TypeMismatch {
                     expected, actual, ..
@@ -3566,11 +3760,11 @@ impl<'a, 'db> InferCtx<'a, 'db> {
                 | InferenceDiagnostic::AllBranchesMismatch {
                     expected, actual, ..
                 } => {
-                    *expected = resolve_finished(self.table, expected);
-                    *actual = resolve_finished(self.table, actual);
+                    *expected = resolve_finished(&mut self.table, expected);
+                    *actual = resolve_finished(&mut self.table, actual);
                 }
                 InferenceDiagnostic::NotCallable { ty, .. } => {
-                    *ty = resolve_finished(self.table, ty);
+                    *ty = resolve_finished(&mut self.table, ty);
                 }
                 // `found` is always definite (`char`, or `{number}` for an
                 // integer pattern) — resolved for symmetry, so the pair
@@ -3578,52 +3772,52 @@ impl<'a, 'db> InferCtx<'a, 'db> {
                 InferenceDiagnostic::PatLiteralTypeMismatch {
                     expected, found, ..
                 } => {
-                    *expected = resolve_finished(self.table, expected);
-                    *found = resolve_finished(self.table, found);
+                    *expected = resolve_finished(&mut self.table, expected);
+                    *found = resolve_finished(&mut self.table, found);
                 }
                 InferenceDiagnostic::IfBranchMismatch {
                     then_ty, else_ty, ..
                 } => {
-                    *then_ty = resolve_finished(self.table, then_ty);
-                    *else_ty = resolve_finished(self.table, else_ty);
+                    *then_ty = resolve_finished(&mut self.table, then_ty);
+                    *else_ty = resolve_finished(&mut self.table, else_ty);
                 }
                 InferenceDiagnostic::RecordLitMissingFields { fields, .. } => {
                     for (_, ty) in fields.iter_mut() {
-                        *ty = resolve_finished(self.table, ty);
+                        *ty = resolve_finished(&mut self.table, ty);
                     }
                 }
                 InferenceDiagnostic::RecordLitExtraField { expected, .. } => {
-                    *expected = resolve_finished(self.table, expected);
+                    *expected = resolve_finished(&mut self.table, expected);
                 }
                 InferenceDiagnostic::ElidedVariantNoEnum {
                     expected: Some(expected),
                     ..
                 } => {
-                    *expected = resolve_finished(self.table, expected);
+                    *expected = resolve_finished(&mut self.table, expected);
                 }
                 InferenceDiagnostic::NoSuchField { receiver_ty, .. }
                 | InferenceDiagnostic::NoSuchMember { receiver_ty, .. }
                 | InferenceDiagnostic::MemberWantsExclusiveReceiver { receiver_ty, .. }
                 | InferenceDiagnostic::MemberCallAmbiguity { receiver_ty, .. } => {
-                    *receiver_ty = resolve_finished(self.table, receiver_ty);
+                    *receiver_ty = resolve_finished(&mut self.table, receiver_ty);
                 }
                 InferenceDiagnostic::FieldNotCallable {
                     ty, receiver_ty, ..
                 } => {
-                    *ty = resolve_finished(self.table, ty);
-                    *receiver_ty = resolve_finished(self.table, receiver_ty);
+                    *ty = resolve_finished(&mut self.table, ty);
+                    *receiver_ty = resolve_finished(&mut self.table, receiver_ty);
                 }
                 InferenceDiagnostic::MatchWithoutCatchAll { scrutinee, .. }
                 | InferenceDiagnostic::NonEnumScrutineeVariantPat { scrutinee, .. }
                 | InferenceDiagnostic::PatWrongEnum { scrutinee, .. } => {
-                    *scrutinee = resolve_finished(self.table, scrutinee);
+                    *scrutinee = resolve_finished(&mut self.table, scrutinee);
                 }
                 InferenceDiagnostic::PatUnknownField { record_ty, .. } => {
-                    *record_ty = resolve_finished(self.table, record_ty);
+                    *record_ty = resolve_finished(&mut self.table, record_ty);
                 }
                 InferenceDiagnostic::PatMissingFields { fields, .. } => {
                     for (_, ty) in fields.iter_mut() {
-                        *ty = resolve_finished(self.table, ty);
+                        *ty = resolve_finished(&mut self.table, ty);
                     }
                 }
                 InferenceDiagnostic::PatNotRecord { ty, .. }
@@ -3638,20 +3832,20 @@ impl<'a, 'db> InferCtx<'a, 'db> {
                 | InferenceDiagnostic::BorrowThroughRawPointer { ty, .. }
                 | InferenceDiagnostic::MoveOutOfBorrow { ty, .. }
                 | InferenceDiagnostic::AddrOfMutThroughShared { ty, .. } => {
-                    *ty = resolve_finished(self.table, ty);
+                    *ty = resolve_finished(&mut self.table, ty);
                 }
                 InferenceDiagnostic::PatNamedTypeMismatch {
                     expected, actual, ..
                 } => {
-                    *expected = resolve_finished(self.table, expected);
-                    *actual = resolve_finished(self.table, actual);
+                    *expected = resolve_finished(&mut self.table, expected);
+                    *actual = resolve_finished(&mut self.table, actual);
                 }
                 InferenceDiagnostic::BuiltinExpectsRawPtr { found, .. } => {
-                    *found = resolve_finished(self.table, found);
+                    *found = resolve_finished(&mut self.table, found);
                 }
                 InferenceDiagnostic::UnsatisfiedBound { ty, .. }
                 | InferenceDiagnostic::NoTraitImpl { ty, .. } => {
-                    *ty = resolve_finished(self.table, ty);
+                    *ty = resolve_finished(&mut self.table, ty);
                 }
                 InferenceDiagnostic::ArgCountMismatch { .. }
                 | InferenceDiagnostic::NeedsAnnotation { .. }
@@ -3726,36 +3920,14 @@ impl<'a, 'db> InferCtx<'a, 'db> {
                 | InferenceDiagnostic::NestedBoundUse { .. } => {}
             }
         }
-        for (_, ty) in result.type_of_pat.iter_mut() {
-            *ty = resolve_finished(self.table, ty);
-        }
-        // Expectations: resolve like `type_of_expr`, but *drop* what
-        // doesn't resolve to a concrete type — an unbound variable means
-        // the position had no real expectation, and an `{error}` means the
-        // expectation itself came from broken code (see the field's doc
-        // for why both must go).
-        //
-        // Exception: expectations in `number_expectations` keep `{number}`.
-        let recorded = std::mem::take(&mut result.expectation_of_expr);
-        for (expr, ty) in recorded.iter() {
-            let mut resolved = resolve_finished(self.table, ty);
-            if resolved.contains_infer() || resolved.contains_error() {
-                if !self.number_expectations.contains(&expr) {
-                    continue;
-                }
-                resolved = Ty::UnresolvedNumber;
-            }
-            result.expectation_of_expr.insert(expr, resolved);
-        }
-        result
     }
 
     /// Resolve one bound obligation after solving — see [`Self::finish`].
     fn resolve_obligation(&mut self, obligation: &PendingObligation) -> DictEntry {
-        let resolved = resolve_fully(self.table, &obligation.var);
+        let resolved = resolve_fully(&mut self.table, &obligation.var);
         // Broken or undetermined: covered by their own diagnostics (a
         // mismatch, cannot-infer, or the literal's no-defining-use).
-        if resolved.contains_error() || is_unresolved_number(self.table, &obligation.var) {
+        if resolved.contains_error() || is_unresolved_number(&mut self.table, &obligation.var) {
             return DictEntry::Error;
         }
         if resolved.contains_infer() {
@@ -3900,7 +4072,7 @@ impl<'a, 'db> InferCtx<'a, 'db> {
             let fresh = self.fresh_var();
             self.infer_expr(arg, &fresh);
             self.constraints
-                .poison_unresolved_number(self.table, &fresh);
+                .poison_unresolved_number(&mut self.table, &fresh);
         }
     }
 
@@ -4025,9 +4197,11 @@ impl<'a, 'db> InferCtx<'a, 'db> {
                 Some(Resolution::ConstParam(index)) => self.const_param_value_ty(*index),
                 Some(Resolution::Item(loc)) => {
                     // A member of this item's own binding group resolves to
-                    // its shared signature variable — that's interprocedural
-                    // inference happening.
+                    // this body's copy of the member's signature — that's
+                    // interprocedural inference happening.
                     if let Some(member_sig) = self.in_group.get(loc) {
+                        let at = self.result.diagnostics.len();
+                        self.group_mentions.push((expr, at));
                         member_sig.clone()
                     } else {
                         let target = loc.to_id(self.db);
@@ -4834,18 +5008,22 @@ impl<'a, 'db> InferCtx<'a, 'db> {
                             // annotation. That is the same pre-existing
                             // deferred-join limitation as `getx`-style
                             // record projection, not a new one.
-                            let snapshot = self.constraints.snapshot(self.table);
+                            let snapshot = self.constraints.snapshot(&mut self.table);
                             let agree = !witnesses
                                 .iter()
                                 .any(|witness| self.resolve_shallow(&witness.ty).contains_borrow())
                                 && witnesses.iter().all(|witness| {
-                                    self.constraints
-                                        .adopt(self.table, &result, &witness.ty, None)
+                                    self.constraints.adopt(
+                                        &mut self.table,
+                                        &result,
+                                        &witness.ty,
+                                        None,
+                                    )
                                 });
                             if agree {
-                                self.constraints.commit(self.table, snapshot);
+                                self.constraints.commit(&mut self.table, snapshot);
                             } else {
-                                self.constraints.rollback_to(self.table, snapshot);
+                                self.constraints.rollback_to(&mut self.table, snapshot);
                                 self.constraints.push_join(Join {
                                     expr,
                                     depth: self.scope_depth,
@@ -5048,34 +5226,16 @@ impl<'a, 'db> InferCtx<'a, 'db> {
                 // `is_const` doesn't affect typing here.
                 is_const: _,
             } => {
-                let param_tys: Vec<Ty> = params
-                    .iter()
-                    .map(|param| {
-                        if let PatData::Bind(binding) = &self.body.pats[param.pat] {
-                            // The common case: a bare name's own annotation
-                            // (if any) is the axiom.
-                            match &self.body.bindings[*binding].type_ref {
-                                Some(type_ref) => self.lower_type_ref(type_ref),
-                                None => self.fresh_var(),
-                            }
-                        } else {
-                            // A destructuring parameter: its own written
-                            // annotation is the axiom; failing that, a
-                            // `Newtype` pattern names its own type outright
-                            // (`fn (Foo(...))` needs no annotation).
-                            match &param.type_ref {
-                                Some(type_ref) => self.lower_type_ref(type_ref),
-                                None => self
-                                    .declared_type_for_pat(param.pat)
-                                    .unwrap_or_else(|| self.fresh_var()),
-                            }
-                        }
-                    })
-                    .collect();
-                let ret = match ret_type {
+                let (db, file, body) = (self.db, self.file, self.body);
+                let mut lower = |type_ref: Option<&TypeRef>| match type_ref {
                     Some(type_ref) => self.lower_type_ref(type_ref),
                     None => self.fresh_var(),
                 };
+                let param_tys: Vec<Ty> = params
+                    .iter()
+                    .map(|param| literal_param_ty(db, file, body, param, &mut lower))
+                    .collect();
+                let ret = lower(ret_type.as_ref());
                 let ret_cause = match ret_type {
                     Some(_) => Some(Cause::ReturnAnnotation(expr)),
                     // Unwritten: the return type is whatever the position
@@ -5166,7 +5326,7 @@ impl<'a, 'db> InferCtx<'a, 'db> {
                 }
                 if slot_mismatched {
                     self.constraints
-                        .poison_unresolved_number(self.table, &own_sig);
+                        .poison_unresolved_number(&mut self.table, &own_sig);
                 }
                 return fn_ty;
             }
@@ -5289,7 +5449,8 @@ impl<'a, 'db> InferCtx<'a, 'db> {
                         // The reservation is the whole story: nothing here
                         // demanded a type of the operand, so a bare literal
                         // in it must not add a no-defining-use sibling.
-                        self.constraints.poison_unresolved_number(self.table, &ty);
+                        self.constraints
+                            .poison_unresolved_number(&mut self.table, &ty);
                     }
                     self.result
                         .diagnostics
@@ -5329,7 +5490,8 @@ impl<'a, 'db> InferCtx<'a, 'db> {
                     if let Some(value) = value {
                         let fresh = self.fresh_var();
                         let ty = self.infer_expr(*value, &fresh);
-                        self.constraints.poison_unresolved_number(self.table, &ty);
+                        self.constraints
+                            .poison_unresolved_number(&mut self.table, &ty);
                     }
                     self.result
                         .diagnostics
@@ -5558,13 +5720,19 @@ impl<'a, 'db> InferCtx<'a, 'db> {
                         .diagnostics
                         .push(InferenceDiagnostic::NotCallable {
                             expr: callee,
-                            ty: Ty::UnresolvedNumber,
+                            // In a group body the variable renders what
+                            // the group decides for it.
+                            ty: if self.constraints.leaves_errors_unbound() {
+                                Ty::Infer(var)
+                            } else {
+                                Ty::UnresolvedNumber
+                            },
                         });
                     // The commitment contradicts what the callee's
                     // signature is already committed to: poison it
                     // so the member reports via the needs-annotation
                     // path instead of publishing a guess.
-                    self.constraints.poison(self.table, var);
+                    self.constraints.poison(&mut self.table, var);
                     self.infer_args_broken(args);
                     Ty::Error
                 }
@@ -6319,7 +6487,7 @@ impl<'a, 'db> InferCtx<'a, 'db> {
             GenericArgData::Type(type_ref) => {
                 let written = self.lower_type_ref(type_ref);
                 self.constraints.adopt(
-                    self.table,
+                    &mut self.table,
                     var,
                     &written,
                     Some(Cause::MemberGenericArg {
@@ -7144,7 +7312,7 @@ impl<'a, 'db> InferCtx<'a, 'db> {
         // that is where the signature is written, wherever the call is.
         // (Inert while the world is one file — stated so this side and the
         // offer side cannot come to answer it differently.)
-        let inst = lower_type_ref_in(self.db, trait_loc.file, sig_ref, self.table, &scope);
+        let inst = lower_type_ref_in(self.db, trait_loc.file, sig_ref, &mut self.table, &scope);
         self.push_bound_obligations(key, &site.path, &var_of);
         inst
     }
@@ -8190,7 +8358,7 @@ impl<'a, 'db> InferCtx<'a, 'db> {
             self.db,
             declared_in,
             type_ref,
-            self.table,
+            &mut self.table,
             &ParamScope::default(),
         );
         if ty.contains_infer() { Ty::Error } else { ty }
@@ -8338,7 +8506,7 @@ impl<'a, 'db> InferCtx<'a, 'db> {
                             // explicitly "infer this one".
                             let written_ty = self.lower_type_ref(type_ref);
                             self.constraints.adopt(
-                                self.table,
+                                &mut self.table,
                                 &var,
                                 &written_ty,
                                 arg_position.map(|at| Cause::GenericArg {
@@ -8897,7 +9065,7 @@ impl<'a, 'db> InferCtx<'a, 'db> {
                 let fresh = self.fresh_var();
                 self.infer_expr(*value, &fresh);
                 self.constraints
-                    .poison_unresolved_number(self.table, &fresh);
+                    .poison_unresolved_number(&mut self.table, &fresh);
             }
         }
     }
@@ -9642,67 +9810,15 @@ impl<'a, 'db> InferCtx<'a, 'db> {
         }
     }
 
-    /// The type a `let`/parameter pattern names on its own: a
-    /// [`PatData::Newtype`]'s type or a qualified variant pattern's enum.
-    /// `None` for any other pattern or an unresolvable name.
+    /// See [`declared_type_for_pat`].
     fn declared_type_for_pat(&mut self, pat: PatId) -> Option<Ty> {
-        match self.body.pats[pat].clone() {
-            // A qualified variant pattern names its enum.
-            PatData::Variant {
-                enum_name: Some(enum_name),
-                ..
-            } => match type_scope(self.db, self.file).resolve(&enum_name) {
-                Some(Resolution::TypeItem(loc))
-                    if enum_variants(self.db, loc.to_id(self.db)).is_some()
-                        && !item_generics(self.db, loc.to_id(self.db))
-                            .iter()
-                            .any(|param| matches!(param.kind, GenericParamKind::Const(_))) =>
-                {
-                    Some(Ty::Named(self.named_with_fresh_args(&loc)))
-                }
-                _ => None,
-            },
-            PatData::Newtype { type_name, .. } => {
-                match type_scope(self.db, self.file).resolve(&type_name) {
-                    Some(Resolution::TypeItem(loc)) => {
-                        // A generic newtype pattern determines the type
-                        // FAMILY; its args come from the initializer (fresh
-                        // vars, ordinary unification) — except const
-                        // params, which are never inferred (TR06): the value
-                        // side must pin the type then, so claim nothing.
-                        let generics = item_generics(self.db, loc.to_id(self.db));
-                        if generics
-                            .iter()
-                            .any(|param| matches!(param.kind, GenericParamKind::Const(_)))
-                        {
-                            return None;
-                        }
-                        let named = self.named_with_fresh_args(&loc);
-                        Some(Ty::Named(named))
-                    }
-                    _ => None,
-                }
-            }
-            _ => None,
-        }
+        let (db, file, body) = (self.db, self.file, self.body);
+        declared_type_for_pat(db, file, body, pat, &mut || self.fresh_var())
     }
 
-    /// The named type `loc` with a fresh inference variable per type param
-    /// (and `Error` for const params — never inferred): the "some instance
-    /// of this family" type a pattern or recovery path claims.
     fn named_with_fresh_args(&mut self, loc: &ItemLoc) -> NamedTy {
-        let args = item_generics(self.db, loc.to_id(self.db))
-            .iter()
-            .map(|param| match param.kind {
-                GenericParamKind::Type => GenericArg::Ty(self.fresh_var()),
-                GenericParamKind::Region => GenericArg::Region(Region::Erased),
-                GenericParamKind::Const(_) => GenericArg::Const(ConstArgValue::Error),
-            })
-            .collect();
-        NamedTy {
-            decl: loc.clone(),
-            args,
-        }
+        let db = self.db;
+        named_with_fresh_args(db, loc, &mut || self.fresh_var())
     }
 
     /// Recursively type every binding a pattern introduces as `{error}` —
@@ -10076,7 +10192,7 @@ impl<'a, 'db> InferCtx<'a, 'db> {
                         Some(GenericArgData::Type(type_ref)) => {
                             let written_ty = self.lower_type_ref(type_ref);
                             self.constraints.adopt(
-                                self.table,
+                                &mut self.table,
                                 &var,
                                 &written_ty,
                                 Some(Cause::GenericArg {
@@ -10384,7 +10500,7 @@ impl<'a, 'db> InferCtx<'a, 'db> {
         } else {
             match self
                 .constraints
-                .relate_value(self.table, &actual, expected, expr, cause)
+                .relate_value(&mut self.table, &actual, expected, expr, cause)
             {
                 Relation::Equal => return actual,
                 // SAFE fn → UNSAFE fn: a value that needs no vouching is
@@ -10400,25 +10516,27 @@ impl<'a, 'db> InferCtx<'a, 'db> {
         // don't otherwise consult the cause store (only the join solver
         // does), and "because `T` was instantiated to `usize` by this
         // argument" is exactly the missing why.
-        for recorded in self.constraints.generic_arg_causes(self.table, expected) {
+        for recorded in self
+            .constraints
+            .generic_arg_causes(&mut self.table, expected)
+        {
             if !reasons.contains(&recorded) {
                 reasons.push(recorded);
             }
         }
-        // A still-free NUMBER variable on either side renders `{number}` —
-        // captured eagerly, because the variable is then poisoned to
-        // `{error}` below (the mismatch is the whole story; the literal
-        // that minted it must not pile a no-defining-use diagnostic on
-        // top), which would otherwise erase the honest rendering.
-        let expected_shown = if is_unresolved_number(self.table, expected) {
-            Ty::UnresolvedNumber
+        // A free NUMBER variable anywhere on either side renders
+        // `{number}`, captured eagerly because it is poisoned to `{error}`
+        // below (the mismatch is the whole story; its literal must not add
+        // a no-defining-use diagnostic). In a group body it stays open
+        // until the group decides (see [`Self::poison_left_unbound`]), so
+        // it renders what the group gives it.
+        let (expected_shown, actual_shown) = if self.constraints.leaves_errors_unbound() {
+            (expected.clone(), actual.clone())
         } else {
-            expected.clone()
-        };
-        let actual_shown = if is_unresolved_number(self.table, &actual) {
-            Ty::UnresolvedNumber
-        } else {
-            actual.clone()
+            (
+                resolve_finished(&mut self.table, expected),
+                resolve_finished(&mut self.table, &actual),
+            )
         };
         self.result
             .diagnostics
@@ -10429,9 +10547,9 @@ impl<'a, 'db> InferCtx<'a, 'db> {
                 reasons,
             });
         self.constraints
-            .poison_unresolved_number(self.table, &actual);
+            .poison_unresolved_number(&mut self.table, &actual);
         self.constraints
-            .poison_unresolved_number(self.table, expected);
+            .poison_unresolved_number(&mut self.table, expected);
         expected.clone()
     }
 
@@ -10440,11 +10558,11 @@ impl<'a, 'db> InferCtx<'a, 'db> {
     /// scrutinee variable, a pointee variable); a value meeting a CONTEXT
     /// goes through `check`, which relates.
     pub(crate) fn adopt(&mut self, a: &Ty, b: &Ty) -> bool {
-        self.constraints.adopt(self.table, a, b, None)
+        self.constraints.adopt(&mut self.table, a, b, None)
     }
 
     fn resolve_shallow(&mut self, ty: &Ty) -> Ty {
-        constraint::resolve_shallow(self.table, ty)
+        constraint::resolve_shallow(&mut self.table, ty)
     }
 
     /// The type a `let` binds: its initializer's, or `declared` (the
@@ -11169,5 +11287,96 @@ fn ty_mentions_const_param(ty: &Ty, item: &ItemLoc, index: u32) -> bool {
         }
         Ty::Named(NamedTy { args, .. }) => in_args(args),
         _ => false,
+    }
+}
+
+/// The type a fn literal's parameter writes, as both the literal's own
+/// check and its inference group's copies read it. `lower` lowers an
+/// annotation, or mints a fresh variable for `None`.
+pub(crate) fn literal_param_ty(
+    db: &dyn Db,
+    file: SourceFile,
+    body: &Body,
+    param: &crate::body::Param,
+    lower: &mut dyn FnMut(Option<&TypeRef>) -> Ty,
+) -> Ty {
+    if let PatData::Bind(binding) = &body.pats[param.pat] {
+        // The common case: a bare name's own annotation (if any) is the
+        // axiom.
+        return lower(body.bindings[*binding].type_ref.as_ref());
+    }
+    // A destructuring parameter: its own written annotation is the axiom;
+    // failing that, a `Newtype` pattern names its own type outright
+    // (`fn (Foo(...))` needs no annotation).
+    match &param.type_ref {
+        Some(type_ref) => lower(Some(type_ref)),
+        None => declared_type_for_pat(db, file, body, param.pat, &mut || lower(None))
+            .unwrap_or_else(|| lower(None)),
+    }
+}
+
+/// The type a `let`/parameter pattern names on its own: a
+/// [`PatData::Newtype`]'s type or a qualified variant pattern's enum, its
+/// type arguments from `fresh`. `None` for any other pattern or an
+/// unresolvable name.
+pub(crate) fn declared_type_for_pat(
+    db: &dyn Db,
+    file: SourceFile,
+    body: &Body,
+    pat: PatId,
+    fresh: &mut dyn FnMut() -> Ty,
+) -> Option<Ty> {
+    match &body.pats[pat] {
+        // A qualified variant pattern names its enum.
+        PatData::Variant {
+            enum_name: Some(enum_name),
+            ..
+        } => match type_scope(db, file).resolve(enum_name) {
+            Some(Resolution::TypeItem(loc))
+                if enum_variants(db, loc.to_id(db)).is_some()
+                    && !item_generics(db, loc.to_id(db))
+                        .iter()
+                        .any(|param| matches!(param.kind, GenericParamKind::Const(_))) =>
+            {
+                Some(Ty::Named(named_with_fresh_args(db, &loc, fresh)))
+            }
+            _ => None,
+        },
+        PatData::Newtype { type_name, .. } => match type_scope(db, file).resolve(type_name) {
+            Some(Resolution::TypeItem(loc)) => {
+                // A generic newtype pattern determines the type FAMILY; its
+                // args come from the initializer (fresh vars, ordinary
+                // unification) — except const params, which are never
+                // inferred (TR06): the value side must pin the type then,
+                // so claim nothing.
+                if item_generics(db, loc.to_id(db))
+                    .iter()
+                    .any(|param| matches!(param.kind, GenericParamKind::Const(_)))
+                {
+                    return None;
+                }
+                Some(Ty::Named(named_with_fresh_args(db, &loc, fresh)))
+            }
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
+/// `loc` with `fresh()` per type param and `Error` for const params, which
+/// are never inferred: the "some instance of this family" type a pattern or
+/// recovery path claims.
+fn named_with_fresh_args(db: &dyn Db, loc: &ItemLoc, fresh: &mut dyn FnMut() -> Ty) -> NamedTy {
+    let args = item_generics(db, loc.to_id(db))
+        .iter()
+        .map(|param| match param.kind {
+            GenericParamKind::Type => GenericArg::Ty(fresh()),
+            GenericParamKind::Region => GenericArg::Region(Region::Erased),
+            GenericParamKind::Const(_) => GenericArg::Const(ConstArgValue::Error),
+        })
+        .collect();
+    NamedTy {
+        decl: loc.clone(),
+        args,
     }
 }

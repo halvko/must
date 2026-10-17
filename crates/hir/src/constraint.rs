@@ -332,7 +332,24 @@ impl Constraints {
         &self.left_unbound
     }
 
-    /// Bind every still-unbound NUMBER-CLASS variable anywhere inside `ty`
+    /// Record `var` as met by an error, to commit to `{error}` once its
+    /// group has decided (see [`Self::left_unbound`]).
+    pub(crate) fn leave_unbound(&mut self, var: TyVar) {
+        self.left_unbound.push(var);
+    }
+
+    /// Whether errors are left unbound (see [`Self::new`]).
+    pub(crate) fn leaves_errors_unbound(&self) -> bool {
+        self.leave_errors_unbound
+    }
+
+    /// Whether a variable meeting `ty` stays unbound: errors are left unbound
+    /// and `ty` contains one.
+    fn is_left_unbound(&self, ty: &Ty) -> bool {
+        self.leave_errors_unbound && ty.contains_error()
+    }
+
+    /// Bind every unbound NUMBER-CLASS variable anywhere inside `ty`
     /// to `{error}`: used after a mismatch was already reported against
     /// it, so the literal(s) that minted them don't pile no-defining-use
     /// diagnostics on top (errors are infectious and silent).
@@ -744,6 +761,18 @@ impl Constraints {
         self.unify(table, a, b, cause)
     }
 
+    /// Unify two types whose regions are not this body's (an inference
+    /// group's merged signatures carry none): no outlives obligation is
+    /// recorded between them.
+    pub(crate) fn unify_exported(
+        &mut self,
+        table: &mut InPlaceUnificationTable<TyVar>,
+        a: &Ty,
+        b: &Ty,
+    ) -> bool {
+        self.unify(table, a, b, None)
+    }
+
     /// RELATION: a value meeting a CONTEXT that already has a type. Unifies
     /// AND relates their regions — the second half is what `adopt` cannot
     /// do and must never be asked to.
@@ -791,7 +820,7 @@ impl Constraints {
                 true
             }
             (Ty::Infer(var), ty) | (ty, Ty::Infer(var)) => {
-                if self.leave_errors_unbound && ty.contains_error() {
+                if self.is_left_unbound(&ty) {
                     self.left_unbound.push(var);
                     return true;
                 }
@@ -972,7 +1001,11 @@ impl Constraints {
                 self.relate(table, actual, &target, origin, cause)
                     .then_some((own, b.safety))
             }
-            (Ty::Fn(a), free) if is_free(table, &free) => {
+            // In a group an erroneous value leaves the position unbound
+            // ([`Self::unify`]), which a fresh safety would hide.
+            (ref value @ Ty::Fn(ref a), free)
+                if is_free(table, &free) && !self.is_left_unbound(value) =>
+            {
                 // The position adopts the value's shape wholesale, so there
                 // are no regions to relate; only the safety is its own.
                 let own = Safety::Infer(table.new_key(TyVarValue::Unknown));
