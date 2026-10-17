@@ -55,14 +55,15 @@ jobs:
           fi
           echo "::warning file=$file::This PR edits the review workflow, which the reviewers can only run once it is on $DEFAULT."
           echo "skip=true" >> "$GITHUB_OUTPUT"
-      # Opening the PR and the `review` label always start a round; pushes,
-      # reopening and marking ready are gated. The summary comment carries a
+      # Opening the PR, marking it ready and the `review` label always start a
+      # round; pushes and reopening are gated. The summary comment carries a
       # marker per reviewer and round, naming the head it reviewed and what
       # started it.
       - id: gate
         if: >-
           steps.current.outputs.skip != 'true' &&
           github.event.action != 'opened' && github.event.action != 'labeled' &&
+          github.event.action != 'ready_for_review' &&
           !contains(github.event.pull_request.labels.*.name, 'review')
         env:
           GH_TOKEN: ${{ github.token }}
@@ -418,7 +419,12 @@ jobs:
           REPO: ${{ github.repository }}
           ROLES: ${{ needs.roles.outputs.roles }}
           SHA: ${{ github.event.pull_request.head.sha }}
-          TRIGGER: ${{ contains(github.event.pull_request.labels.*.name, 'review') && 'label' || 'auto' }}
+          # Marking the PR ready starts a fresh budget, as the label does: rounds
+          # spent while it was not ready (stacked on another PR, say) reviewed
+          # a different change.
+          TRIGGER: >-
+            ${{ (contains(github.event.pull_request.labels.*.name, 'review')
+            || github.event.action == 'ready_for_review') && 'label' || 'auto' }}
           RUN: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
         run: |
           summary=$(gh api --paginate "repos/$REPO/issues/$PR/comments" \
