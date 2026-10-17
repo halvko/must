@@ -19,7 +19,7 @@ use crate::body::{
     body,
 };
 use crate::constraint::{
-    self, Cause, Constraints, Join, RegionConstraint, RegionConstraintReason, Witness,
+    self, Cause, Constraints, Join, RegionConstraint, RegionConstraintReason, Witness, converted,
     is_unresolved_number, resolve_args_fully, resolve_finished, resolve_fully,
 };
 use crate::item_tree::RegionRef;
@@ -30,10 +30,10 @@ use crate::scopes::{Builtin, Resolution, resolutions, type_scope};
 use crate::traits::BoundDotCandidate;
 use crate::ty::{
     ConstArgValue, GenericArg, IntKind, IntValue, NamedTy, ParamScope, ReceiverShape, Region,
-    ResolvedVariant, SelfPosition, Ty, TyVar, TyVarValue, builtin_type_by_name, dot_callable,
-    enum_variants, generic_param_scope, lower_type_ref_in, member_self_position, member_self_ty,
-    receiver_takes, self_position_of, signature, signature_needs_annotation, substitute_args,
-    type_underlying_for,
+    ResolvedVariant, Safety, SelfPosition, Ty, TyVar, TyVarValue, builtin_type_by_name,
+    dot_callable, enum_variants, generic_param_scope, lower_type_ref_in, member_self_position,
+    member_self_ty, receiver_takes, self_position_of, signature, signature_needs_annotation,
+    substitute_args, type_underlying_for,
 };
 use crate::{ItemId, ItemLoc, Severity, TypeRef, item_loc};
 
@@ -5525,18 +5525,13 @@ impl<'a, 'db> InferCtx<'a, 'db> {
             Ty::Infer(var) => {
                 let params: Vec<Ty> = args.iter().map(|_| self.fresh_var()).collect();
                 let ret = self.fresh_var();
-                // A call learns the callee's SHAPE and must not invent its
-                // SAFETY — but committing the variable to a `Ty::Fn` means
-                // naming one, so the answer is asked for rather than
-                // guessed: a join that has not solved yet is the one thing
-                // that can still be holding the value, and its witnesses
-                // know. Anything else (a mutually-recursive item signature,
-                // the usual case here) is safe, and can only be safe: an
-                // inferred signature is never an `extern` item's.
-                let unsafe_to_call = self
-                    .constraints
-                    .pending_join_mints_unsafe_fn(self.table, var);
-                let shape = Ty::fn_type_with(unsafe_to_call, params.clone(), ret.clone());
+                // A call learns the callee's SHAPE and not its SAFETY:
+                // whatever produces the value decides that (a join that
+                // solves later, a cycle mate's body), so it stays a
+                // variable, and the call itself is judged once inference
+                // has finished.
+                let safety = Safety::Infer(self.table.new_key(TyVarValue::Unknown));
+                let shape = Ty::fn_type_safety(safety, params.clone(), ret.clone());
                 if self.adopt(&Ty::Infer(var), &shape) {
                     for (i, &arg) in args.iter().enumerate() {
                         self.infer_expr(arg, &params[i]);
@@ -10367,28 +10362,32 @@ impl<'a, 'db> InferCtx<'a, 'db> {
             if self.try_reborrow(expr, &actual, expected) {
                 return self.resolve_shallow(expected);
             }
+        } else if let Some(related) = self
+            .constraints
+            .relate_fn(self.table, &actual, expected, expr, cause)
+        {
+            // SAFE fn → UNSAFE fn, the one directed conversion on function
+            // types and the only one there will be: a value that needs no
+            // vouching is welcome in a position willing to vouch. Nothing is
+            // recorded for MIR — this converts no bits, it only declines a
+            // permission the position was not going to use. The judgement
+            // itself lives in `Constraints`, because the JOIN solver is a
+            // check site too and has to make exactly this call.
+            //
+            // A converted value reads as the EXPECTED type: hover past the
+            // edge shows `unsafe fn(...)`, the type the value has in the
+            // position it landed in.
+            if related {
+                if converted(self.table, &actual, expected) {
+                    return self.resolve_shallow(expected);
+                }
+                return actual;
+            }
         } else if self
             .constraints
             .relate(self.table, &actual, expected, expr, cause)
         {
             return actual;
-        }
-        let resolved_actual = self.resolve_shallow(&actual);
-        let resolved_expected = self.resolve_shallow(expected);
-        // SAFE fn → UNSAFE fn, the one directed conversion on function
-        // types and the only one there will be: a value that needs no
-        // vouching is welcome in a position willing to vouch. Nothing is
-        // recorded for MIR — this converts no bits, it only declines a
-        // permission the position was not going to use. The judgement
-        // itself lives in `Constraints`, because the JOIN solver is a
-        // check site too and has to make exactly this call.
-        if self.constraints.coerce_fn_to_unsafe(
-            self.table,
-            &resolved_actual,
-            &resolved_expected,
-            expr,
-        ) {
-            return resolved_expected;
         }
         let mut reasons: Vec<Cause> = cause.into_iter().collect();
         // When a turbofish pinned the expected side, say so: direct checks

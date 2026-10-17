@@ -145,7 +145,11 @@
   returning and forgetting one are free. The type is the only thing that travels with a value
   through a `let`, an argument, a return or a field, so the call site always knows. Coercion
   is one-way, safe to unsafe, applied at check sites and never inferred backwards through a
-  variable. It is shallow: no variance, so a formed
+  variable. While a function's safety is unknown it is a variable, solved like the rest of the
+  type: unifying two fn types makes their safeties equal, the conversion relates them by safe
+  `<=` unsafe, and one nothing forces to unsafe is safe. So an `unsafe fn` position never
+  decides that the value going into it is unsafe, and the order of a body's uses doesn't
+  matter (#168). It is shallow: no variance, so a formed
   `struct { go: fn() }` does not convert, while a record LITERAL does, field by field,
   because a literal's fields are checked one at a time against the annotation. It has no
   runtime consequence: the conversion moves no bits, it declines a permission. A join takes

@@ -16036,7 +16036,7 @@ fn a_join_of_unsafe_fns_is_an_unsafe_fn_and_its_call_is_gated() {
     // the call that has to commit `g`'s variable to a function shape — and
     // a call has no business naming a safety. Guessing safe here refused a
     // value every branch produced, blaming `fn(...)`, a shape nothing in
-    // the source asked for. The witnesses are asked instead.
+    // the source asked for. The safety stays open, and the join decides it.
     check_unsafe_fn(
         "static gated = fn(c: bool, p: u8.&raw mut, n: usize) -> isize { \
              let g = if c { read } else { read }; g(p, n) \
@@ -16084,6 +16084,38 @@ fn a_match_join_and_a_loop_break_join_mint_the_same_way() {
 }
 
 #[test]
+fn an_unsafe_fn_position_does_not_make_its_value_unsafe_in_either_order() {
+    // Passing a value where an `unsafe fn` is expected says it MAY be unsafe
+    // to call, not that it is: a safe one fits too. Its safety stays open
+    // until something decides it, and nothing here does, so `f` is a safe
+    // `fn()` and the call needs no block — whichever comes first. (The
+    // order used to matter: the position, met first, named the safety.)
+    check_unsafe_fn(
+        "static before = fn(f) -> () { let g: unsafe fn() = f; f(); };\n\
+         static after = fn(f) -> () { f(); let g: unsafe fn() = f; };",
+        expect![[r#""#]],
+    );
+}
+
+#[test]
+fn a_safe_alias_in_a_call_cycle_stays_callable_after_an_unsafe_fn_use() {
+    // #168. `q` is an unannotated alias inside the cycle `p → q → r → p`,
+    // so `p` meets it before its type is known. Meeting the `unsafe fn()`
+    // parameter must leave its safety open for the group to decide (safe,
+    // from `r`), or `q()` reads as a call to an `unsafe fn`.
+    check_unsafe_fn(
+        "static vouch = fn(f: unsafe fn()) -> () { };\n\
+         static r = fn() -> () { p(); };\n\
+         static q = r;\n\
+         static p = fn() -> () { vouch(q); q(); };\n\
+         static r2 = fn() -> () { p2(); };\n\
+         static q2 = r2;\n\
+         static p2 = fn() -> () { let f: unsafe fn() = q2; q2(); };",
+        expect![[r#""#]],
+    );
+}
+
+#[test]
 fn a_join_mixing_a_safe_fn_and_an_unsafe_fn_settles_on_the_unsafe_one() {
     // The least upper bound under the one-way conversion: safe converts up,
     // nothing converts back, so a join with one unsafe leaf can only be an
@@ -16105,10 +16137,9 @@ fn a_join_mixing_a_safe_fn_and_an_unsafe_fn_settles_on_the_unsafe_one() {
 
 #[test]
 fn a_chain_of_pending_joins_is_followed_to_its_unsafe_witness() {
-    // The witness question is TRANSITIVE, because joins are: `g`'s
-    // witnesses are `h`, whose own join has not solved either, so a
-    // one-hop question would see no function at all and mint safe —
-    // reproducing the refusal above one `let` further away.
+    // Transitive, because joins are: `g`'s witnesses are `h`, whose own
+    // join has not solved either when `g` is called. The open safety the
+    // call minted is decided once both have, one `let` further away.
     check_unsafe_fn(
         "static gated = fn(c: bool, d: bool, p: u8.&raw mut, n: usize) -> isize { \
              let h = if d { read } else { read }; \

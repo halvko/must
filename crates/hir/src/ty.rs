@@ -490,22 +490,69 @@ pub struct ParamTy {
 pub struct FnTy {
     pub params: Vec<Ty>,
     pub ret: Ty,
-    /// `unsafe fn(...)`: a value of this type may only be CALLED inside an
-    /// `unsafe { ... }` block. It says nothing about the value's other
-    /// uses — binding it, passing it, returning it and forgetting it are
-    /// all free, because none of them runs anything.
-    pub unsafe_to_call: bool,
+    /// Whether CALLING a value of this type needs an `unsafe { ... }`
+    /// block. It says nothing about the value's other uses — binding it,
+    /// passing it, returning it and forgetting it are all free, because
+    /// none of them runs anything.
+    pub safety: Safety,
+}
+
+/// The safety of a function type: a constant, or — during inference — a
+/// variable, for a function whose shape is known before its safety is.
+///
+/// A variable because the first judgement to meet an unknown function's
+/// type is rarely the one that knows its safety: a call learns its shape,
+/// and passing it where an `unsafe fn` is expected learns nothing (a safe
+/// one fits too). Committing a constant there was a guess, and each guess
+/// was wrong for some program (#168). Safety is solved instead, like any
+/// other part of the type: two fn types that unify have equal safety, the
+/// safe-to-unsafe conversion relates the two sides by `safe <= unsafe`
+/// (`Constraints::coerce_safety`), and a variable nothing forces to
+/// `unsafe` is safe — the least solution, and the one an inferred
+/// signature always has. Finished types ([`resolve_finished`]) only ever
+/// carry the constants.
+///
+/// [`resolve_finished`]: crate::constraint::resolve_finished
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum Safety {
+    Safe,
+    Unsafe,
+    /// Still being solved: a key in the inference table, bound to
+    /// [`TyVarValue::Safety`] once something decides it.
+    Infer(TyVar),
+}
+
+impl Safety {
+    pub fn constant(unsafe_to_call: bool) -> Safety {
+        if unsafe_to_call {
+            Safety::Unsafe
+        } else {
+            Safety::Safe
+        }
+    }
 }
 
 impl FnTy {
     /// The same function type with new parts — the rebuild every structural
     /// map over a `Ty` wants (substitution, region erasure, resolution).
-    /// It exists so that those maps cannot silently drop the flag:
+    /// It exists so that those maps cannot silently drop the safety:
     /// rebuilding through [`Ty::fn_type`] would turn every `unsafe fn` that
     /// survives a substitution into a safe one, which is precisely the
     /// direction the coercion is not allowed to go.
     pub fn rebuilt(&self, params: Vec<Ty>, ret: Ty) -> Ty {
-        Ty::fn_type_with(self.unsafe_to_call, params, ret)
+        Ty::fn_type_safety(self.safety, params, ret)
+    }
+
+    /// The same function type with another safety.
+    pub fn with_safety(&self, safety: Safety) -> Ty {
+        Ty::fn_type_safety(safety, self.params.clone(), self.ret.clone())
+    }
+
+    /// `unsafe fn(...)`: a value of this type may only be called inside an
+    /// `unsafe { ... }` block. An open safety reads as safe, which is what
+    /// it becomes when inference finishes.
+    pub fn unsafe_to_call(&self) -> bool {
+        self.safety == Safety::Unsafe
     }
 }
 
@@ -646,7 +693,7 @@ impl ResolvedVariant {
 ///
 /// Not the whole judgement at a real check site: two fn types' parameters
 /// and results must unify. The check sites (`InferCtx::check` and the join
-/// solver) run the OPERATION — `Constraints::coerce_fn_to_unsafe` — which
+/// solver) run the OPERATION — `Constraints::relate_fn` — which
 /// relates those parts through the table. This predicate exists for the
 /// one consumer that has no table and needs no diagnostics: the editor's
 /// completion ranker, which must rank a legal candidate as legal, and
@@ -660,7 +707,7 @@ pub fn widens_to(actual: &Ty, expected: &Ty) -> bool {
         // whose parameters are merely unifiable is not yet known to belong
         // here. Only the safety marker is allowed to differ.
         (Ty::Fn(a), Ty::Fn(b)) => {
-            !a.unsafe_to_call && b.unsafe_to_call && a.params == b.params && a.ret == b.ret
+            !a.unsafe_to_call() && b.unsafe_to_call() && a.params == b.params && a.ret == b.ret
         }
         _ => false,
     }
@@ -703,10 +750,15 @@ impl Ty {
     /// site: a written type reference, an `extern` item's inferred signature,
     /// a join's minted callee shape.
     pub fn fn_type_with(unsafe_to_call: bool, params: Vec<Ty>, ret: Ty) -> Ty {
+        Ty::fn_type_safety(Safety::constant(unsafe_to_call), params, ret)
+    }
+
+    /// A function type whose safety may still be an inference variable.
+    pub fn fn_type_safety(safety: Safety, params: Vec<Ty>, ret: Ty) -> Ty {
         Ty::Fn(Arc::new(FnTy {
             params,
             ret,
-            unsafe_to_call,
+            safety,
         }))
     }
 
@@ -751,6 +803,45 @@ impl Ty {
             Ty::Named(named) => Ty::Named(NamedTy {
                 decl: named.decl.clone(),
                 args: named.args.iter().map(erase_regions_arg).collect(),
+            }),
+            other => other.clone(),
+        }
+    }
+
+    /// This type with every safety variable read as safe, the value an
+    /// undecided one ends at — for comparing shapes mid-inference.
+    pub fn with_open_safety_safe(&self) -> Ty {
+        match self {
+            Ty::Fn(f) => Ty::fn_type_with(
+                f.unsafe_to_call(),
+                f.params.iter().map(Ty::with_open_safety_safe).collect(),
+                f.ret.with_open_safety_safe(),
+            ),
+            Ty::RawPtr { mutable, pointee } => {
+                Ty::raw_ptr(*mutable, pointee.with_open_safety_safe())
+            }
+            Ty::Borrow {
+                mutable,
+                region,
+                referent,
+            } => Ty::borrow(*mutable, region.clone(), referent.with_open_safety_safe()),
+            Ty::Array { elem, len } => Ty::array(elem.with_open_safety_safe(), len.clone()),
+            Ty::Record(rec) => Ty::record(
+                rec.fields
+                    .iter()
+                    .map(|(name, ty)| (name.clone(), ty.with_open_safety_safe()))
+                    .collect(),
+            ),
+            Ty::Named(named) => Ty::Named(NamedTy {
+                decl: named.decl.clone(),
+                args: named
+                    .args
+                    .iter()
+                    .map(|arg| match arg {
+                        GenericArg::Ty(ty) => GenericArg::Ty(ty.with_open_safety_safe()),
+                        other => other.clone(),
+                    })
+                    .collect(),
             }),
             other => other.clone(),
         }
@@ -998,6 +1089,10 @@ pub enum TyVarValue {
     /// pins it. The restriction is enforced in `Constraints::unify`; the
     /// flavor survives unions through [`UnifyValue::unify_values`] below.
     UnknownNumber,
+    /// A SAFETY variable ([`Safety::Infer`]) that something decided:
+    /// `true` is `unsafe`. Never meets a type: safety variables appear
+    /// only in [`FnTy::safety`], so the two kinds of key never union.
+    Safety(bool),
 }
 
 impl UnifyValue for TyVarValue {
@@ -1014,6 +1109,9 @@ impl UnifyValue for TyVarValue {
             // unified them structurally (it resolves vars before unioning),
             // so keeping either is fine.
             (TyVarValue::Known(t), _) | (_, TyVarValue::Known(t)) => TyVarValue::Known(t.clone()),
+            // Like two `Known`s: `Constraints::unify_safety` only unions two
+            // decided safety variables after checking they agree.
+            (TyVarValue::Safety(s), _) | (_, TyVarValue::Safety(s)) => TyVarValue::Safety(*s),
             // Number-ness is infectious across var↔var merges: a plain
             // variable unified with a number variable is a number variable.
             (TyVarValue::UnknownNumber, _) | (_, TyVarValue::UnknownNumber) => {
@@ -1139,7 +1237,7 @@ fn spell(ty: &Ty, how: Spelling<'_>) -> String {
             // The marker LEADS, exactly where it is written: a mismatch
             // between the two fn types has to read as the one-token
             // difference it is.
-            let marker = if f.unsafe_to_call { "unsafe " } else { "" };
+            let marker = if f.unsafe_to_call() { "unsafe " } else { "" };
             match &f.ret {
                 Ty::Unit if source.is_none() => format!("{marker}fn({params})"),
                 ret => format!("{marker}fn({params}) -> {}", spell(ret, how)),
@@ -1863,7 +1961,9 @@ pub(crate) fn substitute_payload(payload: &[Ty], decl: &ItemLoc, args: &[Generic
 pub(crate) fn erase_infer(ty: &Ty) -> Ty {
     match ty {
         Ty::Infer(_) | Ty::UnresolvedNumber => Ty::Error,
-        Ty::Fn(f) => f.rebuilt(
+        // A safety nothing decided is safe: the least solution.
+        Ty::Fn(f) => Ty::fn_type_with(
+            f.unsafe_to_call(),
             f.params.iter().map(erase_infer).collect(),
             erase_infer(&f.ret),
         ),
