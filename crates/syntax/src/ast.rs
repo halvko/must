@@ -1488,6 +1488,12 @@ impl FnType {
     pub fn generic_param_list(&self) -> Option<GenericParamList> {
         child(&self.syntax)
     }
+    /// The region a value of this type is good for: `fn @a (usize) -> ()`.
+    /// Absent on a capture-free fn type, which is good for as long as the
+    /// program runs.
+    pub fn region(&self) -> Option<RegionArg> {
+        child(&self.syntax)
+    }
     /// The `unsafe` marker: `unsafe fn(usize) -> usize` is a type of its
     /// own — a value of it may only be CALLED inside an `unsafe { ... }`
     /// block, and a safe `fn` coerces to it (never back). On a

@@ -9882,3 +9882,142 @@ static main = fn() -> usize { print("a;"); one };
         "#]],
     );
 }
+
+// ---- closures (#175) ---------------------------------------------------
+
+/// A closure reads its outer place at each call, not a snapshot: the
+/// write between the calls is seen by the second.
+#[test]
+fn a_closure_reads_the_current_value_of_its_outer_place() {
+    check_run(
+        r#"
+static main = fn() -> usize {
+    let mut x: usize = 1;
+    let f = fn() -> usize { x };
+    let a = f();
+    x = 2;
+    a * 10 + f()
+};
+"#,
+        "main()",
+        expect![[r#"
+            => 12
+        "#]],
+    );
+}
+
+/// The design's running example: a closure that writes an outer place,
+/// handed to a higher-order fn that takes `fn @a`.
+#[test]
+fn a_closure_writes_its_outer_place_through_a_higher_order_fn() {
+    check_run(
+        r#"
+static each = fn::<@a>(xs: [usize; 4], f: fn @a (usize) -> ()) -> () {
+    let mut i: usize = 0;
+    loop { if i == 4 { break; } f(xs[i]); i = i + 1; }
+};
+static main = fn() -> usize {
+    let mut total: usize = 0;
+    each([1, 20, 3, 40], fn(x: usize) -> () { if x > 10 { total = total + x; } });
+    total
+};
+"#,
+        "main()",
+        expect![[r#"
+            => 60
+        "#]],
+    );
+}
+
+/// The case Rust refuses: reading the place between two calls of a
+/// closure that writes it. The closure holds no borrow between calls.
+#[test]
+fn a_closure_holds_no_borrow_between_calls() {
+    check_run(
+        r#"
+static main = fn() -> usize {
+    let mut n: usize = 0;
+    let bump = fn() -> () { n = n + 1; };
+    bump();
+    let seen = n;
+    bump();
+    seen * 10 + n
+};
+"#,
+        "main()",
+        expect![[r#"
+            => 12
+        "#]],
+    );
+}
+
+/// Calling a closure after a place it reaches was moved out reads the
+/// moved-out place: the move check refuses the call.
+#[test]
+fn calling_a_closure_after_its_place_was_moved_out_traps() {
+    check_run(
+        r#"
+type Tok = struct { n: usize } only move with {
+    impl Self {
+        done = fn(t: Self) -> usize { let Tok(struct { n }) = t; n };
+    }
+};
+static main = fn() -> usize {
+    let t = Tok(struct { n = 3 });
+    let f = fn() -> usize { t.n };
+    let k = t.done();
+    k + f()
+};
+"#,
+        "main()",
+        expect![[r#"
+            error[Trap]: `t` was already consumed
+        "#]],
+    );
+}
+
+/// A closure inside a closure reaches a place two functions out: the
+/// middle closure reaches it too, and hands the inner one its own borrow.
+#[test]
+fn a_nested_closure_reaches_a_place_through_the_middle_one() {
+    check_run(
+        r#"
+static twice = fn::<@a>(f: fn @a () -> ()) -> () { f(); f(); };
+static main = fn() -> usize {
+    let mut n: usize = 1;
+    let outer = fn() -> () {
+        twice(fn() -> () { n = n * 3; });
+        n = n + 1;
+    };
+    outer();
+    n
+};
+"#,
+        "main()",
+        expect![[r#"
+            => 10
+        "#]],
+    );
+}
+
+/// A closure passed through a generic fn and called on the far side is
+/// still checked: the call's result may hold what was passed in.
+#[test]
+fn a_closure_through_a_generic_fn_is_still_checked() {
+    check_run(
+        r#"
+static id = fn::<T>(t: T) -> T { t };
+static main = fn() -> usize {
+    let mut n: usize = 1;
+    let g = id(fn() -> () { n = 2; });
+    let r = n.&;
+    g();
+    r.*
+};
+"#,
+        "main()",
+        expect![[r#"
+            error[Trap]: calling a closure that writes `n` here invalidates a borrow of it that is still live: the borrow is used after this point, and reading through it then would read through an invalidated borrow
+        "#]],
+    );
+}

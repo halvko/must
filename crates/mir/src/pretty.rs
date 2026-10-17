@@ -119,6 +119,19 @@ fn render_value_expr(value: &ValueExpr) -> String {
             path.push_str(".&raw");
             path
         }
+        // `closure fn#1(x, &mut y)`: the places each call borrows, with
+        // the flavor it borrows them in.
+        ValueExpr::Closure { body, captures } => {
+            let places = captures
+                .iter()
+                .map(|capture| {
+                    let flavor = if capture.mutable { "&mut " } else { "&" };
+                    format!("{flavor}{}", place(&capture.place))
+                })
+                .collect::<Vec<_>>()
+                .join(", ");
+            format!("closure {}({places})", body_name(*body))
+        }
         ValueExpr::Instantiate { item, const_args } => {
             let args = const_args
                 .iter()

@@ -28,6 +28,11 @@ use mir::{
     TerminatorKind, ValueExpr,
 };
 
+/// What a closure's refusal names (#175): lowering one takes a frame
+/// pointer and addressable locals, and wasm locals have no address.
+pub(crate) const CLOSURE: &str =
+    "a closure (a `fn` literal that reaches a local of an enclosing function)";
+
 use rustc_hash::FxHashMap;
 
 use crate::layout::{self, EqSlot, Unsupported};
@@ -389,6 +394,9 @@ impl<'a, 'db> Emitter<'a, 'db> {
             // COULD emit something that runs — and would silently drop the
             // exclusivity contract while doing it. Refusing is the whole
             // job here.
+            // A closure is a frame pointer plus addressable locals, and
+            // wasm locals have no address; not lowered yet (#175).
+            ValueExpr::Closure { .. } => Err(Refusal::new(CLOSURE, &ctx.loc, origin)),
             ValueExpr::Borrow { .. } => Err(Refusal::new(
                 "a safe borrow (`.&` / `.&mut`)",
                 &ctx.loc,

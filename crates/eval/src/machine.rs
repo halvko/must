@@ -712,6 +712,38 @@ impl<'db, M: Mode> Machine<'db, M> {
         }
     }
 
+    /// The borrows one call of a closure is handed (#175): each of its
+    /// places borrowed afresh, `.&mut` where the closure writes it, as a
+    /// child of the pointer the closure was bound with. The loan check
+    /// keeps a place's storage alive while a closure reaching it is;
+    /// a dead one here is the backstop's catch.
+    fn borrow_captures(
+        &mut self,
+        captures: &[(Value, bool)],
+        loc: &ItemLoc,
+        origin: ExprId,
+    ) -> Result<Vec<Value>, EvalError> {
+        let mut out = Vec::with_capacity(captures.len());
+        for (pointer, mutable) in captures {
+            let Value::Ptr { alloc, path, tag } = pointer else {
+                return Err(self.ill_typed("a pointer to a closure's place", pointer, loc, origin));
+            };
+            if !self.memory.get(alloc).is_some_and(|a| a.live) {
+                return Err(self.internal_error(
+                    "a closure was called after the storage of a place it reaches ended".to_owned(),
+                    Some((loc.clone(), origin)),
+                ));
+            }
+            let tag = self.mint_borrow(*tag, *alloc, path, *mutable, loc, origin)?;
+            out.push(Value::Ptr {
+                alloc: *alloc,
+                path: path.clone(),
+                tag,
+            });
+        }
+        Ok(out)
+    }
+
     fn push_frame(
         &mut self,
         loc: ItemLoc,
@@ -894,6 +926,10 @@ impl<'db, M: Mode> Machine<'db, M> {
                     .collect::<Result<Vec<_>, _>>()?;
                 match callee {
                     Value::Fn(f) => {
+                        let mut args = args;
+                        if let Some(captures) = &f.captures {
+                            args.extend(self.borrow_captures(captures, &loc, origin)?);
+                        }
                         self.push_frame(
                             f.item,
                             f.body,
@@ -1735,6 +1771,35 @@ impl<'db, M: Mode> Machine<'db, M> {
                     ..f
                 }))
             }
+            // A closure (#175): the fn value, bound to its places in this
+            // frame. Each is addressed like `.&raw` would (a local is
+            // promoted; an outer place passes on the borrow this frame
+            // was handed); a call borrows each afresh from there.
+            ValueExpr::Closure {
+                body: closure_body,
+                captures,
+            } => {
+                let mut bound = Vec::with_capacity(captures.len());
+                for capture in captures {
+                    let projection =
+                        self.resolve_projection(loc, body, &capture.place.projection, origin)?;
+                    let (alloc, path, tag) = self.resolve_place_alloc(
+                        loc,
+                        body,
+                        capture.place.local,
+                        &projection,
+                        PathMode::Mint,
+                        origin,
+                    )?;
+                    bound.push((Value::Ptr { alloc, path, tag }, capture.mutable));
+                }
+                Ok(Value::Fn(FnValue {
+                    item: loc.clone(),
+                    body: *closure_body,
+                    const_args: self.current_const_args(),
+                    captures: Some(bound.into()),
+                }))
+            }
             ValueExpr::Field { base, index } => {
                 let base = self.eval_operand(loc, body, base, origin)?;
                 let index = *index as usize;
@@ -2245,6 +2310,7 @@ impl<'db, M: Mode> Machine<'db, M> {
                     item: loc.clone(),
                     body: *body,
                     const_args: self.current_const_args(),
+                    captures: None,
                 }),
                 // An `extern` item carries only its declaration — there is no
                 // body, and nothing to capture.

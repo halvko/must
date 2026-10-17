@@ -2226,9 +2226,10 @@ fn borrow_op_generic_args(p: &mut Parser<'_>) {
     generic_arg_list(p);
 }
 
-/// A fn type: optional `unsafe`, `fn`, an optional binder (`::<...>`), a
-/// parameter list of bare types, and an optional return type —
-/// `unsafe fn(u8.&raw mut, usize) -> isize`.
+/// A fn type: optional `unsafe`, `fn`, an optional binder (`::<...>`), an
+/// optional region (`@a`), a parameter list of bare types, and an optional
+/// return type — `unsafe fn(u8.&raw mut, usize) -> isize`,
+/// `fn @a (usize) -> ()`.
 fn anon_fn_type(p: &mut Parser<'_>) -> CompletedMarker {
     let m = p.start();
     p.eat(UNSAFE_KW);
@@ -2237,6 +2238,16 @@ fn anon_fn_type(p: &mut Parser<'_>) -> CompletedMarker {
     // reason where it is not allowed, rather than a bare "expected `(`".
     if p.at(COLON2) && p.nth(1) == L_ANGLE {
         generic_param_list(p);
+    }
+    // The region a closure value is good for. Not a turbofish: on a fn
+    // type, `::<...>` is already the binder of a generic member signature.
+    if p.at(REGION_IDENT) {
+        let region = p.start();
+        p.bump(REGION_IDENT);
+        while p.eat(PLUS) {
+            region_bound(p);
+        }
+        region.complete(p, REGION_ARG);
     }
     if p.at(L_PAREN) {
         fn_type_param_list(p);

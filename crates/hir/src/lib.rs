@@ -7,6 +7,7 @@
 
 pub mod body;
 pub mod capability;
+pub mod captures;
 pub mod const_check;
 pub mod constraint;
 pub mod diag;
@@ -1240,6 +1241,16 @@ pub fn file_diagnostics(db: &dyn Db, file: SourceFile) -> Vec<Diagnostic> {
             };
             related.extend(hint_related);
             let fix = match diag {
+                // A closure handed to a capture-free `fn (..)` parameter:
+                // give the parameter a region, so it takes closures (#175).
+                InferenceDiagnostic::TypeMismatch {
+                    expected: Ty::Fn(expected),
+                    actual: Ty::Fn(actual),
+                    reasons,
+                    ..
+                } if expected.region.is_none() && actual.region.is_some() => {
+                    closure_param_fix(db, item, file, body, reasons)
+                }
                 // Write the definition's inferred signature in. Fixes here
                 // edit the diagnosed file only, so a definition elsewhere
                 // gets none.
@@ -1583,6 +1594,53 @@ pub fn range_diagnostics(db: &dyn Db, file: SourceFile) -> Vec<Diagnostic> {
         // positions are told apart syntactically: a signature type sits
         // under a `PARAM` or a `RET_TYPE`.
         if !in_signature_position(borrow.syntax()) {
+            continue;
+        }
+        for token in region.regions() {
+            if token.text() == "@_" {
+                diagnostics.push(Diagnostic {
+                    range: token.text_range(),
+                    severity: Severity::Error,
+                    message: diag::WILDCARD_REGION_IN_SIGNATURE.to_owned(),
+                    fix: None,
+                    related: Vec::new(),
+                });
+            }
+        }
+    }
+
+    // A fn type's own region (`fn @a (usize) -> ()`): the same two
+    // judgements as a borrow's — every named region declared by an
+    // enclosing binder, and no `@_` in a signature. There is no
+    // "missing region" case: a fn type without one is capture-free.
+    for fn_type in parse(db, file)
+        .syntax_node()
+        .descendants()
+        .filter_map(ast::FnType::cast)
+    {
+        let Some(region) = fn_type.region() else {
+            continue;
+        };
+        let binder = enclosing_binder_info(fn_type.syntax());
+        for token in region.regions() {
+            let text = token.text();
+            if text != "@_" && !binder.names_region(text) {
+                diagnostics.push(Diagnostic {
+                    range: token.text_range(),
+                    severity: Severity::Error,
+                    message: diag::unknown_region(text),
+                    fix: None,
+                    related: Vec::new(),
+                });
+            }
+        }
+        // Asked of the PARENT: the fn type itself is where
+        // `in_signature_position` stops climbing for the types inside it.
+        if !fn_type
+            .syntax()
+            .parent()
+            .is_some_and(|parent| in_signature_position(&parent))
+        {
             continue;
         }
         for token in region.regions() {
@@ -2243,6 +2301,110 @@ fn match_arms_fix<'db>(
             range: TextRange::empty(anchor),
             insert,
         }],
+    })
+}
+
+/// "Let this parameter take closures": for a closure passed where a
+/// capture-free `fn (..)` parameter is declared, write a region on the
+/// parameter's type (`fn @a (..)`) and add it to the callee's binder. Only
+/// for a callee declared in the diagnosed file, since a fix edits that file
+/// alone, and only where the parameter's type is written.
+fn closure_param_fix(
+    db: &dyn Db,
+    item: ItemId<'_>,
+    file: SourceFile,
+    body: &body::Body,
+    reasons: &[constraint::Cause],
+) -> Option<syntax::Fix> {
+    let (call, arg) = reasons.iter().find_map(|cause| match cause {
+        constraint::Cause::CallSite { call, arg } => Some((*call, *arg)),
+        _ => None,
+    })?;
+    let body::ExprData::Call { callee, args, .. } = &body.exprs[call] else {
+        return None;
+    };
+    let index = args.iter().position(|&a| a == arg)?;
+    let types = infer::infer(db, item);
+    let target = match types
+        .member_of_expr
+        .get(call)
+        .or_else(|| types.qualified_member_of_expr.get(call))
+    {
+        Some(loc) => loc.clone(),
+        None => match resolutions(db, item).get(*callee) {
+            Some(Resolution::Item(loc)) => loc.clone(),
+            _ => return None,
+        },
+    };
+    if target.file != file {
+        return None;
+    }
+    let target = target.to_id(db);
+    let value = match item_tree::member_source(db, target) {
+        Some(member) => member.value(),
+        None => match item_source(db, target)? {
+            ast::Item::StaticItem(source) => source.body(),
+            _ => None,
+        },
+    };
+    let Some(ast::Expr::FnLiteral(literal)) = value else {
+        return None;
+    };
+    let param = literal.param_list()?.params().nth(index)?;
+    let Some(ast::Type::FnType(fn_ty)) = param.ty() else {
+        return None;
+    };
+    if fn_ty.region().is_some() {
+        return None;
+    }
+    let binder = literal.generic_param_list();
+    let written = binder
+        .as_ref()
+        .map(|list| list.syntax().text().to_string())
+        .unwrap_or_default();
+    let region = ('a'..='z').map(|c| format!("@{c}")).find(|name| {
+        !written
+            .split(|c: char| !(c == '@' || c.is_alphanumeric() || c == '_'))
+            .any(|word| word == name)
+    })?;
+    let fn_kw = |node: &syntax::SyntaxNode| {
+        node.children_with_tokens()
+            .filter_map(|it| it.into_token())
+            .find(|it| it.kind() == syntax::SyntaxKind::FN_KW)
+    };
+    let mut edits = Vec::new();
+    match binder.as_ref().and_then(|list| {
+        list.syntax()
+            .children_with_tokens()
+            .filter_map(|it| it.into_token())
+            .find(|it| it.kind() == syntax::SyntaxKind::L_ANGLE)
+    }) {
+        Some(l_angle) => edits.push(syntax::TextEdit {
+            range: TextRange::empty(l_angle.text_range().end()),
+            insert: format!("{region}, "),
+        }),
+        None => edits.push(syntax::TextEdit {
+            range: TextRange::empty(fn_kw(literal.syntax())?.text_range().end()),
+            insert: format!("::<{region}>"),
+        }),
+    }
+    let kw = fn_kw(fn_ty.syntax())?;
+    let spaced = kw
+        .next_token()
+        .is_some_and(|next| next.kind() == syntax::SyntaxKind::WHITESPACE);
+    edits.push(syntax::TextEdit {
+        range: TextRange::empty(kw.text_range().end()),
+        insert: if spaced {
+            format!(" {region}")
+        } else {
+            format!(" {region} ")
+        },
+    });
+    // Edits apply in order; keep them sorted by position.
+    edits.sort_by_key(|edit| edit.range.start());
+    Some(syntax::Fix {
+        label: format!("Let this parameter take closures (`fn {region} (..)`)"),
+        edits,
     })
 }
 

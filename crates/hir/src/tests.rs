@@ -12560,7 +12560,7 @@ static apply = fn(g: fn(usize) -> usize, n: usize) -> usize { g(n) };
 static main = fn(n: usize) -> usize { apply(fn(a, b) { n }, n) };
 "#,
         expect![[r#"
-            115..129: type mismatch: expected `fn(usize) -> usize`, found `fn(_, _) -> usize`
+            115..129: type mismatch: expected `fn(usize) -> usize`, found `fn @_ (_, _) -> usize`
         "#]],
     );
 }
@@ -17936,4 +17936,90 @@ static one = 1;
     );
     let item = crate::file_item_ids(&db, b)[0];
     assert_eq!(crate::trap_sites::range_traps(&db, item), &[]);
+}
+
+#[test]
+fn a_regioned_fn_type_accepts_a_capture_free_fn() {
+    // `fn @a (..)` is a closure's type: a value good for `@a`. A
+    // capture-free fn is good for the whole program, so it fits — the
+    // directed conversion, like safe → `unsafe`.
+    check_diagnostics(
+        "static apply = fn::<@a>(f: fn @a (usize) -> usize, x: usize) -> usize { f(x) };\n\
+         static double = fn (x: usize) -> usize { x + x };\n\
+         static main = fn () -> usize { apply(double, 21) + apply(fn (x) { x }, 1) };",
+        expect![[r#""#]],
+    );
+}
+
+#[test]
+fn a_closure_does_not_fit_a_capture_free_fn_position() {
+    // The conversion is one-way: a capture-free position may be stored
+    // anywhere, which a value good only for `@a` may not.
+    check_diagnostics(
+        "static keep = fn (f: fn(usize) -> usize) -> usize { f(1) };\n\
+         static pass = fn::<@a>(f: fn @a (usize) -> usize) -> usize { keep(f) };",
+        expect![[r#"
+            126..127: type mismatch: expected `fn(usize) -> usize`, found `fn @a (usize) -> usize`
+        "#]],
+    );
+}
+
+#[test]
+fn the_safety_and_region_conversions_compose() {
+    // A safe capture-free fn fits `unsafe fn @a`, and a safe `fn @a`
+    // narrows into an `unsafe fn @b`: each conversion is directed, and
+    // neither blocks the other.
+    check_diagnostics(
+        "static apply = fn::<@a>(f: unsafe fn @a (usize) -> usize) -> usize { unsafe { f(1) } };\n\
+         static double = fn (x: usize) -> usize { x + x };\n\
+         static pass = fn::<@a: @b, @b>(g: fn @a () -> ()) -> unsafe fn @b () -> () { g };\n\
+         static main = fn () -> usize { apply(double) };",
+        expect![[r#""#]],
+    );
+    // The reverse of either is refused.
+    check_diagnostics(
+        "static keep = fn::<@a>(f: fn @a () -> ()) -> () { f() };\n\
+         static pass = fn::<@a>(g: unsafe fn @a () -> ()) -> () { keep(g) };",
+        expect![[r#"
+            119..120: type mismatch: expected `fn @_ ()`, found `unsafe fn @a ()`
+        "#]],
+    );
+}
+
+#[test]
+fn a_closure_narrows_into_a_shorter_region_and_never_widens() {
+    // Returning a closure good for `@a` as one good for `@b` needs `@a`
+    // to outlive `@b`: one directed edge, the reborrow's twin.
+    check_diagnostics(
+        "static f = fn::<@a, @b>(g: fn @a () -> ()) -> fn @b () -> () { g };",
+        expect![[r#"
+            63..64: using this closure where a longer-lived one is expected needs `@a` to outlive `@b`, which this signature does not declare; add `@a: @b` to the binder
+        "#]],
+    );
+    check_diagnostics(
+        "static f = fn::<@a: @b, @b>(g: fn @a () -> ()) -> fn @b () -> () { g };",
+        expect![[r#""#]],
+    );
+}
+
+#[test]
+fn a_fn_types_region_is_checked_like_a_borrows() {
+    // Every named region declared by a binder, and no `@_` in a signature.
+    check_diagnostics(
+        "static f = fn::<@a>(g: fn @b () -> ()) -> () { g() };",
+        expect![[r#"
+            26..28: no region named `@b` is in scope; declare it in the binder (`fn::<@b>`)
+        "#]],
+    );
+    check_diagnostics(
+        "static f = fn (g: fn @_ () -> ()) { g() };",
+        expect![[r#"
+            21..23: `@_` cannot be used in a signature — declare the region in the binder (`fn::<@a>`) and name it here
+        "#]],
+    );
+    // In a body, `@_` is an answer.
+    check_diagnostics(
+        "static f = fn::<@a>(g: fn @a () -> ()) -> () { let h: fn @_ () -> () = g; h() };",
+        expect![[r#""#]],
+    );
 }

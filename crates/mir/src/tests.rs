@@ -431,33 +431,35 @@ fn not_callable_traps_instead_of_calling() {
 }
 
 #[test]
-fn capture_is_diagnosed_and_trapped() {
+fn a_closure_reads_its_outer_place_through_a_hidden_borrow() {
     check_mir(
         "static f = fn () -> usize { let a = 1; let g = fn () -> usize { a }; g() };",
         expect![[r#"
             item f:
-            fn b0() -> usize {
+            fn b0(_1: usize.&) -> usize {
               _0: usize  // return
-              _1: usize
+              _1: usize.&  // param a
+              _2: usize
               bb0:
-                _1 = trap "`a` is a local of an enclosing function; captures are not supported yet" -> bb1
-              bb1:
-                _0 = _1
+                _2 = _1.*
+                _0 = _2
                 return
             }
             fn b1() -> usize {
               _0: usize  // return
               _1: usize  // a
-              _2: fn() -> usize  // g
-              _3: fn() -> usize
-              _4: usize
+              _2: fn() -> usize
+              _3: fn() -> usize  // g
+              _4: fn() -> usize
+              _5: usize
               bb0:
                 _1 = 1
-                _2 = fn b0
+                _2 = closure b0(&_1)
                 _3 = _2
-                _4 = call _3() -> bb1
+                _4 = _3
+                _5 = call _4() -> bb1
               bb1:
-                _0 = _4
+                _0 = _5
                 return
             }
             fn b2() -> fn() -> usize {
@@ -466,7 +468,6 @@ fn capture_is_diagnosed_and_trapped() {
                 _0 = fn b1
                 return
             }
-            mir diagnostic at 64..65: `a` is a local of an enclosing function; captures are not supported yet
         "#]],
     );
 }
@@ -950,35 +951,36 @@ fn assignment_reuses_the_lets_local() {
 }
 
 #[test]
-fn assignment_to_a_captured_local_is_diagnosed_and_trapped() {
-    // Mirrors `capture_is_diagnosed_and_trapped`: writing to a local of an
-    // enclosing function is exactly as unsupported as reading it.
+fn a_closure_writes_its_outer_place_through_a_hidden_mut_borrow() {
+    // Writing an outer place makes the closure's borrow of it `.&mut`,
+    // and the write goes through it.
     check_mir(
         "static f = fn () -> usize { let mut a: usize = 1; let g = fn () -> usize { a = 2; 0 }; g() };",
         expect![[r#"
             item f:
-            fn b0() -> usize {
+            fn b0(_1: usize.&mut) -> usize {
               _0: usize  // return
-              _1: usize
+              _1: usize.&mut  // param a
               bb0:
-                _1 = trap "`a` is a local of an enclosing function; captures are not supported yet" -> bb1
-              bb1:
+                _1.* = 2
                 _0 = 0
                 return
             }
             fn b1() -> usize {
               _0: usize  // return
               _1: usize  // a
-              _2: fn() -> usize  // g
-              _3: fn() -> usize
-              _4: usize
+              _2: fn() -> usize
+              _3: fn() -> usize  // g
+              _4: fn() -> usize
+              _5: usize
               bb0:
                 _1 = 1
-                _2 = fn b0
+                _2 = closure b0(&mut _1)
                 _3 = _2
-                _4 = call _3() -> bb1
+                _4 = _3
+                _5 = call _4() -> bb1
               bb1:
-                _0 = _4
+                _0 = _5
                 return
             }
             fn b2() -> fn() -> usize {
@@ -987,7 +989,6 @@ fn assignment_to_a_captured_local_is_diagnosed_and_trapped() {
                 _0 = fn b1
                 return
             }
-            mir diagnostic at 75..76: `a` is a local of an enclosing function; captures are not supported yet
         "#]],
     );
 }
@@ -6547,6 +6548,235 @@ static f = fn::<@a>(c: bool) -> usize.&::<@a> {
         expect![[r#"
             85..88: borrowed value does not live long enough: this borrows a local, but the borrow has to last for `@a`, which outlives the body
               note at 78..88: the storage ends here, where the body returns
+        "#]],
+    );
+}
+
+// ---- closures (#175) ---------------------------------------------------
+
+/// MIR lowering's own diagnostics, after any hir diagnostic.
+fn check_mir_diagnostics(text: &str, expect: Expect) {
+    let db = RootDatabase::default();
+    let file = SourceFile::new(&db, "test.must".to_owned(), text.to_owned());
+    let mut rendered = String::new();
+    for diag in hir::file_diagnostics(&db, file) {
+        rendered.push_str(&format!("{:?}: {}\n", diag.range, diag.message));
+    }
+    for &item in hir::file_item_ids(&db, file) {
+        let lowered = crate::mir_lowered(&db, item);
+        let (_, source_map) = hir::body_with_source_map(&db, item);
+        for diag in &lowered.diagnostics {
+            if let Some(ptr) = source_map.node_for_expr(diag.expr()) {
+                rendered.push_str(&format!("{:?}: {}\n", ptr.text_range(), diag.message()));
+            }
+        }
+    }
+    expect.assert_eq(&rendered);
+}
+
+/// A closure holds no borrow between calls: reading and writing the place
+/// it writes, between two calls, is accepted.
+#[test]
+fn a_closure_holds_nothing_between_calls() {
+    check_loans(
+        r#"
+static f = fn() -> usize {
+    let mut n: usize = 0;
+    let bump = fn() -> () { n = n + 1; };
+    bump();
+    let seen = n;
+    n = seen + 10;
+    bump();
+    n
+};
+"#,
+        expect![[r#""#]],
+    );
+}
+
+/// A call of a closure that writes a place is a `.&mut` of it for the
+/// call: a live shared borrow of the place is invalidated.
+#[test]
+fn calling_a_closure_that_writes_a_place_invalidates_a_live_borrow_of_it() {
+    check_loans(
+        r#"
+static f = fn() -> usize {
+    let mut n: usize = 0;
+    let bump = fn() -> () { n = n + 1; };
+    let r = n.&;
+    bump();
+    r.*
+};
+"#,
+        expect![[r#"
+            117..123: calling a closure that writes `n` here invalidates a borrow of it that is still live: the borrow is used after this point, and reading through it then would read through an invalidated borrow
+              note at 108..111: this borrow was created here
+              note at 129..130: and it is still used here
+        "#]],
+    );
+}
+
+/// A closure that only reads a place coexists with a shared borrow of it,
+/// and is refused under an exclusive one.
+#[test]
+fn calling_a_closure_that_reads_a_place_conflicts_only_with_an_exclusive_borrow() {
+    check_loans(
+        r#"
+static shared = fn() -> usize {
+    let n: usize = 1;
+    let get = fn() -> usize { n };
+    let r = n.&;
+    get() + r.*
+};
+static exclusive = fn() -> usize {
+    let mut n: usize = 1;
+    let get = fn() -> usize { n };
+    let r = n.&mut;
+    let k = get();
+    r.* = 2;
+    k
+};
+"#,
+        expect![[r#"
+            254..259: calling a closure that reads `n` here invalidates an exclusive borrow of it that is still live: a `.&mut` is the only way to the value while it lasts, and this one is used after this point
+              note at 234..240: this borrow was created here
+              note at 265..266: and it is still used here
+        "#]],
+    );
+}
+
+/// Passing a closure holds its places for the call it is passed to: the
+/// `.&mut v` beside it is refused.
+#[test]
+fn passing_a_closure_beside_a_borrow_of_its_place_is_refused() {
+    check_loans(
+        r#"
+static apply = fn::<@a, @b>(n: usize.&mut::<@b>, f: fn @a () -> usize) -> usize { n.* = f(); n.* };
+static f = fn() -> usize {
+    let mut v: usize = 1;
+    apply(v.&mut, fn() -> usize { v })
+};
+"#,
+        expect![[r#"
+            158..192: passing a closure that reads `v` here invalidates an exclusive borrow of it that is still live: the borrow is still needed by this very operation
+              note at 164..170: this borrow was created here
+        "#]],
+    );
+}
+
+/// Two closures handed to one call that both reach `n`, one writing it:
+/// the callee may run one inside the other, in the middle of its
+/// `.&mut n`. Strict for now: the pair is refused even when neither takes
+/// a closure, so only one-after-the-other is possible.
+#[test]
+fn overlapping_closures_handed_to_one_call_are_refused() {
+    check_loans(
+        r#"
+static nest = fn::<@a, @b>(f: fn @a (fn @b () -> usize) -> usize, g: fn @b () -> usize) -> usize { f(g) };
+static both = fn::<@a, @b>(f: fn @a () -> (), g: fn @b () -> usize) -> usize { f(); g() };
+static nested = fn() -> usize {
+    let mut n: usize = 0;
+    nest(fn(h) { n = 1; h() + n }, fn() -> usize { n })
+};
+static side_by_side = fn() -> usize {
+    let mut n: usize = 0;
+    both(fn() -> () { n = 1; }, fn() -> usize { n })
+};
+"#,
+        expect![[r#"
+            261..312: this call is handed two closures that both reach `n`, one of them writes it: the callee may run one inside the other, and neither would have `n` to itself
+              note at 266..290: one closure was created here
+              note at 292..311: and the other here
+            384..432: this call is handed two closures that both reach `n`, one of them writes it: the callee may run one inside the other, and neither would have `n` to itself
+              note at 389..410: one closure was created here
+              note at 412..431: and the other here
+        "#]],
+    );
+}
+
+/// A closure kept past the block that declares a place it reaches: the
+/// block's exit ends the storage while the closure is live.
+#[test]
+fn a_closure_kept_past_its_places_block_is_refused() {
+    check_loans(
+        r#"
+static f = fn() -> usize {
+    let mut g: fn @_ () -> usize = fn() -> usize { 0 };
+    {
+        let n: usize = 5;
+        g = fn() -> usize { n };
+    }
+    g()
+};
+"#,
+        expect![[r#"
+            153..154: leaving this block ends the storage of `n`, which is reached by a closure that is still live: the closure is used after this point, and calling it then would reach storage that no longer exists
+              note at 128..147: this closure was created here
+              note at 159..160: and it is still used here
+        "#]],
+    );
+}
+
+/// A closure returned from the body that declares its place.
+#[test]
+fn a_closure_returned_past_its_places_frame_is_refused() {
+    check_loans(
+        r#"
+static make = fn::<@a>(k: usize.&::<@a>) -> fn @a () -> usize {
+    let n: usize = k.*;
+    fn() -> usize { n }
+};
+"#,
+        expect![[r#"
+            93..112: a place this closure reaches does not live long enough: the closure has to last for `@a`, which outlives the body
+              note at 113..114: the storage ends here, where the body returns
+        "#]],
+    );
+}
+
+/// In a closure's body, a borrow of a place it reaches lasts at most the
+/// call: returning one, or storing one in another outer place, is refused.
+#[test]
+fn a_borrow_of_an_outer_place_cannot_outlive_the_call() {
+    check_loans(
+        r#"
+static returned = fn() -> usize {
+    let n: usize = 5;
+    let get = fn() -> usize.&::<@_> { n.& };
+    get().*
+};
+static stored = fn() -> usize {
+    let n: usize = 5;
+    let m: usize = 6;
+    let mut r = m.&;
+    let point = fn() -> () { r = n.&; };
+    point();
+    r.*
+};
+"#,
+        expect![[r#"
+            95..98: this borrow of `n` outlives the call: a closure is handed the places it reaches only for the length of each call
+            247..250: this borrow of `n` outlives the call: a closure is handed the places it reaches only for the length of each call
+        "#]],
+    );
+}
+
+/// A closure only borrows its places: one that cannot be duplicated
+/// cannot be moved out.
+#[test]
+fn moving_out_of_an_outer_place_is_refused() {
+    check_mir_diagnostics(
+        r#"
+type Tok = struct { n: usize } only move;
+static f = fn() -> usize {
+    let t = Tok(struct { n = 3 });
+    let take = fn() -> Tok { t };
+    let Tok(struct { n }) = take();
+    n
+};
+"#,
+        expect![[r#"
+            134..135: cannot move `t` out of the enclosing function: a closure only borrows the places it reaches, for the length of each call
         "#]],
     );
 }

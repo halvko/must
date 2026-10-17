@@ -169,6 +169,10 @@ pub enum TypeRef {
         /// `unsafe fn(...)`: calling a value of this type needs an
         /// `unsafe { ... }` block.
         unsafe_to_call: bool,
+        /// `fn @a (...)`: the region a closure value of this type is good
+        /// for. `None` is a capture-free fn type. Boxed: rare, and
+        /// `TypeRef` lives on the stack of every recursive lowering.
+        region: Option<Box<RegionRef>>,
     },
     /// `T.&raw` / `T.&raw mut` — a raw pointer type.
     RawPtr {
@@ -307,6 +311,9 @@ impl TypeRef {
                     .and_then(|rt| rt.ty())
                     .map(|t| Box::new(TypeRef::from_ast(t))),
                 unsafe_to_call: it.is_unsafe(),
+                region: it
+                    .region()
+                    .map(|region| Box::new(RegionRef::from_ast(&region))),
             },
             ast::Type::RawPtrType(it) => match it.ty() {
                 Some(inner) => TypeRef::RawPtr {
@@ -602,10 +609,12 @@ fn extern_contract(type_ref: TypeRef) -> TypeRef {
             params,
             ret,
             unsafe_to_call,
+            region,
         } => TypeRef::Fn {
             params,
             ret: Some(ret.unwrap_or_else(|| Box::new(TypeRef::Unit))),
             unsafe_to_call,
+            region,
         },
         _ => TypeRef::Error,
     }
@@ -902,6 +911,7 @@ fn type_ref_from_fn_literal(body: Option<ast::Expr>) -> Option<TypeRef> {
         params,
         ret,
         unsafe_to_call: false,
+        region: None,
     };
     type_ref.is_fully_typed().then_some(type_ref)
 }
@@ -1263,6 +1273,7 @@ fn type_ref_from_decl_signature(fn_type: &ast::FnType) -> Option<TypeRef> {
         // path: an unsafe-to-call REQUIREMENT is still reserved, so
         // nothing here can lower one.
         unsafe_to_call: false,
+        region: None,
     };
     type_ref.is_fully_typed().then_some(type_ref)
 }

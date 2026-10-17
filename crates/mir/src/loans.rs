@@ -159,7 +159,7 @@
 use base_db::Db;
 use hir::infer::InferenceResult;
 use hir::outlives::RegionCover;
-use hir::ty::{GenericArg, Region};
+use hir::ty::Region;
 use hir::{BindingId, ExprId, ItemId, RegionConstraint, Ty};
 use rustc_hash::{FxHashMap, FxHashSet};
 use syntax::TextRange;
@@ -190,6 +190,9 @@ pub enum LoanDiagnostic {
         borrow: ExprId,
         /// Where that loan is still needed.
         still_used: StillUsed,
+        /// The loan is a closure's pin on a place it reaches (#175), and
+        /// `borrow` is the closure.
+        closure: bool,
     },
     /// An assignment or a move replaced a pointer that the place
     /// expression around it was already read through: the access the
@@ -218,6 +221,27 @@ pub enum LoanDiagnostic {
         region: Option<String>,
         /// Whether the storage is a materialized temporary (M12).
         temporary: bool,
+        /// The loan is a closure's pin on a place it reaches (#175), and
+        /// `borrow` is the closure.
+        closure: bool,
+    },
+    /// Two closures handed to one call reach the same place and one of
+    /// them writes it (#175): the callee could run one inside the other.
+    ClosuresOverlap {
+        /// The call.
+        call: ExprId,
+        /// The place both reach, rendered for diagnostics.
+        place: String,
+        first: ExprId,
+        second: ExprId,
+    },
+    /// In a closure's body, a borrow of a place the closure reaches is
+    /// still live where the call ends (#175): the closure was handed that
+    /// place only for the call.
+    OutlivesCall {
+        borrow: ExprId,
+        /// The place, rendered for diagnostics.
+        place: String,
     },
 }
 
@@ -243,6 +267,12 @@ pub enum AccessKind {
     /// ([`StatementKind::StorageDead`]): the last write to the whole
     /// local, foreign to every loan of its storage.
     StorageEnd(Scope),
+    /// A call of a closure (#175): a borrow of each place it reaches, for
+    /// the call — `.&mut` where it writes the place.
+    CallClosure { mutable: bool },
+    /// A closure handed to a call: the same borrows, held for the length
+    /// of the call it is passed to.
+    PassClosure { mutable: bool },
 }
 
 impl AccessKind {
@@ -253,6 +283,8 @@ impl AccessKind {
                 | AccessKind::Write
                 | AccessKind::Move
                 | AccessKind::StorageEnd(_)
+                | AccessKind::CallClosure { mutable: true }
+                | AccessKind::PassClosure { mutable: true }
         )
     }
 }
@@ -279,7 +311,9 @@ impl LoanDiagnostic {
         match self {
             LoanDiagnostic::Invalidated { access, .. }
             | LoanDiagnostic::Repointed { access, .. } => *access,
-            LoanDiagnostic::Escapes { borrow, .. } => *borrow,
+            LoanDiagnostic::Escapes { borrow, .. }
+            | LoanDiagnostic::OutlivesCall { borrow, .. } => *borrow,
+            LoanDiagnostic::ClosuresOverlap { call, .. } => *call,
         }
     }
 
@@ -309,9 +343,17 @@ impl LoanDiagnostic {
         let at = |expr: ExprId| Some(source_map.node_for_expr(expr)?.text_range());
         let notes = match self {
             LoanDiagnostic::Invalidated {
-                borrow, still_used, ..
+                borrow,
+                still_used,
+                closure,
+                ..
             } => {
-                let mut notes = vec![(at(*borrow), "this borrow was created here")];
+                let created = if *closure {
+                    "this closure was created here"
+                } else {
+                    "this borrow was created here"
+                };
+                let mut notes = vec![(at(*borrow), created)];
                 match still_used {
                     StillUsed::Later(used) => notes.push((at(*used), "and it is still used here")),
                     StillUsed::NextIteration(used) => notes.push((
@@ -336,6 +378,11 @@ impl LoanDiagnostic {
                 };
                 vec![(hir::body::exit_range(db, item, *exit), note)]
             }
+            LoanDiagnostic::ClosuresOverlap { first, second, .. } => vec![
+                (at(*first), "one closure was created here"),
+                (at(*second), "and the other here"),
+            ],
+            LoanDiagnostic::OutlivesCall { .. } => Vec::new(),
         };
         notes
             .into_iter()
@@ -350,6 +397,37 @@ impl LoanDiagnostic {
             // `&mut` mint, so "reborrowing" would point at code with no
             // visible borrow in it. "using `r` mutably here" is true of
             // both spellings.
+            LoanDiagnostic::Invalidated {
+                kind,
+                place,
+                still_used,
+                closure: true,
+                ..
+            } => {
+                let did = match kind {
+                    AccessKind::StorageEnd(scope) => format!(
+                        "leaving this {} ends the storage of {place}, which",
+                        scope.name()
+                    ),
+                    // Only a storage end is foreign to a pin.
+                    _ => format!("touching {place} here"),
+                };
+                let because = match still_used {
+                    StillUsed::NextIteration(_) => {
+                        "the loop brings control back round to a use of the closure, which \
+                         would then reach storage that no longer exists"
+                    }
+                    StillUsed::HandedBack => {
+                        "the closure is handed back to the caller, which would then reach \
+                         storage that no longer exists"
+                    }
+                    StillUsed::Later(_) | StillUsed::AtTheAccess => {
+                        "the closure is used after this point, and calling it then would \
+                         reach storage that no longer exists"
+                    }
+                };
+                format!("{did} is reached by a closure that is still live: {because}")
+            }
             LoanDiagnostic::Invalidated {
                 kind,
                 place,
@@ -370,6 +448,14 @@ impl LoanDiagnostic {
                             scope.name()
                         )
                     }
+                    AccessKind::CallClosure { mutable } => format!(
+                        "calling a closure that {} {place} here",
+                        if *mutable { "writes" } else { "reads" }
+                    ),
+                    AccessKind::PassClosure { mutable } => format!(
+                        "passing a closure that {} {place} here",
+                        if *mutable { "writes" } else { "reads" }
+                    ),
                 };
                 let victim = if kind.is_write() {
                     "a borrow of it"
@@ -392,7 +478,13 @@ impl LoanDiagnostic {
                     (StillUsed::AtTheAccess, _) => {
                         "the borrow is still needed by this very operation"
                     }
-                    (StillUsed::Later(_), AccessKind::SharedBorrow | AccessKind::Read) => {
+                    (
+                        StillUsed::Later(_),
+                        AccessKind::SharedBorrow
+                        | AccessKind::Read
+                        | AccessKind::CallClosure { mutable: false }
+                        | AccessKind::PassClosure { mutable: false },
+                    ) => {
                         "a `.&mut` is the only way to the value while it lasts, and this \
                          one is used after this point"
                     }
@@ -422,6 +514,28 @@ impl LoanDiagnostic {
                      old pointer"
                 )
             }
+            LoanDiagnostic::ClosuresOverlap { place, .. } => format!(
+                "this call is handed two closures that both reach {place}, one of them \
+                 writes it: the callee may run one inside the other, and neither would \
+                 have {place} to itself"
+            ),
+            LoanDiagnostic::OutlivesCall { place, .. } => format!(
+                "this borrow of {place} outlives the call: a closure is handed the places \
+                 it reaches only for the length of each call"
+            ),
+            LoanDiagnostic::Escapes {
+                region: Some(region),
+                closure: true,
+                ..
+            } => format!(
+                "a place this closure reaches does not live long enough: the closure has \
+                 to last for {region}, which outlives the body"
+            ),
+            LoanDiagnostic::Escapes { closure: true, .. } => {
+                "a place this closure reaches does not live long enough: the closure is \
+                 still live when the body returns, and the place is gone by then"
+                    .to_owned()
+            }
             LoanDiagnostic::Escapes {
                 region: Some(region),
                 temporary: true,
@@ -429,14 +543,14 @@ impl LoanDiagnostic {
             } => format!(
                 "borrowed value does not live long enough: this borrows a temporary, \
                  which lives no longer than the block that creates it, but the borrow \
-                 has to last for `{region}`, which outlives the body"
+                 has to last for {region}, which outlives the body"
             ),
             LoanDiagnostic::Escapes {
                 region: Some(region),
                 ..
             } => format!(
                 "borrowed value does not live long enough: this borrows a local, \
-                 but the borrow has to last for `{region}`, which outlives the body"
+                 but the borrow has to last for {region}, which outlives the body"
             ),
             LoanDiagnostic::Escapes {
                 temporary: true, ..
@@ -494,6 +608,10 @@ struct Loan {
     origin: ExprId,
     mint: Point,
     mutable: bool,
+    /// A closure's claim on a place it reaches (#175), minted where the
+    /// closure is bound: it borrows nothing, and only the end of the
+    /// place's storage is foreign to it.
+    pin: bool,
     place: Place,
     /// The lowest universal the region covers: the caller's region the
     /// borrow has to last for, which no storage of this body outlives.
@@ -507,6 +625,16 @@ struct Loan {
     /// is a universal itself, or the obligation's origin is not a
     /// statement here): live at every point in scope.
     flows_everywhere: bool,
+}
+
+/// What a loan was minted by.
+#[derive(Clone, Copy)]
+enum Mint {
+    Borrow {
+        mutable: bool,
+    },
+    /// A closure bound to the place (#175).
+    Pin,
 }
 
 /// One access, in the model's terms.
@@ -549,6 +677,12 @@ struct BodyCheck<'a> {
     /// Per block, per point: the loans whose region is live there. Fixed
     /// once liveness is, so the forward walk applies it as a mask.
     live_loans: Vec<Vec<BitSet>>,
+    /// In a closure's body, the region graph nodes of its outer places'
+    /// types, sorted: the enclosing frame's regions, which outlive every
+    /// point here like a universal does (#175).
+    outer_universals: Vec<u32>,
+    /// The closures this body binds, and which locals may hold them.
+    closures: cfg::ClosureFlow<'a>,
 }
 
 impl<'a> BodyCheck<'a> {
@@ -577,6 +711,8 @@ impl<'a> BodyCheck<'a> {
             reach: Vec::new(),
             live_regions: Vec::new(),
             live_loans: Vec::new(),
+            outer_universals: Vec::new(),
+            closures: cfg::ClosureFlow::of(body),
         };
         check.aliases = check.compute_aliases();
         check.place_temps = check
@@ -586,6 +722,7 @@ impl<'a> BodyCheck<'a> {
             .map(|(local, _)| local)
             .filter(|&local| check.is_place_temp(local))
             .collect();
+        check.outer_universals = check.compute_outer_universals();
         let (regions, copyable) = check.compute_local_types();
         check.local_regions = regions;
         check.local_copyable = copyable;
@@ -748,7 +885,7 @@ impl<'a> BodyCheck<'a> {
             let types = self.hir_types_of(local);
             let mut nodes = Vec::new();
             for ty in &types {
-                collect_regions(ty, &mut |region| nodes.extend(self.cover.node(region)));
+                ty.for_each_region(&mut |region| nodes.extend(self.cover.node(region)));
             }
             // The temp holding a fresh loan: its region is the loan's,
             // recorded at the mint (the use site's type may hold what the
@@ -763,7 +900,7 @@ impl<'a> BodyCheck<'a> {
             // A universal is live everywhere whether or not a local
             // mentions it, so a local mentioning one HOLDS nothing: the
             // loans it would keep live are live already.
-            nodes.retain(|&node| !self.cover.is_universal(node));
+            nodes.retain(|&node| !self.is_universal(node));
             nodes.sort_unstable();
             nodes.dedup();
             regions.push(nodes);
@@ -774,6 +911,89 @@ impl<'a> BodyCheck<'a> {
             );
         }
         (regions, copyable)
+    }
+
+    fn compute_outer_universals(&self) -> Vec<u32> {
+        let mut nodes = Vec::new();
+        for outer in &self.body.outer {
+            if let Some(ty) = self.infer.type_of_binding.get(outer.binding) {
+                ty.for_each_region(&mut |region| nodes.extend(self.cover.node(region)));
+            }
+        }
+        nodes.sort_unstable();
+        nodes.dedup();
+        nodes
+    }
+
+    /// The accesses a call makes through the closures it is handed: the
+    /// callee's places, borrowed for its call, and every argument's, held
+    /// for the length of the call it is passed to.
+    fn closure_accesses(&self, callee: &Operand, args: &[Operand], out: &mut Vec<Access>) {
+        let mut push = |closure: usize, call: bool| {
+            for capture in self.closures.captures(closure) {
+                out.push(Access {
+                    kind: if call {
+                        AccessKind::CallClosure {
+                            mutable: capture.mutable,
+                        }
+                    } else {
+                        AccessKind::PassClosure {
+                            mutable: capture.mutable,
+                        }
+                    },
+                    place: self.resolve(&capture.place),
+                    shallow: false,
+                });
+            }
+        };
+        for &closure in self.closures.held_by(callee) {
+            push(closure, true);
+        }
+        for arg in args {
+            for &closure in self.closures.held_by(arg) {
+                push(closure, false);
+            }
+        }
+    }
+
+    /// Two closures handed to one call that reach the same place, one of
+    /// them writing it: neither call's borrow is exclusive if the callee
+    /// runs one inside the other. Strict on purpose: only a closure that
+    /// takes a closure can do that without threads, but this refuses every
+    /// such pair until the threading design says what may cross. The
+    /// callee counts, and one closure never conflicts with itself.
+    fn overlapping_closures(
+        &self,
+        callee: &Operand,
+        args: &[Operand],
+    ) -> Option<(usize, usize, Place)> {
+        let handed: Vec<&[usize]> = std::iter::once(callee)
+            .chain(args)
+            .map(|op| self.closures.held_by(op))
+            .collect();
+        for (i, first) in handed.iter().enumerate() {
+            for second in &handed[i + 1..] {
+                for &a in *first {
+                    for &b in *second {
+                        if a == b {
+                            continue;
+                        }
+                        for x in self.closures.captures(a) {
+                            for y in self.closures.captures(b) {
+                                let (px, py) = (self.resolve(&x.place), self.resolve(&y.place));
+                                if (x.mutable || y.mutable)
+                                    && px.local == py.local
+                                    && paths_overlap(&px.projection, &py.projection)
+                                {
+                                    return Some((a, b, px));
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        None
     }
 
     // ---- loans ------------------------------------------------------------
@@ -830,10 +1050,8 @@ impl<'a> BodyCheck<'a> {
         self.infer.region_constraints.iter().filter(move |c| {
             nodes(&c.sup)
                 .iter()
-                .any(|&sup| !self.cover.is_universal(sup) && covers.binary_search(&sup).is_ok())
-                && nodes(&c.sub)
-                    .iter()
-                    .any(|&sub| self.cover.is_universal(sub))
+                .any(|&sup| !self.is_universal(sup) && covers.binary_search(&sup).is_ok())
+                && nodes(&c.sub).iter().any(|&sub| self.is_universal(sub))
         })
     }
 
@@ -842,6 +1060,27 @@ impl<'a> BodyCheck<'a> {
         let mut loans = Vec::new();
         for (block, data) in self.body.blocks.iter() {
             for (index, stmt) in data.statements.iter().enumerate() {
+                if let StatementKind::Assign {
+                    value: ValueExpr::Closure { captures, .. },
+                    ..
+                } = &stmt.kind
+                {
+                    let region = self.infer.loan_regions.get(stmt.origin);
+                    let Some(node) = region.and_then(|r| self.cover.node(r)) else {
+                        continue;
+                    };
+                    for capture in captures {
+                        loans.push(self.loan(
+                            node,
+                            &points_by_origin,
+                            Point { block, index },
+                            stmt.origin,
+                            self.resolve(&capture.place),
+                            Mint::Pin,
+                        ));
+                    }
+                    continue;
+                }
                 let StatementKind::Assign {
                     value: ValueExpr::Borrow { mutable, place },
                     ..
@@ -856,28 +1095,56 @@ impl<'a> BodyCheck<'a> {
                 let Some(node) = self.loan_region(stmt).and_then(|r| self.cover.node(&r)) else {
                     continue;
                 };
-                let covers = self.cover.covers(node).to_vec();
-                let mut flow_points = Vec::new();
-                let mut flows_everywhere = self.cover.is_universal(node);
-                for constraint in self.flows_into_universal(&covers) {
-                    match points_by_origin.get(&constraint.origin) {
-                        Some(points) => flow_points.extend(points.iter().copied()),
-                        None => flows_everywhere = true,
-                    }
-                }
-                loans.push(Loan {
-                    origin: stmt.origin,
-                    mint: Point { block, index },
-                    mutable: *mutable,
-                    place: self.resolve(place),
-                    universal: covers.iter().copied().find(|&n| self.cover.is_universal(n)),
-                    covers,
-                    flow_points,
-                    flows_everywhere,
-                });
+                loans.push(self.loan(
+                    node,
+                    &points_by_origin,
+                    Point { block, index },
+                    stmt.origin,
+                    self.resolve(place),
+                    Mint::Borrow { mutable: *mutable },
+                ));
             }
         }
         loans
+    }
+
+    /// The loan of region `node` minted at `mint`.
+    fn loan(
+        &self,
+        node: u32,
+        points_by_origin: &FxHashMap<ExprId, Vec<Point>>,
+        mint: Point,
+        origin: ExprId,
+        place: Place,
+        kind: Mint,
+    ) -> Loan {
+        let covers = self.cover.covers(node).to_vec();
+        let mut flow_points = Vec::new();
+        let mut flows_everywhere = self.is_universal(node);
+        for constraint in self.flows_into_universal(&covers) {
+            match points_by_origin.get(&constraint.origin) {
+                Some(points) => flow_points.extend(points.iter().copied()),
+                None => flows_everywhere = true,
+            }
+        }
+        Loan {
+            origin,
+            mint,
+            mutable: matches!(kind, Mint::Borrow { mutable: true }),
+            pin: matches!(kind, Mint::Pin),
+            place,
+            universal: covers.iter().copied().find(|&n| self.is_universal(n)),
+            covers,
+            flow_points,
+            flows_everywhere,
+        }
+    }
+
+    /// Whether a region graph node is live at every point of this body and
+    /// outlives it: one of the signature's universals, or, in a closure's
+    /// body, a region of a place it reaches (#175) — the enclosing frame's.
+    fn is_universal(&self, node: u32) -> bool {
+        self.cover.is_universal(node) || self.outer_universals.binary_search(&node).is_ok()
     }
 
     /// Whether a loan is live at a point: a live local's value mentions a
@@ -1077,6 +1344,9 @@ impl<'a> BodyCheck<'a> {
                     // operands still read.
                     ValueExpr::AddrOf { place, .. } => self.index_accesses(place, &mut out),
                     ValueExpr::AddrOfStatic { .. } => {}
+                    // Binding a closure touches nothing: its places are
+                    // pinned (a loan of its own) and accessed at each call.
+                    ValueExpr::Closure { .. } => {}
                 }
                 self.index_accesses(dest, &mut out);
                 // The temp a place is copied into is written as
@@ -1105,6 +1375,7 @@ impl<'a> BodyCheck<'a> {
                     for arg in args {
                         self.operand_access(arg, &mut out);
                     }
+                    self.closure_accesses(callee, args, &mut out);
                     out.push(Access {
                         kind: AccessKind::Write,
                         place: (*dest).into(),
@@ -1135,6 +1406,9 @@ impl<'a> BodyCheck<'a> {
 
     /// Whether `access` is foreign to `loan` and touches it.
     fn conflicts(&self, access: &Access, loan: &Loan) -> bool {
+        if loan.pin && !matches!(access.kind, AccessKind::StorageEnd(_)) {
+            return false;
+        }
         if access.place.local != loan.place.local
             || !paths_overlap(&access.place.projection, &loan.place.projection)
         {
@@ -1173,16 +1447,21 @@ impl<'a> BodyCheck<'a> {
         scope.intersect_with(&self.live_loans[cfg::block_index(point.block)][point.index]);
         for access in self.accesses_at(point) {
             on_access(&access, scope);
+            // A pin claims the storage, not a value in it: a write
+            // leaves it standing.
             if access.shallow {
                 for (index, loan) in self.loans.iter().enumerate() {
-                    if Self::kills(&access.place, loan) {
+                    if !loan.pin && Self::kills(&access.place, loan) {
                         scope.remove(index);
                     }
                 }
             }
         }
-        if let Some(index) = self.loans.iter().position(|loan| loan.mint == point) {
-            scope.insert(index);
+        // A closure pins each of its places at the one point it is bound.
+        for (index, loan) in self.loans.iter().enumerate() {
+            if loan.mint == point {
+                scope.insert(index);
+            }
         }
     }
 
@@ -1278,9 +1557,78 @@ impl<'a> BodyCheck<'a> {
                             ),
                             borrow: loan.origin,
                             still_used: self.still_used(point, loan),
+                            closure: loan.pin,
                         })
                     });
                 });
+            }
+        }
+        self.run_closures(out);
+    }
+
+    /// The two refusals only closures make (#175): a call handed two
+    /// closures that overlap, and, in a closure's body, a borrow of a
+    /// place it reaches still live where the call ends.
+    fn run_closures(&self, out: &mut Findings<LoanDiagnostic>) {
+        let mut overlapping: FxHashSet<ExprId> = FxHashSet::default();
+        let mut outliving: FxHashSet<ExprId> = FxHashSet::default();
+        let scope_in = if self.body.outer.is_empty() {
+            Vec::new()
+        } else {
+            self.compute_scope()
+        };
+        for (block, data) in self.body.blocks.iter() {
+            let point = Point {
+                block,
+                index: data.statements.len(),
+            };
+            match &data.terminator.kind {
+                TerminatorKind::Call { callee, args, .. } => {
+                    let Some((first, second, place)) = self.overlapping_closures(callee, args)
+                    else {
+                        continue;
+                    };
+                    let call = data.terminator.origin;
+                    out.report(point, &mut overlapping, call, || {
+                        Some(LoanDiagnostic::ClosuresOverlap {
+                            call,
+                            place: self.render_place(&place, false),
+                            first: self.closures.origin(first),
+                            second: self.closures.origin(second),
+                        })
+                    });
+                }
+                TerminatorKind::Return if !self.body.outer.is_empty() => {
+                    let mut scope = scope_in[cfg::block_index(block)].clone();
+                    for at in cfg::points_of(self.body, block) {
+                        if at == point {
+                            scope.intersect_with(
+                                &self.live_loans[cfg::block_index(block)][at.index],
+                            );
+                            break;
+                        }
+                        self.step(at, &mut scope, |_, _| {});
+                    }
+                    for index in scope.iter() {
+                        let loan = &self.loans[index];
+                        if loan.pin
+                            || !self
+                                .body
+                                .outer
+                                .iter()
+                                .any(|outer| outer.local == loan.place.local)
+                        {
+                            continue;
+                        }
+                        out.report(loan.mint, &mut outliving, loan.origin, || {
+                            Some(LoanDiagnostic::OutlivesCall {
+                                borrow: loan.origin,
+                                place: self.render_place(&loan.place, false),
+                            })
+                        });
+                    }
+                }
+                _ => {}
             }
         }
     }
@@ -1432,10 +1780,18 @@ impl<'a> BodyCheck<'a> {
             borrow: loan.origin,
             exit,
             scope,
-            region: loan
-                .universal
-                .map(|node| hir::outlives::universal_name(self.db, self.item, node)),
+            region: loan.universal.map(|node| {
+                if self.cover.is_universal(node) {
+                    format!(
+                        "`{}`",
+                        hir::outlives::universal_name(self.db, self.item, node)
+                    )
+                } else {
+                    "a place outside this closure".to_owned()
+                }
+            }),
             temporary: self.is_temporary(loan.place.local),
+            closure: loan.pin,
         }
     }
 
@@ -1459,7 +1815,23 @@ impl<'a> BodyCheck<'a> {
         let mut out = format!("`{}", data.name.clone().unwrap_or_default());
         let mut ty = Some(data.ty.clone());
         let shown = place.projection.len() - usize::from(inserted_reborrow);
-        for elem in &place.projection[..shown] {
+        // A closure's outer place is written by name; the deref through
+        // the borrow it is handed is the compiler's.
+        let hidden = usize::from(
+            self.body
+                .outer
+                .iter()
+                .any(|outer| outer.local == place.local)
+                && matches!(place.projection.first(), Some(ProjElem::Deref))
+                && shown > 0,
+        );
+        if hidden == 1 {
+            ty = ty.and_then(|ty| match ty {
+                Ty::Borrow { referent, .. } => Some((*referent).clone()),
+                _ => None,
+            });
+        }
+        for elem in &place.projection[hidden..shown] {
             match elem {
                 ProjElem::Field(index) => {
                     let record = ty.take().and_then(|ty| self.record_of(&ty));
@@ -1505,51 +1877,5 @@ impl<'a> BodyCheck<'a> {
             Ty::Named(named) => self.record_of(&hir::ty::type_underlying_for(self.db, named)?),
             _ => None,
         }
-    }
-}
-
-/// Every region a type mentions in a value position. A `fn` type's
-/// regions are its own binder's and bind nothing here.
-fn collect_regions(ty: &Ty, found: &mut impl FnMut(&Region)) {
-    fn one(region: &Region, found: &mut impl FnMut(&Region)) {
-        match region {
-            Region::Join(parts) => parts.iter().for_each(|part| one(part, found)),
-            _ => found(region),
-        }
-    }
-    fn args(args: &[GenericArg], found: &mut impl FnMut(&Region)) {
-        for arg in args {
-            match arg {
-                GenericArg::Ty(ty) => collect_regions(ty, found),
-                GenericArg::Region(region) => one(region, found),
-                _ => {}
-            }
-        }
-    }
-    match ty {
-        Ty::Borrow {
-            region, referent, ..
-        } => {
-            one(region, found);
-            collect_regions(referent, found);
-        }
-        Ty::RawPtr { pointee, .. } => collect_regions(pointee, found),
-        Ty::Record(record) => record
-            .fields
-            .iter()
-            .for_each(|(_, field)| collect_regions(field, found)),
-        Ty::Array { elem, .. } => collect_regions(elem, found),
-        Ty::Named(named) => args(&named.args, found),
-        Ty::Fn(_)
-        | Ty::Param(_)
-        | Ty::Infer(_)
-        | Ty::UnresolvedNumber
-        | Ty::Unit
-        | Ty::Never
-        | Ty::Int(_)
-        | Ty::Str
-        | Ty::Bool
-        | Ty::Char
-        | Ty::Error => {}
     }
 }
