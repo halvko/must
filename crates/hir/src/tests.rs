@@ -752,8 +752,8 @@ fn conflicting_group_commitments_need_annotations() {
     // Calling `x` commits it to fn(usize) -> usize, but x's own body (`y`)
     // makes it a number: the group's commitments contradict each other, so
     // the signatures are poisoned to `{error}` rather than silently
-    // publishing the guessed one — and neither use can tell which type the
-    // item has, so both ask for an annotation.
+    // publishing the guessed one — and each use names the two bodies that
+    // contradict each other.
     check_diagnostics(
         r#"
 static c = true;
@@ -761,9 +761,9 @@ static y = if c { 1 } else { x(2) };
 static x = y;
 "#,
         expect![[r#"
-            47..48: not enough information to infer the type of `x`; add a type annotation to its definition (defined here at 62..63)
+            47..48: `y`, `x` disagree on each other's types; add type annotations to their definitions (defined here at 62..63) (`y` is defined here at 25..26)
             47..48: cannot call a value in a const context; whether it is a `const fn` is not known from its type (this item's initializer is a const context at 18..24)
-            66..67: not enough information to infer the type of `y`; add a type annotation to its definition (defined here at 25..26)
+            66..67: `y`, `x` disagree on each other's types; add type annotations to their definitions (defined here at 25..26) (`x` is defined here at 62..63)
         "#]],
     );
 }
@@ -10977,28 +10977,37 @@ static main = fn () -> usize { g() };
     );
 }
 
-/// Two fully typed callers that disagree leave the hole undecided, in
-/// either order: neither wins by coming first (T11).
+/// Two fully typed callers that disagree on a hole are blamed equally,
+/// whatever their order: the callee is poisoned and each use names both.
 #[test]
-fn disagreeing_fully_typed_callers_leave_the_hole_undecided() {
-    check_signatures(
-        r#"
+fn fully_typed_callers_that_disagree_are_blamed_equally() {
+    let a_first = r#"
 static id = fn (x) { x };
 static a = fn () -> usize { id(1) };
 static b = fn () -> bool { id(true) };
-"#,
+"#;
+    check_signatures(
+        a_first,
         expect![[r#"
             id: {error}
             a: fn() -> usize
             b: fn() -> bool
         "#]],
     );
-    check_signatures(
-        r#"
+    check_diagnostics(
+        a_first,
+        expect![[r#"
+        55..57: callers disagree on the type of `id`: `a` makes it `fn(usize) -> usize`, `b` makes it `fn(bool) -> bool`; add a type annotation to its definition (defined here at 8..10) (`a` is defined here at 34..35) (`b` is defined here at 71..72)
+        91..93: callers disagree on the type of `id`: `a` makes it `fn(usize) -> usize`, `b` makes it `fn(bool) -> bool`; add a type annotation to its definition (defined here at 8..10) (`a` is defined here at 34..35) (`b` is defined here at 71..72)
+    "#]],
+    );
+    let b_first = r#"
 static id = fn (x) { x };
 static b = fn () -> bool { id(true) };
 static a = fn () -> usize { id(1) };
-"#,
+"#;
+    check_signatures(
+        b_first,
         expect![[r#"
             id: {error}
             b: fn() -> bool
@@ -11006,14 +11015,346 @@ static a = fn () -> usize { id(1) };
         "#]],
     );
     check_diagnostics(
-        r#"
+        b_first,
+        expect![[r#"
+        54..56: callers disagree on the type of `id`: `b` makes it `fn(bool) -> bool`, `a` makes it `fn(usize) -> usize`; add a type annotation to its definition (defined here at 8..10) (`b` is defined here at 34..35) (`a` is defined here at 73..74)
+        94..96: callers disagree on the type of `id`: `b` makes it `fn(bool) -> bool`, `a` makes it `fn(usize) -> usize`; add a type annotation to its definition (defined here at 8..10) (`b` is defined here at 34..35) (`a` is defined here at 73..74)
+    "#]],
+    );
+}
+
+/// Callers vote on a hole, once per body: the plurality decides it and
+/// the rest are outvoted at their use, naming the bodies that decided.
+#[test]
+fn majority_of_callers_decides_a_hole() {
+    let src = r#"
 static id = fn (x) { x };
 static a = fn () -> usize { id(1) };
+static b = fn () -> bool { if id(true) { id(false) } else { id(true) } };
+static c = fn () -> usize { id(2) };
+"#;
+    check_signatures(
+        src,
+        expect![[r#"
+        id: fn(usize) -> usize
+        a: fn() -> usize
+        b: fn() -> bool
+        c: fn() -> usize
+    "#]],
+    );
+    check_diagnostics(
+        src,
+        expect![[r#"
+        94..96: `id` is `fn(usize) -> usize` here, as `a` and `c` make it, but this use makes it `fn(bool) -> bool` (`a` is defined here at 34..35) (`c` is defined here at 145..146)
+        105..107: `id` is `fn(usize) -> usize` here, as `a` and `c` make it, but this use makes it `fn(bool) -> bool` (`a` is defined here at 34..35) (`c` is defined here at 145..146)
+        124..126: `id` is `fn(usize) -> usize` here, as `a` and `c` make it, but this use makes it `fn(bool) -> bool` (`a` is defined here at 34..35) (`c` is defined here at 145..146)
+    "#]],
+    );
+}
+
+/// A caller that leaves a literal unpinned abstains from the vote, and
+/// loses to a caller that pins it to something other than a number.
+#[test]
+fn unpinned_number_abstains_and_loses_to_a_bool() {
+    let src = r#"
+static id = fn (x) { x };
+static a = fn () -> () { id(1); };
 static b = fn () -> bool { id(true) };
+"#;
+    check_diagnostics(
+        src,
+        expect![[r#"
+            52..54: `id` is `fn(bool) -> bool` here, as `b` makes it, but this use makes it `fn({number}) -> {number}` (`b` is defined here at 69..70)
+        "#]],
+    );
+}
+
+/// Callers that agree on one hole and vote on another: the caller the
+/// winners contradict is outvoted, the callee stays decided.
+#[test]
+fn caller_contradicting_the_others_on_one_parameter_is_outvoted() {
+    let src = r#"
+static pair = fn (x, y) { x };
+static a = fn () -> usize { pair(1, true) };
+static b = fn () -> usize { pair(2, 3) };
+static c = fn () -> usize { pair(4, false) };
+"#;
+    check_signatures(
+        src,
+        expect![[r#"
+            pair: fn(usize, bool) -> usize
+            a: fn() -> usize
+            b: fn() -> usize
+            c: fn() -> usize
+        "#]],
+    );
+    check_diagnostics(
+        src,
+        expect![[r#"
+            105..109: `pair` is `fn(usize, bool) -> usize` here, as `a` and `c` make it, but this use makes it `fn(usize, {number}) -> usize` (`a` is defined here at 39..40) (`c` is defined here at 126..127)
+        "#]],
+    );
+}
+
+/// Callers of two members that share a variable disagree through it.
+#[test]
+fn fully_typed_callers_disagreeing_through_a_shared_variable() {
+    let src = r#"
+static g = fn (x) { h(x) };
+static h = fn (y) { y };
+static a = fn () -> usize { g(1) };
+static b = fn () -> bool { h(true) };
+"#;
+    check_signatures(
+        src,
+        expect![[r#"
+        g: {error}
+        h: {error}
+        a: fn() -> usize
+        b: fn() -> bool
+    "#]],
+    );
+    check_diagnostics(
+        src,
+        expect![[r#"
+            21..22: callers `a`, `b` disagree on the types of `g`, `h`, which are linked; add type annotations to their definitions (defined here at 36..37) (`g` is defined here at 8..9) (`a` is defined here at 61..62) (`b` is defined here at 97..98)
+            82..83: callers `a`, `b` disagree on the types of `g`, `h`, which are linked; add type annotations to their definitions (defined here at 8..9) (`h` is defined here at 36..37) (`a` is defined here at 61..62) (`b` is defined here at 97..98)
+            117..118: callers `a`, `b` disagree on the types of `g`, `h`, which are linked; add type annotations to their definitions (defined here at 36..37) (`g` is defined here at 8..9) (`a` is defined here at 61..62) (`b` is defined here at 97..98)
+        "#]],
+    );
+}
+
+/// A caller that links two members ties their callers together: all of
+/// them are blamed, whatever order the items come in.
+#[test]
+fn callers_disagreeing_through_a_linking_caller_are_blamed_in_any_order() {
+    let f_first = r#"
+static f = fn (x) { };
+static g = fn (y) { y };
+static h = fn () { h() };
+static a = fn (n: usize) -> () { f(n) };
+static b = fn () -> bool { g(true) };
+static c = fn () -> () { f(g(h())) };
+"#;
+    check_signatures(
+        f_first,
+        expect![[r#"
+            f: {error}
+            g: {error}
+            h: {error}
+            a: fn(usize)
+            b: fn() -> bool
+            c: fn()
+        "#]],
+    );
+    check_diagnostics(
+        f_first,
+        expect![[r#"
+            68..69: callers `a`, `b`, `c` disagree on the types of `f`, `g`, `h`, which are linked; add type annotations to their definitions (defined here at 56..57) (`f` is defined here at 8..9) (`g` is defined here at 31..32) (`a` is defined here at 82..83) (`b` is defined here at 123..124) (`c` is defined here at 161..162)
+            108..109: callers `a`, `b`, `c` disagree on the types of `f`, `g`, `h`, which are linked; add type annotations to their definitions (defined here at 8..9) (`g` is defined here at 31..32) (`h` is defined here at 56..57) (`a` is defined here at 82..83) (`b` is defined here at 123..124) (`c` is defined here at 161..162)
+            143..144: callers `a`, `b`, `c` disagree on the types of `f`, `g`, `h`, which are linked; add type annotations to their definitions (defined here at 31..32) (`f` is defined here at 8..9) (`h` is defined here at 56..57) (`a` is defined here at 82..83) (`b` is defined here at 123..124) (`c` is defined here at 161..162)
+            179..180: callers `a`, `b`, `c` disagree on the types of `f`, `g`, `h`, which are linked; add type annotations to their definitions (defined here at 8..9) (`g` is defined here at 31..32) (`h` is defined here at 56..57) (`a` is defined here at 82..83) (`b` is defined here at 123..124) (`c` is defined here at 161..162)
+            181..182: callers `a`, `b`, `c` disagree on the types of `f`, `g`, `h`, which are linked; add type annotations to their definitions (defined here at 31..32) (`f` is defined here at 8..9) (`h` is defined here at 56..57) (`a` is defined here at 82..83) (`b` is defined here at 123..124) (`c` is defined here at 161..162)
+            183..184: callers `a`, `b`, `c` disagree on the types of `f`, `g`, `h`, which are linked; add type annotations to their definitions (defined here at 56..57) (`f` is defined here at 8..9) (`g` is defined here at 31..32) (`a` is defined here at 82..83) (`b` is defined here at 123..124) (`c` is defined here at 161..162)
+        "#]],
+    );
+    let g_first = r#"
+static g = fn (y) { y };
+static f = fn (x) { };
+static h = fn () { h() };
+static a = fn (n: usize) -> () { f(n) };
+static b = fn () -> bool { g(true) };
+static c = fn () -> () { f(g(h())) };
+"#;
+    check_signatures(
+        g_first,
+        expect![[r#"
+            g: {error}
+            f: {error}
+            h: {error}
+            a: fn(usize)
+            b: fn() -> bool
+            c: fn()
+        "#]],
+    );
+    check_diagnostics(
+        g_first,
+        expect![[r#"
+            68..69: callers `a`, `b`, `c` disagree on the types of `g`, `f`, `h`, which are linked; add type annotations to their definitions (defined here at 56..57) (`g` is defined here at 8..9) (`f` is defined here at 33..34) (`a` is defined here at 82..83) (`b` is defined here at 123..124) (`c` is defined here at 161..162)
+            108..109: callers `a`, `b`, `c` disagree on the types of `g`, `f`, `h`, which are linked; add type annotations to their definitions (defined here at 33..34) (`g` is defined here at 8..9) (`h` is defined here at 56..57) (`a` is defined here at 82..83) (`b` is defined here at 123..124) (`c` is defined here at 161..162)
+            143..144: callers `a`, `b`, `c` disagree on the types of `g`, `f`, `h`, which are linked; add type annotations to their definitions (defined here at 8..9) (`f` is defined here at 33..34) (`h` is defined here at 56..57) (`a` is defined here at 82..83) (`b` is defined here at 123..124) (`c` is defined here at 161..162)
+            179..180: callers `a`, `b`, `c` disagree on the types of `g`, `f`, `h`, which are linked; add type annotations to their definitions (defined here at 33..34) (`g` is defined here at 8..9) (`h` is defined here at 56..57) (`a` is defined here at 82..83) (`b` is defined here at 123..124) (`c` is defined here at 161..162)
+            181..182: callers `a`, `b`, `c` disagree on the types of `g`, `f`, `h`, which are linked; add type annotations to their definitions (defined here at 8..9) (`f` is defined here at 33..34) (`h` is defined here at 56..57) (`a` is defined here at 82..83) (`b` is defined here at 123..124) (`c` is defined here at 161..162)
+            183..184: callers `a`, `b`, `c` disagree on the types of `g`, `f`, `h`, which are linked; add type annotations to their definitions (defined here at 56..57) (`g` is defined here at 8..9) (`f` is defined here at 33..34) (`a` is defined here at 82..83) (`b` is defined here at 123..124) (`c` is defined here at 161..162)
+        "#]],
+    );
+}
+
+/// Each linked member's own fills agree; the callers conflict only through
+/// the link, so every use names the whole set.
+#[test]
+fn callers_agreeing_on_every_member_but_conflicting_through_a_link() {
+    let src = r#"
+static f = fn (x, t) { };
+static g = fn (y, t) { y };
+static h = fn (t) { h(t) };
+static a = fn (n: usize) -> () { f(n, true); g(h(true), true); };
+static b = fn () -> () { f(h(true), true); g(true, true); };
+static c = fn () -> () { f(g(h(true), true), true); };
+"#;
+    check_diagnostics(
+        src,
+        expect![[r#"
+            75..76: callers `a`, `b`, `c` disagree on the types of `f`, `g`, `h`, which are linked; add type annotations to their definitions (defined here at 62..63) (`f` is defined here at 8..9) (`g` is defined here at 34..35) (`a` is defined here at 90..91) (`b` is defined here at 156..157) (`c` is defined here at 217..218)
+            116..117: callers `a`, `b`, `c` disagree on the types of `f`, `g`, `h`, which are linked; add type annotations to their definitions (defined here at 8..9) (`g` is defined here at 34..35) (`h` is defined here at 62..63) (`a` is defined here at 90..91) (`b` is defined here at 156..157) (`c` is defined here at 217..218)
+            128..129: callers `a`, `b`, `c` disagree on the types of `f`, `g`, `h`, which are linked; add type annotations to their definitions (defined here at 34..35) (`f` is defined here at 8..9) (`h` is defined here at 62..63) (`a` is defined here at 90..91) (`b` is defined here at 156..157) (`c` is defined here at 217..218)
+            130..131: callers `a`, `b`, `c` disagree on the types of `f`, `g`, `h`, which are linked; add type annotations to their definitions (defined here at 62..63) (`f` is defined here at 8..9) (`g` is defined here at 34..35) (`a` is defined here at 90..91) (`b` is defined here at 156..157) (`c` is defined here at 217..218)
+            174..175: callers `a`, `b`, `c` disagree on the types of `f`, `g`, `h`, which are linked; add type annotations to their definitions (defined here at 8..9) (`g` is defined here at 34..35) (`h` is defined here at 62..63) (`a` is defined here at 90..91) (`b` is defined here at 156..157) (`c` is defined here at 217..218)
+            176..177: callers `a`, `b`, `c` disagree on the types of `f`, `g`, `h`, which are linked; add type annotations to their definitions (defined here at 62..63) (`f` is defined here at 8..9) (`g` is defined here at 34..35) (`a` is defined here at 90..91) (`b` is defined here at 156..157) (`c` is defined here at 217..218)
+            192..193: callers `a`, `b`, `c` disagree on the types of `f`, `g`, `h`, which are linked; add type annotations to their definitions (defined here at 34..35) (`f` is defined here at 8..9) (`h` is defined here at 62..63) (`a` is defined here at 90..91) (`b` is defined here at 156..157) (`c` is defined here at 217..218)
+            235..236: callers `a`, `b`, `c` disagree on the types of `f`, `g`, `h`, which are linked; add type annotations to their definitions (defined here at 8..9) (`g` is defined here at 34..35) (`h` is defined here at 62..63) (`a` is defined here at 90..91) (`b` is defined here at 156..157) (`c` is defined here at 217..218)
+            237..238: callers `a`, `b`, `c` disagree on the types of `f`, `g`, `h`, which are linked; add type annotations to their definitions (defined here at 34..35) (`f` is defined here at 8..9) (`h` is defined here at 62..63) (`a` is defined here at 90..91) (`b` is defined here at 156..157) (`c` is defined here at 217..218)
+            239..240: callers `a`, `b`, `c` disagree on the types of `f`, `g`, `h`, which are linked; add type annotations to their definitions (defined here at 62..63) (`f` is defined here at 8..9) (`g` is defined here at 34..35) (`a` is defined here at 90..91) (`b` is defined here at 156..157) (`c` is defined here at 217..218)
+        "#]],
+    );
+}
+
+/// Only the member whose own uses conflict names them with their types. A
+/// member it links stays out of the conflict, and needs an annotation only
+/// for what the disagreeing uses would have determined.
+#[test]
+fn linked_member_of_a_disagreeing_member_stays_out_of_the_conflict() {
+    let src = r#"
+static g = fn (w) { };
+static f = fn (x, z) { g(z); x };
+static a = fn () -> () { let _: usize = f(1, true); };
+static b = fn () -> () { let _: bool = f(true, true); };
+"#;
+    check_diagnostics(
+        src,
+        expect![[r#"
+            98..99: callers disagree on the type of `f`: `a` makes it `fn(usize, bool) -> usize`, `b` makes it `fn(bool, bool) -> bool`; add a type annotation to its definition (defined here at 31..32) (`a` is defined here at 65..66) (`b` is defined here at 120..121)
+            152..153: callers disagree on the type of `f`: `a` makes it `fn(usize, bool) -> usize`, `b` makes it `fn(bool, bool) -> bool`; add a type annotation to its definition (defined here at 31..32) (`a` is defined here at 65..66) (`b` is defined here at 120..121)
+        "#]],
+    );
+}
+
+/// A caller that contradicts what a member's own body decided fills
+/// nothing and reports the mismatch itself.
+#[test]
+fn fully_typed_caller_contradicting_a_decided_part_is_not_a_disagreement() {
+    let src = r#"
+static f = fn (x, y) { let n: usize = x; y };
+static a = fn () -> usize { f(true, 1) };
+static b = fn () -> usize { f(1, 2) };
+"#;
+    check_signatures(
+        src,
+        expect![[r#"
+        f: fn(usize, usize) -> usize
+        a: fn() -> usize
+        b: fn() -> usize
+    "#]],
+    );
+    check_diagnostics(
+        src,
+        expect![[r#"
+        77..81: type mismatch: expected `usize`, found `bool`
+    "#]],
+    );
+}
+
+/// A caller that leaves a literal unpinned agrees with one that pins it.
+#[test]
+fn fully_typed_callers_with_a_number_and_a_usize_agree() {
+    let src = r#"
+static id = fn (x) { x };
+static a = fn () -> () { id(1); };
+static b = fn () -> usize { id(2) };
+"#;
+    check_signatures(
+        src,
+        expect![[r#"
+        id: fn(usize) -> usize
+        a: fn()
+        b: fn() -> usize
+    "#]],
+    );
+    check_diagnostics(src, expect![[r#""#]]);
+}
+
+/// Callers that both leave a literal unpinned agree; the hole stays open,
+/// so `id` is undetermined, not disputed.
+#[test]
+fn fully_typed_callers_that_leave_numbers_unpinned_agree() {
+    let src = r#"
+static id = fn (x) { x };
+static a = fn () -> () { id(1); };
+static b = fn () -> () { id(2); };
+"#;
+    check_signatures(
+        src,
+        expect![[r#"
+        id: fn({error}) -> {error}
+        a: fn()
+        b: fn()
+    "#]],
+    );
+    check_diagnostics(
+        src,
+        expect![[r#"
+        52..54: not enough information to infer the type of `id`; add a type annotation to its definition (defined here at 8..10)
+        87..89: not enough information to infer the type of `id`; add a type annotation to its definition (defined here at 8..10)
+    "#]],
+    );
+}
+
+/// Fully typed callers that agree each fill their part of the hole.
+#[test]
+fn fully_typed_callers_that_agree_fill_together() {
+    let src = r#"
+static pair = fn (x, y) { x };
+static a = fn () -> usize { pair(1, true) };
+static b = fn () -> usize { pair(2, false) };
+"#;
+    check_signatures(
+        src,
+        expect![[r#"
+        pair: fn(usize, bool) -> usize
+        a: fn() -> usize
+        b: fn() -> usize
+    "#]],
+    );
+    check_diagnostics(src, expect![[r#""#]]);
+}
+
+/// Callers that are members themselves are named the same way.
+#[test]
+fn member_callers_that_disagree_are_named() {
+    check_diagnostics(
+        r#"
+static id = fn (x) { x };
+static a = fn () { let n: usize = id(1); n };
+static b = fn () { let t: bool = id(true); t };
 "#,
         expect![[r#"
-            55..57: not enough information to infer the type of `id`; add a type annotation to its definition (defined here at 8..10)
-            91..93: not enough information to infer the type of `id`; add a type annotation to its definition (defined here at 8..10)
+            61..63: callers disagree on the type of `id`: `a` makes it `fn(usize) -> usize`, `b` makes it `fn(bool) -> bool`; add a type annotation to its definition (defined here at 8..10) (`a` is defined here at 34..35) (`b` is defined here at 80..81)
+            106..108: callers disagree on the type of `id`: `a` makes it `fn(usize) -> usize`, `b` makes it `fn(bool) -> bool`; add a type annotation to its definition (defined here at 8..10) (`a` is defined here at 34..35) (`b` is defined here at 80..81)
+        "#]],
+    );
+}
+
+/// In a cycle, a caller that contradicts the callee's own body loses to
+/// it, as a caller outside the cycle would.
+#[test]
+fn caller_contradicting_its_callees_body_in_a_cycle_loses_to_it() {
+    check_diagnostics(
+        r#"
+static f = fn (x) { let n: usize = x; if true { n } else { g() } };
+static g = fn () { f(true) };
+"#,
+        expect![[r#"
+            88..89: `f` is `fn(usize) -> usize` here, as its own body makes it, but this use makes it `fn(bool) -> _` (`f` is defined here at 8..9)
         "#]],
     );
     check_diagnostics(
@@ -11023,8 +11364,8 @@ static b = fn () -> bool { id(true) };
 static a = fn () -> usize { id(1) };
 "#,
         expect![[r#"
-            54..56: not enough information to infer the type of `id`; add a type annotation to its definition (defined here at 8..10)
-            94..96: not enough information to infer the type of `id`; add a type annotation to its definition (defined here at 8..10)
+            54..56: callers disagree on the type of `id`: `b` makes it `fn(bool) -> bool`, `a` makes it `fn(usize) -> usize`; add a type annotation to its definition (defined here at 8..10) (`b` is defined here at 34..35) (`a` is defined here at 73..74)
+            94..96: callers disagree on the type of `id`: `b` makes it `fn(bool) -> bool`, `a` makes it `fn(usize) -> usize`; add a type annotation to its definition (defined here at 8..10) (`b` is defined here at 34..35) (`a` is defined here at 73..74)
         "#]],
     );
 }
@@ -11080,18 +11421,19 @@ static d = fn () -> usize { m(3) };
     check_diagnostics(
         text,
         expect![[r#"
-        108..110: not enough information to infer the type of `id`; add a type annotation to its definition (defined here at 8..10)
-        115..116: not enough information to infer the type of `k`; add a type annotation to its definition (defined here at 34..35)
-        160..162: not enough information to infer the type of `id`; add a type annotation to its definition (defined here at 8..10)
-        196..197: not enough information to infer the type of `k`; add a type annotation to its definition (defined here at 34..35)
-    "#]],
+            108..110: callers `a`, `c` disagree on the types of `id`, `k`, which are linked; add type annotations to their definitions (defined here at 8..10) (`k` is defined here at 34..35) (`a` is defined here at 139..140) (`c` is defined here at 176..177)
+            115..116: callers `a`, `c` disagree on the types of `id`, `k`, which are linked; add type annotations to their definitions (defined here at 34..35) (`id` is defined here at 8..10) (`a` is defined here at 139..140) (`c` is defined here at 176..177)
+            160..162: callers `a`, `c` disagree on the types of `id`, `k`, which are linked; add type annotations to their definitions (defined here at 8..10) (`k` is defined here at 34..35) (`a` is defined here at 139..140) (`c` is defined here at 176..177)
+            196..197: callers `a`, `c` disagree on the types of `id`, `k`, which are linked; add type annotations to their definitions (defined here at 34..35) (`id` is defined here at 8..10) (`a` is defined here at 139..140) (`c` is defined here at 176..177)
+        "#]],
     );
 }
 
-/// Two conflicts in one unit leave every member of it undecided, bystanders
-/// included: no single member's removal lets the rest agree (#172).
+/// Two ties in one unit leave only their own members undecided: the
+/// bystander linked through a variable everyone agrees on stays decided
+/// (#172).
 #[test]
-fn two_conflicts_in_one_unit_leave_all_of_it_undecided() {
+fn two_ties_in_one_unit_leave_the_bystander_decided() {
     let text = r#"
 static id = fn (x) { x };
 static k = fn (y, w, u) { w; u; y };
@@ -11108,18 +11450,18 @@ static f = fn () -> usize { o(5) };
     check_signatures(
         text,
         expect![[r#"
-        id: {error}
-        k: {error}
-        m: {error}
-        n: {error}
-        o: {error}
-        tie: fn({error}, {error}, {error}) -> {error}
-        a: fn() -> usize
-        c: fn() -> bool
-        d: fn() -> usize
-        e: fn() -> bool
-        f: fn() -> usize
-    "#]],
+            id: {error}
+            k: {error}
+            m: {error}
+            n: {error}
+            o: fn(usize) -> usize
+            tie: fn({error}, {error}, usize) -> usize
+            a: fn() -> usize
+            c: fn() -> bool
+            d: fn() -> usize
+            e: fn() -> bool
+            f: fn() -> usize
+        "#]],
     );
 }
 
@@ -11195,10 +11537,10 @@ static c = fn () -> bool { id(true) };
     check_diagnostics(
         text,
         expect![[r#"
-        84..86: not enough information to infer the type of `id`; add a type annotation to its definition (defined here at 8..10)
-        157..159: not enough information to infer the type of `id`; add a type annotation to its definition (defined here at 8..10)
-        193..195: not enough information to infer the type of `id`; add a type annotation to its definition (defined here at 8..10)
-    "#]],
+            84..86: callers disagree on the type of `id`: `b` makes it `fn(usize) -> usize`, `c` makes it `fn(bool) -> bool`; add a type annotation to its definition (defined here at 8..10) (`b` is defined here at 136..137) (`c` is defined here at 173..174)
+            157..159: callers disagree on the type of `id`: `b` makes it `fn(usize) -> usize`, `c` makes it `fn(bool) -> bool`; add a type annotation to its definition (defined here at 8..10) (`b` is defined here at 136..137) (`c` is defined here at 173..174)
+            193..195: callers disagree on the type of `id`: `b` makes it `fn(usize) -> usize`, `c` makes it `fn(bool) -> bool`; add a type annotation to its definition (defined here at 8..10) (`b` is defined here at 136..137) (`c` is defined here at 173..174)
+        "#]],
     );
 }
 

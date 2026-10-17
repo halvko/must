@@ -2203,6 +2203,22 @@ pub fn signature<'db>(db: &'db dyn Db, item: ItemId<'db>) -> Ty {
     .unwrap_or(Ty::Error)
 }
 
+/// What the uses that left `item`'s type `{error}` disagree on, if they
+/// do.
+pub fn disagreement<'db>(
+    db: &'db dyn Db,
+    item: ItemId<'db>,
+) -> Option<crate::groups::Disagreement> {
+    let (group, position) = crate::groups::body_group(db, item)?;
+    crate::groups::infer_group(
+        db,
+        crate::groups::GroupId::new(db, crate::library::library_of(db, item.file(db)), group),
+    )
+    .disagreements
+    .get(position as usize)?
+    .clone()
+}
+
 /// Whether uses of `item` should say "add a type annotation": inference
 /// couldn't determine its type from the definition (group inference erases
 /// undetermined leftovers to `{error}`). A hole-bearing annotation counts
