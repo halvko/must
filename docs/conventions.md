@@ -18,9 +18,10 @@ here; they live in `docs/design/`.
 - A comment carries no time. It describes the code as it is, not as a
   change ("no longer", "not any more", "now", "still": the commit message's
   job), and it does not say how long that will hold ("for now", "yet",
-  "interim", "permanent", "until", "today"). Something meant to change is
-  a `TODO:` that names its issue (`halvko/must#16`); everything else reads
-  as standing.
+  "interim", "permanent", "until", "today"). Something meant to change,
+  such as a known limitation in code or a test that pins it, is a
+  `// TODO: halvko/must#N: <what is wrong>` naming the issue that tracks
+  it; everything else reads as standing.
 - A comment describes the item it sits on. It does not compare the item to
   a sibling ("the twin of", "narrower than"): a comparison is a claim about
   both items and stops being true when either one changes.
