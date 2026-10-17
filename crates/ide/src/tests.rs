@@ -210,9 +210,13 @@ fn hover_shows_the_unsafe_marker_on_a_fn_type() {
     // The one-token difference is the whole of what a reader needs to know
     // about a value here, so hover shows it exactly where it is written.
     check_hover(
-        "unsafe extern static read: unsafe fn(u8.&raw mut, usize) -> isize;\n\
-         static main = fn { let g$0 = read; };",
-        "```must\ng: unsafe fn(u8.&raw mut, usize) -> isize\n```",
+        r#"
+unsafe extern static read: unsafe fn(u8.&raw, usize) -> isize;
+static main = fn { let g$0 = read; };
+"#,
+        r#"```must
+g: unsafe fn(u8.&raw, usize) -> isize
+```"#,
     );
 }
 
@@ -221,8 +225,10 @@ fn hover_on_an_extern_declaration_shows_its_type() {
     // The declaration has no value expression at all, so hover must answer
     // from the DECLARATION — which is the whole contract anyway.
     check_hover(
-        "unsafe extern static read$0: unsafe fn(u8.&raw mut, usize) -> isize;",
-        "```must\nread: unsafe fn(u8.&raw mut, usize) -> isize\n```",
+        "unsafe extern static read$0: unsafe fn(u8.&raw, usize) -> isize;",
+        r#"```must
+read: unsafe fn(u8.&raw, usize) -> isize
+```"#,
     );
 }
 
@@ -505,7 +511,7 @@ fn highlights_mutable_param_declaration_and_uses() {
 #[test]
 fn highlights_a_fn_types_parameters_as_types() {
     check_highlights(
-        "unsafe extern static read: unsafe fn(u8.&raw mut, usize) -> isize;",
+        "unsafe extern static read: unsafe fn(u8.&raw, usize) -> isize;",
         expect_test::expect![[r#"
             0..6 "unsafe" Keyword
             7..13 "extern" Keyword
@@ -516,10 +522,9 @@ fn highlights_a_fn_types_parameters_as_types() {
             37..39 "u8" Type.defaultLibrary
             40..41 "&" Operator
             41..44 "raw" Keyword
-            45..48 "mut" Keyword
-            50..55 "usize" Type.defaultLibrary
-            57..59 "->" Operator
-            60..65 "isize" Type.defaultLibrary
+            46..51 "usize" Type.defaultLibrary
+            53..55 "->" Operator
+            56..61 "isize" Type.defaultLibrary
         "#]],
     );
 }
@@ -1817,28 +1822,28 @@ static main = fn {
 "#,
         expect_test::expect![[r#"
             panic Function (fn(str) -> !)
+            str_from_utf8_unchecked Function (unsafe fn(u8.&raw, usize) -> str)
             x Variable (usize)
             Shape Struct (struct { r: usize })
             area Function (fn(usize) -> usize)
             main Function (fn())
             AllocResult::Err EnumMember (Err)
-            AllocResult::Ok EnumMember (Ok(T.&raw mut))
+            AllocResult::Ok EnumMember (Ok(T.&raw))
             NextChar::Char EnumMember (Char(char, usize))
             NextChar::End EnumMember (End)
             ReadLineResult::End EnumMember (End)
             ReadLineResult::Line EnumMember (Line(str))
             Utf8Result::Err EnumMember (Err)
             Utf8Result::Ok EnumMember (Ok(str))
-            add Function (unsafe fn(T.&raw [mut], usize) -> T.&raw [mut])
+            add Function (unsafe fn::<T>(T.&raw, usize) -> T.&raw)
             alloc_array Function (fn::<T>(usize) -> AllocResult::<T>)
-            copy Function (unsafe fn(T.&raw [mut], T.&raw mut, usize))
-            dangling Function (fn::<T>() -> T.&raw mut)
-            dealloc_array Function (unsafe fn::<T>(T.&raw mut, usize))
-            offset Function (unsafe fn(T.&raw [mut], isize) -> T.&raw [mut])
+            copy Function (unsafe fn::<T>(T.&raw, T.&raw, usize))
+            dangling Function (fn::<T>() -> T.&raw)
+            dealloc_array Function (unsafe fn::<T>(T.&raw, usize))
+            offset Function (unsafe fn::<T>(T.&raw, isize) -> T.&raw)
             print Function (fn(str))
             read_line Function (fn() -> ReadLineResult)
-            str_from_utf8 Function (unsafe fn(u8.&raw [mut], usize) -> Utf8Result)
-            str_from_utf8_unchecked Function (unsafe fn(u8.&raw [mut], usize) -> str)
+            str_from_utf8 Function (unsafe fn(u8.&raw, usize) -> Utf8Result)
             const Keyword
             false Keyword
             fn Keyword
@@ -1882,7 +1887,7 @@ type Point = struct { x: usize, y: usize };
 static make_point = fn (x: usize) -> $0 { x };
 "#,
         expect_test::expect![[r#"
-            AllocResult Enum (enum { Ok(T.&raw mut), Err })
+            AllocResult Enum (enum { Ok(T.&raw), Err })
             NextChar Enum (enum { Char(char, usize), End })
             Point Struct (struct { x: usize, y: usize })
             ReadLineResult Enum (enum { Line(str), End })
@@ -1914,7 +1919,7 @@ type Point = struct { x: usize, y: usize };
 static make_point = fn (x: $0) { x };
 "#,
         expect_test::expect![[r#"
-            AllocResult Enum (enum { Ok(T.&raw mut), Err })
+            AllocResult Enum (enum { Ok(T.&raw), Err })
             NextChar Enum (enum { Char(char, usize), End })
             Point Struct (struct { x: usize, y: usize })
             ReadLineResult Enum (enum { Line(str), End })
@@ -2715,8 +2720,8 @@ static main = fn (s: str, n: usize) {
         expect_test::expect![[r#"
             s Variable (str)
             panic Function (fn(str) -> !)
+            str_from_utf8_unchecked Function (unsafe fn(u8.&raw, usize) -> str)
             n Variable (usize)
-            main Function (fn(str, usize))
         "#]],
     );
 }
@@ -2738,8 +2743,8 @@ static main = fn {
         expect_test::expect![[r#"
             get_s Function (fn() -> str)
             panic Function (fn(str) -> !)
+            str_from_utf8_unchecked Function (unsafe fn(u8.&raw, usize) -> str)
             get_n Function (fn() -> usize)
-            main Function (fn())
         "#]],
     );
 }
@@ -2906,24 +2911,24 @@ static main = fn {
             s Variable (str)
             main Function (fn())
             AllocResult::Err EnumMember (Err)
-            AllocResult::Ok EnumMember (Ok(T.&raw mut))
+            AllocResult::Ok EnumMember (Ok(T.&raw))
             NextChar::Char EnumMember (Char(char, usize))
             NextChar::End EnumMember (End)
             ReadLineResult::End EnumMember (End)
             ReadLineResult::Line EnumMember (Line(str))
             Utf8Result::Err EnumMember (Err)
             Utf8Result::Ok EnumMember (Ok(str))
-            add Function (unsafe fn(T.&raw [mut], usize) -> T.&raw [mut])
+            add Function (unsafe fn::<T>(T.&raw, usize) -> T.&raw)
             alloc_array Function (fn::<T>(usize) -> AllocResult::<T>)
-            copy Function (unsafe fn(T.&raw [mut], T.&raw mut, usize))
-            dangling Function (fn::<T>() -> T.&raw mut)
-            dealloc_array Function (unsafe fn::<T>(T.&raw mut, usize))
-            offset Function (unsafe fn(T.&raw [mut], isize) -> T.&raw [mut])
+            copy Function (unsafe fn::<T>(T.&raw, T.&raw, usize))
+            dangling Function (fn::<T>() -> T.&raw)
+            dealloc_array Function (unsafe fn::<T>(T.&raw, usize))
+            offset Function (unsafe fn::<T>(T.&raw, isize) -> T.&raw)
             panic Function (fn(str) -> !)
             print Function (fn(str))
             read_line Function (fn() -> ReadLineResult)
-            str_from_utf8 Function (unsafe fn(u8.&raw [mut], usize) -> Utf8Result)
-            str_from_utf8_unchecked Function (unsafe fn(u8.&raw [mut], usize) -> str)
+            str_from_utf8 Function (unsafe fn(u8.&raw, usize) -> Utf8Result)
+            str_from_utf8_unchecked Function (unsafe fn(u8.&raw, usize) -> str)
             const Keyword
             false Keyword
             fn Keyword
@@ -3707,7 +3712,7 @@ static f = fn (s: Shape) {
             s Variable (Shape)
             f Function (fn(Shape) -> !)
             AllocResult::Err EnumMember (Err)
-            AllocResult::Ok EnumMember (Ok(T.&raw mut))
+            AllocResult::Ok EnumMember (Ok(T.&raw))
             NextChar::Char EnumMember (Char(char, usize))
             NextChar::End EnumMember (End)
             ReadLineResult::End EnumMember (End)
@@ -3716,17 +3721,17 @@ static f = fn (s: Shape) {
             Shape::Point EnumMember (Point)
             Utf8Result::Err EnumMember (Err)
             Utf8Result::Ok EnumMember (Ok(str))
-            add Function (unsafe fn(T.&raw [mut], usize) -> T.&raw [mut])
+            add Function (unsafe fn::<T>(T.&raw, usize) -> T.&raw)
             alloc_array Function (fn::<T>(usize) -> AllocResult::<T>)
-            copy Function (unsafe fn(T.&raw [mut], T.&raw mut, usize))
-            dangling Function (fn::<T>() -> T.&raw mut)
-            dealloc_array Function (unsafe fn::<T>(T.&raw mut, usize))
-            offset Function (unsafe fn(T.&raw [mut], isize) -> T.&raw [mut])
+            copy Function (unsafe fn::<T>(T.&raw, T.&raw, usize))
+            dangling Function (fn::<T>() -> T.&raw)
+            dealloc_array Function (unsafe fn::<T>(T.&raw, usize))
+            offset Function (unsafe fn::<T>(T.&raw, isize) -> T.&raw)
             panic Function (fn(str) -> !)
             print Function (fn(str))
             read_line Function (fn() -> ReadLineResult)
-            str_from_utf8 Function (unsafe fn(u8.&raw [mut], usize) -> Utf8Result)
-            str_from_utf8_unchecked Function (unsafe fn(u8.&raw [mut], usize) -> str)
+            str_from_utf8 Function (unsafe fn(u8.&raw, usize) -> Utf8Result)
+            str_from_utf8_unchecked Function (unsafe fn(u8.&raw, usize) -> str)
             const Keyword
             false Keyword
             fn Keyword
@@ -4114,7 +4119,7 @@ fn completions_match_scrutinee_does_not_suppress_the_normal_set() {
             noise Variable (str)
             f Function (fn(Shape) -> !)
             AllocResult::Err EnumMember (Err)
-            AllocResult::Ok EnumMember (Ok(T.&raw mut))
+            AllocResult::Ok EnumMember (Ok(T.&raw))
             NextChar::Char EnumMember (Char(char, usize))
             NextChar::End EnumMember (End)
             ReadLineResult::End EnumMember (End)
@@ -4123,17 +4128,17 @@ fn completions_match_scrutinee_does_not_suppress_the_normal_set() {
             Shape::Point EnumMember (Point)
             Utf8Result::Err EnumMember (Err)
             Utf8Result::Ok EnumMember (Ok(str))
-            add Function (unsafe fn(T.&raw [mut], usize) -> T.&raw [mut])
+            add Function (unsafe fn::<T>(T.&raw, usize) -> T.&raw)
             alloc_array Function (fn::<T>(usize) -> AllocResult::<T>)
-            copy Function (unsafe fn(T.&raw [mut], T.&raw mut, usize))
-            dangling Function (fn::<T>() -> T.&raw mut)
-            dealloc_array Function (unsafe fn::<T>(T.&raw mut, usize))
-            offset Function (unsafe fn(T.&raw [mut], isize) -> T.&raw [mut])
+            copy Function (unsafe fn::<T>(T.&raw, T.&raw, usize))
+            dangling Function (fn::<T>() -> T.&raw)
+            dealloc_array Function (unsafe fn::<T>(T.&raw, usize))
+            offset Function (unsafe fn::<T>(T.&raw, isize) -> T.&raw)
             panic Function (fn(str) -> !)
             print Function (fn(str))
             read_line Function (fn() -> ReadLineResult)
-            str_from_utf8 Function (unsafe fn(u8.&raw [mut], usize) -> Utf8Result)
-            str_from_utf8_unchecked Function (unsafe fn(u8.&raw [mut], usize) -> str)
+            str_from_utf8 Function (unsafe fn(u8.&raw, usize) -> Utf8Result)
+            str_from_utf8_unchecked Function (unsafe fn(u8.&raw, usize) -> str)
             const Keyword
             false Keyword
             fn Keyword
@@ -4361,16 +4366,16 @@ type Option = enum { Some(T), None }
 #[test]
 fn hover_raw_pointer_binding_shows_the_pointer_type() {
     check_hover(
-        "static main = fn { let mut x: usize = 1; let p$0 = x.&raw mut; };",
-        "```must\np: usize.&raw mut\n```",
+        "static main = fn { let mut x: usize = 1; let p$0 = x.&raw; };",
+        "```must\np: usize.&raw\n```",
     );
 }
 
 #[test]
 fn hover_deref_receiver_shows_the_pointer_type() {
     check_hover(
-        "static main = fn() -> usize { let mut x = 1; let p = x.&raw mut; unsafe { p$0.* } };",
-        "```must\np: usize.&raw mut\n```",
+        "static main = fn() -> usize { let mut x = 1; let p = x.&raw; unsafe { p$0.* } };",
+        "```must\np: usize.&raw\n```",
     );
 }
 
@@ -4812,7 +4817,7 @@ static k: Counter = Counter(struct { n = 1 });
 static main = fn::<@a>(
     s: Counter.&::<@a>,
     m: Counter.&mut::<@a>,
-    x: Counter.&raw mut,
+    x: Counter.&raw,
 ) -> () {
     let c: Counter = Counter(struct { n = 1 });
     let mut d: Counter = Counter(struct { n = 1 });
@@ -5018,7 +5023,7 @@ static f = fn::<@a, @b, W: Write>(w: W.&mut::<@a>.&::<@b>) -> () { w.$0 };
 fn dot_completions_offer_no_deref_fields_through_a_raw_pointer() {
     // TODO: halvko/must#181: a raw-pointer receiver offers no referent fields.
     check_no_completion(
-        "static f = fn(p: struct { x: usize }.&raw mut) -> () { p.$0 };",
+        "static f = fn(p: struct { x: usize }.&raw) -> () { p.$0 };",
         "*.x",
     );
 }

@@ -100,12 +100,26 @@ pub struct LocalData {
     pub binding: Option<BindingId>,
     /// Whether the local's address is taken somewhere in the body
     /// ([`ValueExpr::AddrOf`] names it as the base of a place that does NOT
-    /// lead with a deref — a deref-rooted `p.*.x.&raw mut` only *reads*
+    /// lead with a deref — a deref-rooted `p.*.x.&raw` only *reads*
     /// its root, so it marks nothing) — the two-tier locals fact: only
     /// addressable locals are ever promoted into the interpreter's
     /// abstract memory; everything else stays on the plain per-frame
     /// value map, so pointer-free bodies pay nothing.
     pub addressable: bool,
+    /// Why a write through a pointer into this local is undefined
+    /// behavior, if it is. Initialization and by-name reassignment are not
+    /// pointer writes.
+    pub read_only: Option<ReadOnly>,
+}
+
+/// Why a local is read-only to writes through a pointer
+/// ([`LocalData::read_only`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReadOnly {
+    /// A binding not declared `mut`.
+    Binding,
+    /// A `const` use's own copy.
+    ConstCopy,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -286,9 +300,9 @@ pub enum ValueExpr {
         /// params claim no slot — they need nothing at runtime).
         const_args: Vec<Operand>,
     },
-    /// `place.&raw` / `place.&raw mut` of a local (or a temp holding a
+    /// `place.&raw` of a local (or a temp holding a
     /// `const` use's copy, or a temp holding a pointer for a deref-rooted
-    /// place like `p.*.x.&raw mut`): a pointer to the place — the root
+    /// place like `p.*.x.&raw`): a pointer to the place — the root
     /// plus the projection's element-granular path. Executing it promotes
     /// the root local into the machine's abstract memory (first
     /// address-taking only) — *unless* the projection leads with a
@@ -301,7 +315,6 @@ pub enum ValueExpr {
     /// silently and every later deref of it is detected UB. The resulting
     /// value is `(AllocId, path)`, never an integer.
     AddrOf {
-        mutable: bool,
         place: Place,
     },
     /// `place.&` / `place.&mut` — a SAFE borrow of a place. Structurally
@@ -330,8 +343,8 @@ pub enum ValueExpr {
     /// `S[.field | [index]]....&raw` of a `static` item: the item's ONE
     /// place — minted once per machine run in the static-allocation table,
     /// so every `S.&raw` is the same address (static=identity,
-    /// observable). Always shared (`S.&raw mut` is rejected upstream —
-    /// `static mut` stays deferred); the allocation is read-only.
+    /// observable). The allocation is read-only, so a write through the
+    /// pointer is detected UB.
     AddrOfStatic {
         item: ItemLoc,
         /// Path into the static's value — same scheme (and same
@@ -592,6 +605,7 @@ fn plant_trap(body: &mut MirBody, trap: &CheckTrap) {
         name: None,
         binding: None,
         addressable: false,
+        read_only: None,
     });
     let data = &mut body.blocks[trap.block];
     let origin = data

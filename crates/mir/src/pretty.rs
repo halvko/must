@@ -102,10 +102,7 @@ fn render_value_expr(value: &ValueExpr) -> String {
         ValueExpr::Field { base, index } => format!("{}.{index}", operand(base)),
         ValueExpr::Index { base, index } => format!("{}[{}]", operand(base), operand(index)),
         ValueExpr::Repeat { elem, count } => format!("[{}; {}]", operand(elem), operand(count)),
-        ValueExpr::AddrOf { mutable, place: p } => {
-            let flavor = if *mutable { "&raw mut" } else { "&raw" };
-            format!("{}.{flavor}", place(p))
-        }
+        ValueExpr::AddrOf { place: p } => format!("{}.&raw", place(p)),
         // Rendered without a region: MIR is region-erased, and a snapshot
         // that showed one would be advertising information this layer does
         // not have.

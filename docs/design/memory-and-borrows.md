@@ -16,9 +16,10 @@
 - **M03** The operations, all element-counted: allocate, free, `add(p, usize)`,
   `offset(p, isize)`, `copy` (memmove semantics), `dangling`. `unsafe` is required for a raw
   deref, pointer arithmetic, freeing and copying; taking a raw borrow, comparing pointers,
-  `dangling` and allocating are safe.
+  `dangling` and allocating are safe. Each has an ordinary fn type over the raw pointer
+  type (M23), so all of them are first-class.
 - **M08** `.&raw` is not a decayed safe borrow, which forces the aliasing model's
-  tag-inheritance shape (M10). A raw reborrow `x.*.&raw mut` is safe to create, because every
+  tag-inheritance shape (M10). A raw reborrow `x.*.&raw` is safe to create, because every
   consuming operation on a raw pointer is gated: safe code may create a dangling raw pointer
   but cannot use one. This is the language's single region-laundering path; the soundness
   review must name it.
@@ -37,14 +38,15 @@
   the place holding it repeats. Write permission is therefore judged over the whole place and
   not its outermost step: a `.&` may not be written through, and neither may a `.&mut` held
   behind one, since reading that `.&mut` out is itself a reborrow a shared place cannot grant.
-  A `.&raw mut` step ends the walk, because reading a raw pointer out copies it, permission
-  and all. Each mention in a position that WANTS a borrow mints a fresh, shorter-lived
-  reborrow with the parent suspended for its region; a mention read into a position with no
-  borrow-typed expectation (a bare `let`, a read of an affine field) still copies, invisibly
-  to both layers, and closing that is a typing change rather than a checker one. Must's `&mut`
-  therefore behaves as Rust's, but reborrows are inserted at every use rather than at coercion
-  sites, which removes Rust's `let y = x;`-moves wart. Degradation to `&` cannot be subtyping
-  (a callee could stash the shared reference for the whole region), so it is also a reborrow.
+  A `.&raw` step ends the walk, because reading a raw pointer out copies it, and its write
+  permission is its provenance (M23). Each mention in a position that WANTS a borrow mints a
+  fresh, shorter-lived reborrow with the parent suspended for its region; a mention read into a
+  position with no borrow-typed expectation (a bare `let`, a read of an affine field) still
+  copies, invisibly to both layers, and closing that is a typing change rather than a checker
+  one. Must's `&mut` therefore behaves as Rust's, but reborrows are inserted at every use rather
+  than at coercion sites, which removes Rust's `let y = x;`-moves wart. Degradation to `&`
+  cannot be subtyping (a callee could stash the shared reference for the whole region), so it is
+  also a reborrow.
 - **M09** Invariance first. Adding variance later is one query and one argument, and the
   union-find trap is unreachable because region values are sets propagated monotonically over
   a DAG. Three implementation rules, each the only way to throw the work away: relate regions
@@ -179,9 +181,16 @@
   moves a memcpy and invented pinning to cope. It is safer here because the borrow checker
   guarantees no outstanding borrows at the move. The price is that memcpy-move dies: growth,
   swap, sort and replace all route through the hook. Design `unsafe move` first.
-- **M18** Interior mutability in v1 is an immutable handle containing a raw mutable pointer,
-  with the pointer flavour governing write-through. Long term, a nominal exclusivity-exempt
-  cell type.
+- **M18** Interior mutability in v1 is an immutable handle containing a raw pointer to
+  writable storage, with the pointer's provenance governing write-through (M23). Long term, a
+  compiler-known primitive for inline state.
+- **M23** The raw pointer type `T.&raw`, minted by `x.&raw`, can be written through; the
+  type carries no write permission. Provenance carries it: a raw pointer inherits the
+  aliasing node it was minted through (M08/M10). `x.&raw` of a non-`mut` local, a `static`
+  or a `const` is legal, and a write through it is undefined behavior: the interpreter mints
+  those allocations read-only and detects it, and a write under a `.&` lands on a frozen
+  node. Compiled code gets no such check. A read-only kind, if one is added, is a narrower
+  `T.&raw const` that `T.&raw` converts into implicitly.
 - The acceptance test the design must pass: use-after-free after arena teardown (an outlives
   violation); double free by value copy (moves plus region close); dangling handle copies
   after growth (use-after-move); cross-allocator buffer stealing (region inequality, with the
@@ -247,9 +256,15 @@
 - **Materializing a name whatever it resolves to** — a `const` mention is a value, but lowering
   runs before resolution, and the refusals it would silence (a const parameter, `.&mut` of a
   `static`) are the ones stating a rule. **M12**
-- **Refusing `.&raw`/`.&raw mut` of a temporary** — a raw pointer to a block-local dangles
+- **Refusing `.&raw` of a temporary** — a raw pointer to a block-local dangles
   just as easily, checks clean, and is priced at the deref under `unsafe` (D1); refusing the
   temporary buys no safety the local case does not already forgo. **M12**
+- **Two raw pointer kinds, `T.&raw` and `T.&raw mut`** — with no conversion between them the
+  shared one was unusable from any code holding a mutable pointer, and the flavour had no
+  dynamic meaning (M08/M10). Keeping it would make every pointer API come in pairs, as
+  Rust's do, since must has no mutability generics. What it caught statically, writes into a
+  `static`, a `const` copy, a non-`mut` local or through a `.&`, is UB inside `unsafe` and is
+  detected by the interpreter instead. **M23**
 - **A maybe-moved dataflow in the loan pass, for M21 alone** — a second owner of
   use-after-move beside M16's, and the two would report one mistake twice at joins and
   loops; M16 is a pass of its own over MIR, beside the loan pass (halvko/must#28). **A separate "consumed on some paths and not others" error at the join** — MIR has

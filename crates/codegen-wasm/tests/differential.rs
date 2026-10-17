@@ -498,7 +498,7 @@ fn the_blesses_are_refused_by_name() {
                 r#"
 static main = fn () -> usize {{
     let mut b: u8 = 104;
-    unsafe {{ {spelling}(b.&raw mut, 1); }};
+    unsafe {{ {spelling}(b.&raw, 1); }};
     0
 }}
 "#

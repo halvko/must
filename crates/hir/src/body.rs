@@ -241,13 +241,12 @@ pub enum ExprData {
         base: ExprId,
         index: ExprId,
     },
-    /// `place.&raw` / `place.&raw mut`: takes the address of a place,
+    /// `place.&raw`: takes the address of a place,
     /// producing a raw pointer. The operand lowers as an ordinary
     /// expression (its reads resolve, hover works); inference restricts it
     /// to places — a variable, a chain of its fields and elements, a
     /// `static`/`const` item, or a chain rooted in a deref (`p.*.x`).
     AddrOf {
-        mutable: bool,
         place: ExprId,
     },
     /// `place.&` / `place.&mut`: a SAFE borrow of a place. The operand
@@ -982,13 +981,7 @@ impl LowerCtx {
             }
             ast::Expr::AddrOfExpr(it) => {
                 let place = self.lower_borrowed_place(it.expr());
-                self.alloc_expr(
-                    ExprData::AddrOf {
-                        mutable: it.is_mut(),
-                        place,
-                    },
-                    it.syntax(),
-                )
+                self.alloc_expr(ExprData::AddrOf { place }, it.syntax())
             }
             ast::Expr::DerefExpr(it) => {
                 let receiver = self.lower_opt_expr(it.receiver());

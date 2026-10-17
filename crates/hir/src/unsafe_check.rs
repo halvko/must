@@ -2,7 +2,7 @@
 //!
 //! The rule is exactly "operations whose misuse is UB": dereferencing a raw
 //! pointer — reading `p.*` or writing `p.* = v;` — must sit inside an
-//! `unsafe { ... }` block. Taking an address (`x.&raw` / `x.&raw mut`) is
+//! `unsafe { ... }` block. Taking an address (`x.&raw`) is
 //! safe (creating a pointer is harmless; the hazard is at the deref), and
 //! so is pointer comparison.
 //!

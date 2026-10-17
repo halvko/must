@@ -78,8 +78,9 @@
   `fn(A) -> B` satisfies `Fn(A) -> B`" is needed when traits land, or the two families split
   the ecosystem.
 - **TR09** Send-ness is derived from structure: a value fails to cross iff its type
-  transitively contains a fn value with captures at non-portable, a raw mutable pointer to
-  shared mutable state, or a field of a type that opted out. Everything else crosses silently.
+  transitively contains a fn value with captures at non-portable, a raw pointer to shared
+  mutable state (every raw pointer counts as mutable, M23), or a field of a type that opted
+  out. Everything else crosses silently.
   Annotation inventory: one for the stdlib author, one per thread-safe allocator, zero for
   application code.
 - **TR12** No derive in v1. Copyability stays a builtin judgment (T08); the override of any
