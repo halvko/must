@@ -10,9 +10,14 @@
 //!
 //! **Values.** Every value is a run of consecutive `i64` locals (see
 //! `layout.rs`). Reads produce "a base local index plus a slot offset";
-//! writes pop the value into scratch locals and copy it into place. No
-//! linear memory is used for user data at all — the module's memory holds
-//! string bytes and nothing else.
+//! writes pop the value into scratch locals and copy it into place.
+//!
+//! **Borrowed places live in memory.** A local whose place is borrowed
+//! lives in its function's frame on a shadow stack in linear memory, and a
+//! borrowed `static` in the module's read-only data. A borrow is the
+//! referent's byte address; a place through one (`r.*`, `r.*[i]`) is
+//! address arithmetic plus `i64.load`/`i64.store`. There is no runtime
+//! aliasing check: the static loan check is the fence (M14).
 //!
 //! **Traps.** A trap writes its reason's index into the exported
 //! `trap_code` global and executes `unreachable`. The global survives the
@@ -33,7 +38,7 @@ use rustc_hash::FxHashMap;
 use crate::layout::{self, EqSlot, Unsupported};
 use crate::mono::{CallTarget, InstanceKey, Mono, Refusal};
 use crate::wasm::{FuncBody, ValType};
-use crate::{Strings, TrapKind, Traps};
+use crate::{ReadOnlyData, TrapKind, Traps};
 
 /// Where a value's slots come from.
 enum Src {
@@ -43,14 +48,78 @@ enum Src {
     Consts(Vec<i64>),
 }
 
+/// Where a memory-resident place starts: an `i64` local holding a base
+/// address, plus a static byte offset from it.
+#[derive(Clone, Copy)]
+struct Addr {
+    base: u32,
+    offset: u32,
+}
+
+/// Where a projection walk is: in wasm locals until the first deref (or
+/// never, for a place rooted in memory), in memory after.
+enum At {
+    Locals(u32),
+    Memory(Addr),
+}
+
+/// An index operand, resolved by [`Emitter::checked_index`].
+enum Checked {
+    /// A compile-time index inside the array.
+    InRange(u32),
+    /// A compile-time index outside it: the trap is already emitted.
+    Trapped,
+    /// A runtime index, bounds-checked, in this `i64` local.
+    Runtime(u32),
+}
+
+/// Bytes per slot in memory.
+const SLOT_BYTES: u32 = 8;
+
+/// The locals of `mir` whose place is borrowed — the ones that need an
+/// address, and so a frame slot. A borrow through a deref (`r.*.f.&`)
+/// names memory that already has an address, so it marks nothing.
+pub fn borrowed_locals(mir: &MirBody) -> Vec<bool> {
+    let mut borrowed = vec![false; mir.locals.len()];
+    for (_, block) in mir.blocks.iter() {
+        for statement in &block.statements {
+            if let StatementKind::Assign {
+                value: ValueExpr::Borrow { place, .. },
+                ..
+            } = &statement.kind
+                && !place
+                    .projection
+                    .iter()
+                    .any(|elem| matches!(elem, ProjElem::Deref))
+            {
+                borrowed[raw(place.local)] = true;
+            }
+        }
+    }
+    borrowed
+}
+
 /// The maximum array length this backend will generate a dynamic index
 /// for: one `select` chain per element per slot, so a big array would
 /// generate an enormous function. Refused honestly instead.
 const MAX_DYNAMIC_INDEX_LEN: u32 = 1024;
 
+/// Whether a place lives in memory: its root is a frame slot, or it goes
+/// through a deref.
+fn in_memory(ctx: &Ctx<'_>, place: &Place) -> bool {
+    ctx.frame[raw(place.local)].is_some()
+        || place
+            .projection
+            .iter()
+            .any(|elem| matches!(elem, ProjElem::Deref))
+}
+
+/// Bytes per wasm memory page.
+const PAGE_BYTES: i64 = 65_536;
+
 pub struct Emitter<'a, 'db> {
     pub mono: &'a mut Mono<'db>,
-    pub strings: &'a mut Strings,
+    pub rodata: &'a mut ReadOnlyData,
     pub traps: &'a mut Traps,
     /// Function index of the imported `print`.
     pub print: u32,
@@ -64,6 +133,11 @@ pub struct Emitter<'a, 'db> {
     pub panic_len: u32,
     /// Function index per registered instance, by registration order.
     pub func_indices: &'a [u32],
+    /// Global index of the shadow stack's `stack_pointer`; declared iff
+    /// `borrowed` marks any local.
+    pub stack_pointer: Option<u32>,
+    /// [`borrowed_locals`] per registered instance, by registration order.
+    pub borrowed: &'a [Vec<bool>],
     /// Function index per `extern` ITEM, keyed by the name the module imports
     /// under — the declaring `static`'s own name. Declared before any
     /// defined function (imports own the low index space), so this map is
@@ -80,6 +154,12 @@ struct Ctx<'db> {
     /// First wasm local of each MIR local.
     base: Vec<u32>,
     slots: Vec<u32>,
+    /// Where each borrowed local's frame slot is (the frame base local plus
+    /// a byte offset); `None` for a local that lives in wasm locals.
+    frame: Vec<Option<Addr>>,
+    /// The `i64` local holding this call's frame base, which every
+    /// `Return` pops back into the stack pointer.
+    fp: Option<u32>,
     body: FuncBody,
     pc: u32,
     block_count: u32,
@@ -149,15 +229,19 @@ impl<'a, 'db> Emitter<'a, 'db> {
         Ok((params, vec![ValType::I64; count as usize]))
     }
 
-    pub fn emit(&mut self, key: &InstanceKey) -> Result<FuncBody, Refusal> {
+    /// Emit the body of `key`, the instance registered `index`-th.
+    pub fn emit(&mut self, key: &InstanceKey, index: usize) -> Result<FuncBody, Refusal> {
         let analysis = self.mono.analyze(key);
         let loc = key.func.value.item.clone();
         let mir = &mir::mir_checked(self.db(), loc.to_id(self.db())).bodies[key.func.value.body];
         let entry_expr = mir.blocks[mir.entry].terminator.origin;
 
         let count = mir.locals.len();
+        let borrowed = &self.borrowed[index];
         let mut base = vec![0u32; count];
         let mut slots = vec![0u32; count];
+        let mut frame = vec![None; count];
+        let mut frame_bytes: u32 = 0;
         let mut next = 0;
         for param in &mir.params {
             let width = layout::slots(self.db(), &analysis.locals[raw(param)])
@@ -178,12 +262,36 @@ impl<'a, 'db> Emitter<'a, 'db> {
                 Refusal::from_layout(err, &loc, local_origin(mir, id, entry_expr))
             })?;
             slots[raw(id)] = width;
+            if borrowed[raw(id)] {
+                continue;
+            }
             if width > 0 {
                 let first = body.local(ValType::I64);
                 for _ in 1..width {
                     body.local(ValType::I64);
                 }
                 base[raw(id)] = first;
+            }
+        }
+        // Frame slots, in local order. A borrowed parameter arrives in wasm
+        // locals like any other and is copied into its slot on entry.
+        let fp = borrowed.contains(&true).then(|| body.local(ValType::I64));
+        for (id, _) in mir.locals.iter() {
+            if let (true, Some(fp)) = (borrowed[raw(id)], fp) {
+                frame[raw(id)] = Some(Addr {
+                    base: fp,
+                    offset: frame_bytes,
+                });
+                frame_bytes = slots[raw(id)]
+                    .checked_mul(SLOT_BYTES)
+                    .and_then(|bytes| frame_bytes.checked_add(bytes))
+                    .ok_or_else(|| {
+                        Refusal::new(
+                            "a function whose borrowed locals need more than 4GiB of frame",
+                            &loc,
+                            local_origin(mir, id, entry_expr),
+                        )
+                    })?;
             }
         }
         let pc = body.local(ValType::I32);
@@ -195,6 +303,8 @@ impl<'a, 'db> Emitter<'a, 'db> {
             locals: analysis.locals.clone(),
             base,
             slots,
+            frame,
+            fp,
             body,
             pc,
             block_count: mir.blocks.len() as u32,
@@ -203,6 +313,10 @@ impl<'a, 'db> Emitter<'a, 'db> {
             scratch: Vec::new(),
             scratch_used: 0,
         };
+
+        if let Some(fp) = fp {
+            self.prologue(&mut ctx, fp, frame_bytes);
+        }
 
         // pc = entry block
         ctx.body.i32_const(raw(mir.entry) as i32);
@@ -243,6 +357,56 @@ impl<'a, 'db> Emitter<'a, 'db> {
         ctx.body.end();
         ctx.body.unreachable();
         Ok(ctx.body)
+    }
+
+    /// Claim this call's frame on the shadow stack — growing memory when
+    /// the frame does not fit, and trapping when the engine will not grow
+    /// it — then copy borrowed parameters into their slots.
+    fn prologue(&mut self, ctx: &mut Ctx<'db>, fp: u32, frame_bytes: u32) {
+        let sp = self
+            .stack_pointer
+            .expect("`compile` declares the stack pointer whenever a body borrows a local");
+        let top = ctx.body.local(ValType::I64);
+        ctx.body.global_get(sp);
+        ctx.body.local_tee(fp);
+        ctx.body.i64_const(i64::from(frame_bytes));
+        ctx.body.i64_add();
+        ctx.body.local_tee(top);
+        ctx.body.global_set(sp);
+        // Does the frame's end lie past the memory's end?
+        ctx.body.local_get(top);
+        ctx.body.memory_size();
+        ctx.body.i64_extend_i32_u();
+        ctx.body.i64_const(PAGE_BYTES);
+        ctx.body.i64_mul();
+        ctx.body.i64_gt_u();
+        ctx.body.if_void();
+        // Grow by the pages still missing.
+        ctx.body.local_get(top);
+        ctx.body.i64_const(PAGE_BYTES - 1);
+        ctx.body.i64_add();
+        ctx.body.i64_const(PAGE_BYTES);
+        ctx.body.i64_div_u();
+        ctx.body.memory_size();
+        ctx.body.i64_extend_i32_u();
+        ctx.body.i64_sub();
+        ctx.body.i32_wrap_i64();
+        ctx.body.memory_grow();
+        ctx.body.i32_const(-1);
+        ctx.body.i32_eq();
+        ctx.body.if_void();
+        let trap = self
+            .traps
+            .intern(TrapKind::StackOverflow, "stack overflow".to_owned(), false);
+        self.trap(ctx, trap);
+        ctx.body.end();
+        ctx.body.end();
+        for param in &ctx.mir.params {
+            if let Some(addr) = ctx.frame[raw(param)] {
+                let base = ctx.base[raw(param)];
+                self.store_memory(ctx, addr, base, ctx.slots[raw(param)]);
+            }
+        }
     }
 
     // --- statements ------------------------------------------------------
@@ -378,22 +542,43 @@ impl<'a, 'db> Emitter<'a, 'db> {
             // A function value: zero slots. Monomorphization already
             // recorded which function this is.
             ValueExpr::Instantiate { .. } => Ok(0),
+            // `S.&` (and `S.f.&`, `S[i].&`): the static's one place, its
+            // baked value in the module's read-only data. Safe code never
+            // writes there: `.&mut` of a static is rejected upstream.
+            ValueExpr::AddrOfStatic { item, projection }
+                if matches!(dest_ty, Ty::Borrow { .. }) =>
+            {
+                let ty = hir::signature(self.db(), item.to_id(self.db()));
+                let offset = self.static_place(ctx, item, &ty, origin)?;
+                let base = ctx.claim_scratch(1);
+                ctx.body.i64_const(i64::from(offset));
+                ctx.body.local_set(base);
+                let addr =
+                    self.project_memory(ctx, Addr { base, offset: 0 }, ty, projection, origin)?;
+                self.push_address(ctx, addr);
+                Ok(1)
+            }
             ValueExpr::AddrOf { .. } | ValueExpr::AddrOfStatic { .. } => Err(Refusal::new(
                 "taking an address (`.&raw`) — raw pointers and the heap are \
                  out of scope for this backend",
                 &ctx.loc,
                 origin,
             )),
-            // Refused by its own name, not folded into the raw arm above.
-            // A borrow lowers to the same machine word, so this backend
-            // COULD emit something that runs — and would silently drop the
-            // exclusivity contract while doing it. Refusing is the whole
-            // job here.
-            ValueExpr::Borrow { .. } => Err(Refusal::new(
-                "a safe borrow (`.&` / `.&mut`)",
-                &ctx.loc,
-                origin,
-            )),
+            // The referent's address. Every borrowed place is in memory:
+            // its root is a frame slot (`borrowed_locals`), or it leads
+            // with a deref and so is already somewhere a borrow points.
+            ValueExpr::Borrow { place, .. } => {
+                let Some(addr) = self.place_address(ctx, place, origin)? else {
+                    return Err(Refusal::new(
+                        "a borrow of a place with no address (that is a bug in the wasm \
+                         backend, not in your program)",
+                        &ctx.loc,
+                        origin,
+                    ));
+                };
+                self.push_address(ctx, addr);
+                Ok(1)
+            }
         }
     }
 
@@ -454,7 +639,7 @@ impl<'a, 'db> Emitter<'a, 'db> {
             // the two lower identically and a linear program's bytes are
             // the same as its forgettable twin's.
             Operand::Copy(place) | Operand::Move(place) => {
-                let base = self.read_place(ctx, place, origin)?;
+                let base = self.read_place(ctx, place, &ty, origin)?;
                 Ok((Src::Locals(base), ty))
             }
             Operand::Const(konst) => {
@@ -465,40 +650,278 @@ impl<'a, 'db> Emitter<'a, 'db> {
     }
 
     /// Resolve a place to the first wasm local of its value, emitting code
-    /// for any dynamic index steps along the way.
+    /// for any dynamic index steps along the way. A place in memory is
+    /// loaded into scratch locals here — the read happens now, at the
+    /// point MIR reads it. `ty` is the value's type, which sizes that load.
     fn read_place(
         &mut self,
         ctx: &mut Ctx<'db>,
         place: &Place,
+        ty: &Ty,
         origin: ExprId,
     ) -> Result<u32, Refusal> {
-        let mut ty = ctx.ty(place.local);
-        let mut base = ctx.base[raw(place.local)];
-        for elem in &place.projection {
+        let at = self.locate(ctx, place, origin)?;
+        match at {
+            At::Locals(base) => Ok(base),
+            At::Memory(addr) => {
+                let width = self.slots(ctx, ty, origin)?;
+                let out = ctx.claim_scratch(width);
+                self.load_memory(ctx, addr, out, width);
+                Ok(out)
+            }
+        }
+    }
+
+    /// The address of a place that lives in memory — one rooted in a
+    /// borrowed local's frame slot, or one reached through a deref — or
+    /// `None` for a place in wasm locals. Emits the address arithmetic,
+    /// bounds checks and borrow reads the projection needs, in order.
+    fn place_address(
+        &mut self,
+        ctx: &mut Ctx<'db>,
+        place: &Place,
+        origin: ExprId,
+    ) -> Result<Option<Addr>, Refusal> {
+        if !in_memory(ctx, place) {
+            return Ok(None);
+        }
+        match self.locate(ctx, place, origin)? {
+            At::Memory(addr) => Ok(Some(addr)),
+            At::Locals(_) => unreachable!("a place with a deref ends in memory"),
+        }
+    }
+
+    /// Where a place is: wasm locals or memory.
+    fn locate(&mut self, ctx: &mut Ctx<'db>, place: &Place, origin: ExprId) -> Result<At, Refusal> {
+        let root = raw(place.local);
+        let at = match ctx.frame[root] {
+            Some(addr) => At::Memory(addr),
+            None => At::Locals(ctx.base[root]),
+        };
+        let ty = ctx.ty(place.local);
+        self.project(ctx, at, ty, &place.projection, origin)
+    }
+
+    /// [`Emitter::project`] from a place already in memory, which a walk
+    /// never leaves.
+    fn project_memory(
+        &mut self,
+        ctx: &mut Ctx<'db>,
+        addr: Addr,
+        ty: Ty,
+        projection: &[ProjElem],
+        origin: ExprId,
+    ) -> Result<Addr, Refusal> {
+        match self.project(ctx, At::Memory(addr), ty, projection, origin)? {
+            At::Memory(addr) => Ok(addr),
+            At::Locals(_) => unreachable!("a walk that starts in memory stays there"),
+        }
+    }
+
+    /// Push the address `addr` names, as one `i64` slot.
+    fn push_address(&mut self, ctx: &mut Ctx<'db>, addr: Addr) {
+        ctx.body.local_get(addr.base);
+        if addr.offset > 0 {
+            ctx.body.i64_const(i64::from(addr.offset));
+            ctx.body.i64_add();
+        }
+    }
+
+    /// Walk a projection from `at`, a value of type `ty`, emitting the
+    /// address arithmetic, bounds checks and borrow reads it needs, in
+    /// order.
+    fn project(
+        &mut self,
+        ctx: &mut Ctx<'db>,
+        mut at: At,
+        ty: Ty,
+        projection: &[ProjElem],
+        origin: ExprId,
+    ) -> Result<At, Refusal> {
+        // `None` only after a step into an enum's payload column, which has
+        // no knowable type: fine as the LAST step (a payload borrow needs
+        // the address alone), refused before any other.
+        let mut ty = Some(ty);
+        for elem in projection {
+            let Some(current) = ty.take() else {
+                return Err(Refusal::new(
+                    "projecting through a payload of a tagged enum (which variant it \
+                     holds is not recorded on the place, so its type is not knowable here)",
+                    &ctx.loc,
+                    origin,
+                ));
+            };
             match elem {
                 ProjElem::Field(index) => {
-                    let (offset, field) = self.field_of(ctx, &ty, *index, origin)?;
-                    base += offset;
-                    ty = field;
+                    let read = layout::field(self.db(), &current, *index)
+                        .map_err(|err| self.refuse(ctx, err, origin))?;
+                    match &mut at {
+                        At::Locals(base) => *base += read.offset(),
+                        At::Memory(addr) => addr.offset += read.offset() * SLOT_BYTES,
+                    }
+                    ty = read.ty().cloned();
                 }
                 ProjElem::Index(index) => {
-                    let (element_ty, width, len) = layout::element(self.db(), &ty)
+                    let (element_ty, width, len) = layout::element(self.db(), &current)
                         .map_err(|err| self.refuse(ctx, err, origin))?;
-                    let src = Src::Locals(base);
-                    base = self.index_into(ctx, &src, index, width, len, 0, origin)?;
-                    ty = element_ty;
+                    at = match at {
+                        At::Locals(base) => At::Locals(self.index_into(
+                            ctx,
+                            &Src::Locals(base),
+                            index,
+                            width,
+                            len,
+                            0,
+                            origin,
+                        )?),
+                        At::Memory(addr) => {
+                            At::Memory(self.index_address(ctx, addr, index, width, len, origin)?)
+                        }
+                    };
+                    ty = Some(element_ty);
                 }
+                // Read the borrow the place holds so far: its value is the
+                // address the rest of the projection continues from.
                 ProjElem::Deref => {
-                    return Err(Refusal::new(
-                        "dereferencing a raw pointer (`p.*`) — raw pointers and the \
-                         heap are out of scope for this backend",
-                        &ctx.loc,
-                        origin,
-                    ));
+                    let held = ctx.claim_scratch(1);
+                    match at {
+                        At::Locals(base) => {
+                            ctx.body.local_get(base);
+                            ctx.body.local_set(held);
+                        }
+                        At::Memory(addr) => self.load_memory(ctx, addr, held, 1),
+                    }
+                    at = At::Memory(Addr {
+                        base: held,
+                        offset: 0,
+                    });
+                    ty = Some(
+                        layout::referent(&current).map_err(|err| self.refuse(ctx, err, origin))?,
+                    );
                 }
             }
         }
-        Ok(base)
+        Ok(at)
+    }
+
+    /// Element `index` of the array at `addr`: bounds-checked exactly where
+    /// the interpreter checks it, then plain arithmetic — memory needs no
+    /// select chain.
+    fn index_address(
+        &mut self,
+        ctx: &mut Ctx<'db>,
+        addr: Addr,
+        index: &Operand,
+        width: u32,
+        len: u32,
+        origin: ExprId,
+    ) -> Result<Addr, Refusal> {
+        let stride = width * SLOT_BYTES;
+        let idx = match self.checked_index(ctx, index, len, None, origin)? {
+            Checked::Trapped => return Ok(addr),
+            Checked::InRange(value) => {
+                return Ok(Addr {
+                    base: addr.base,
+                    offset: addr.offset + value * stride,
+                });
+            }
+            Checked::Runtime(idx) => idx,
+        };
+        let base = ctx.claim_scratch(1);
+        ctx.body.local_get(addr.base);
+        ctx.body.local_get(idx);
+        ctx.body.i64_const(i64::from(stride));
+        ctx.body.i64_mul();
+        ctx.body.i64_add();
+        ctx.body.local_set(base);
+        Ok(Addr {
+            base,
+            offset: addr.offset,
+        })
+    }
+
+    /// Resolve an index operand into an array of `len` elements. A constant
+    /// index is in range or has already trapped; a runtime one is
+    /// bounds-checked into a local. `max` caps the length a runtime index
+    /// may reach (the select-chain paths).
+    fn checked_index(
+        &mut self,
+        ctx: &mut Ctx<'db>,
+        index: &Operand,
+        len: u32,
+        max: Option<u32>,
+        origin: ExprId,
+    ) -> Result<Checked, Refusal> {
+        if let Some(value) = self.const_int(ctx, index)? {
+            if value >= u128::from(len) {
+                let trap = self.traps.intern(
+                    TrapKind::IndexOutOfBounds,
+                    hir::diag::index_out_of_bounds(u128::from(len), value),
+                    true,
+                );
+                // MIR lowers an index the checker refused, so the program
+                // traps with the checker's message.
+                self.trap(ctx, trap);
+                return Ok(Checked::Trapped);
+            }
+            return Ok(Checked::InRange(value as u32));
+        }
+        if let Some(max) = max
+            && len > max
+        {
+            return Err(Refusal::new(
+                format!(
+                    "a runtime index into an array of {len} elements (this backend \
+                     keeps arrays in registers, so it only generates dynamic \
+                     indexing up to {max} elements)"
+                ),
+                &ctx.loc,
+                origin,
+            ));
+        }
+        let (index_src, _) = self.operand(ctx, index, origin)?;
+        let idx = ctx.claim_scratch(1);
+        self.push_range(ctx, &index_src, 0, 1, origin)?;
+        ctx.body.local_set(idx);
+        self.bounds_check(ctx, idx, len);
+        Ok(Checked::Runtime(idx))
+    }
+
+    /// Trap unless the index in local `idx` is below `len`.
+    fn bounds_check(&mut self, ctx: &mut Ctx<'db>, idx: u32, len: u32) {
+        ctx.body.local_get(idx);
+        ctx.body.i64_const(i64::from(len));
+        ctx.body.i64_ge_u();
+        ctx.body.if_void();
+        ctx.depth += 1;
+        let trap = self.traps.intern(
+            TrapKind::IndexOutOfBounds,
+            format!("index out of bounds: the length is {len} but the index is "),
+            false,
+        );
+        self.trap(ctx, trap);
+        ctx.depth -= 1;
+        ctx.body.end();
+    }
+
+    /// Copy `width` slots from memory at `addr` into the locals at `out`.
+    fn load_memory(&mut self, ctx: &mut Ctx<'db>, addr: Addr, out: u32, width: u32) {
+        for slot in 0..width {
+            ctx.body.local_get(addr.base);
+            ctx.body.i32_wrap_i64();
+            ctx.body.i64_load(addr.offset + slot * SLOT_BYTES);
+            ctx.body.local_set(out + slot);
+        }
+    }
+
+    /// Copy `width` slots from the locals at `value` into memory at `addr`.
+    fn store_memory(&mut self, ctx: &mut Ctx<'db>, addr: Addr, value: u32, width: u32) {
+        for slot in 0..width {
+            ctx.body.local_get(addr.base);
+            ctx.body.i32_wrap_i64();
+            ctx.body.local_get(value + slot);
+            ctx.body.i64_store(addr.offset + slot * SLOT_BYTES);
+        }
     }
 
     /// Read element `index` out of an array value, bounds-checked exactly
@@ -519,68 +942,33 @@ impl<'a, 'db> Emitter<'a, 'db> {
         suffix: u32,
         origin: ExprId,
     ) -> Result<u32, Refusal> {
-        if let Some(value) = self.const_int(ctx, index)? {
-            if value >= u128::from(len) {
-                // The checker squiggles this; MIR still lowers it, so the
-                // compiled program traps with the same message.
-                let trap = self.traps.intern(
-                    TrapKind::IndexOutOfBounds,
-                    hir::diag::index_out_of_bounds(u128::from(len), value),
-                    true,
-                );
-                self.trap(ctx, trap);
+        let idx = match self.checked_index(ctx, index, len, Some(MAX_DYNAMIC_INDEX_LEN), origin)? {
+            Checked::Trapped => {
                 return Ok(match src {
                     Src::Locals(base) => *base,
                     Src::Consts(_) => ctx.claim_scratch(width),
                 });
             }
-            let offset = value as u32 * width + suffix;
-            return match src {
-                Src::Locals(base) => Ok(base + offset),
-                Src::Consts(values) => {
-                    let scratch = ctx.claim_scratch(width);
-                    for slot in 0..width {
-                        let value = values
-                            .get((offset + slot) as usize)
-                            .copied()
-                            .unwrap_or_default();
-                        ctx.body.i64_const(value);
-                        ctx.body.local_set(scratch + slot);
+            Checked::Runtime(idx) => idx,
+            Checked::InRange(value) => {
+                let offset = value * width + suffix;
+                return match src {
+                    Src::Locals(base) => Ok(base + offset),
+                    Src::Consts(values) => {
+                        let scratch = ctx.claim_scratch(width);
+                        for slot in 0..width {
+                            let value = values
+                                .get((offset + slot) as usize)
+                                .copied()
+                                .unwrap_or_default();
+                            ctx.body.i64_const(value);
+                            ctx.body.local_set(scratch + slot);
+                        }
+                        Ok(scratch)
                     }
-                    Ok(scratch)
-                }
-            };
-        }
-        if len > MAX_DYNAMIC_INDEX_LEN {
-            return Err(Refusal::new(
-                format!(
-                    "a runtime index into an array of {len} elements (this backend \
-                     keeps arrays in registers, so it only generates dynamic \
-                     indexing up to {MAX_DYNAMIC_INDEX_LEN} elements)"
-                ),
-                &ctx.loc,
-                origin,
-            ));
-        }
-        let (index_src, _) = self.operand(ctx, index, origin)?;
-        let idx = ctx.claim_scratch(1);
-        self.push_range(ctx, &index_src, 0, 1, origin)?;
-        ctx.body.local_set(idx);
-        // Bounds check: an out-of-range index is an ordinary trap.
-        ctx.body.local_get(idx);
-        ctx.body.i64_const(i64::from(len));
-        ctx.body.i64_ge_u();
-        ctx.body.if_void();
-        ctx.depth += 1;
-        let trap = self.traps.intern(
-            TrapKind::IndexOutOfBounds,
-            format!("index out of bounds: the length is {len} but the index is "),
-            false,
-        );
-        self.trap(ctx, trap);
-        ctx.depth -= 1;
-        ctx.body.end();
-
+                };
+            }
+        };
         let out = ctx.claim_scratch(width);
         for slot in 0..width {
             self.push_range(ctx, src, suffix + slot, 1, origin)?;
@@ -607,6 +995,10 @@ impl<'a, 'db> Emitter<'a, 'db> {
         width: u32,
         origin: ExprId,
     ) -> Result<(), Refusal> {
+        if let Some(addr) = self.place_address(ctx, place, origin)? {
+            self.store_memory(ctx, addr, value, width);
+            return Ok(());
+        }
         // Walk the static prefix; a dynamic index step switches to the
         // select-chain write below.
         let mut ty = ctx.ty(place.local);
@@ -621,20 +1013,21 @@ impl<'a, 'db> Emitter<'a, 'db> {
                 ProjElem::Index(index) => {
                     let (element_ty, element_width, len) = layout::element(self.db(), &ty)
                         .map_err(|err| self.refuse(ctx, err, origin))?;
-                    if let Some(value) = self.const_int(ctx, index)? {
-                        if value >= u128::from(len) {
-                            let trap = self.traps.intern(
-                                TrapKind::IndexOutOfBounds,
-                                hir::diag::index_out_of_bounds(u128::from(len), value),
-                                true,
-                            );
-                            self.trap(ctx, trap);
-                            return Ok(());
+                    let idx = match self.checked_index(
+                        ctx,
+                        index,
+                        len,
+                        Some(MAX_DYNAMIC_INDEX_LEN),
+                        origin,
+                    )? {
+                        Checked::Trapped => return Ok(()),
+                        Checked::InRange(value) => {
+                            base += value * element_width;
+                            ty = element_ty;
+                            continue;
                         }
-                        base += value as u32 * element_width;
-                        ty = element_ty;
-                        continue;
-                    }
+                        Checked::Runtime(idx) => idx,
+                    };
                     // The suffix after the dynamic step must be static:
                     // one select chain is generated, not a nest of them.
                     let mut suffix = 0;
@@ -656,26 +1049,11 @@ impl<'a, 'db> Emitter<'a, 'db> {
                             }
                         }
                     }
-                    return self.store_dynamic(
-                        ctx,
-                        base,
-                        index,
-                        element_width,
-                        len,
-                        suffix,
-                        value,
-                        width,
-                        origin,
-                    );
+                    self.store_dynamic(ctx, base, idx, element_width, len, suffix, value, width);
+                    return Ok(());
                 }
-                ProjElem::Deref => {
-                    return Err(Refusal::new(
-                        "writing through a raw pointer (`p.* = …`) — raw pointers and \
-                         the heap are out of scope for this backend",
-                        &ctx.loc,
-                        origin,
-                    ));
-                }
+                // `place_address` takes every place with a deref.
+                ProjElem::Deref => unreachable!("a deref place is a memory place"),
             }
         }
         for slot in 0..width {
@@ -685,47 +1063,20 @@ impl<'a, 'db> Emitter<'a, 'db> {
         Ok(())
     }
 
+    /// Write `width` slots into element `idx` (a checked runtime index
+    /// local) of the array at `base`, one `select` per element per slot.
     #[allow(clippy::too_many_arguments)]
     fn store_dynamic(
         &mut self,
         ctx: &mut Ctx<'db>,
         base: u32,
-        index: &Operand,
+        idx: u32,
         element_width: u32,
         len: u32,
         suffix: u32,
         value: u32,
         width: u32,
-        origin: ExprId,
-    ) -> Result<(), Refusal> {
-        if len > MAX_DYNAMIC_INDEX_LEN {
-            return Err(Refusal::new(
-                format!(
-                    "a runtime index into an array of {len} elements (this backend \
-                     keeps arrays in registers, so it only generates dynamic \
-                     indexing up to {MAX_DYNAMIC_INDEX_LEN} elements)"
-                ),
-                &ctx.loc,
-                origin,
-            ));
-        }
-        let (index_src, _) = self.operand(ctx, index, origin)?;
-        let idx = ctx.claim_scratch(1);
-        self.push_range(ctx, &index_src, 0, 1, origin)?;
-        ctx.body.local_set(idx);
-        ctx.body.local_get(idx);
-        ctx.body.i64_const(i64::from(len));
-        ctx.body.i64_ge_u();
-        ctx.body.if_void();
-        ctx.depth += 1;
-        let trap = self.traps.intern(
-            TrapKind::IndexOutOfBounds,
-            format!("index out of bounds: the length is {len} but the index is "),
-            false,
-        );
-        self.trap(ctx, trap);
-        ctx.depth -= 1;
-        ctx.body.end();
+    ) {
         for element in 0..len {
             let target = base + element * element_width + suffix;
             for slot in 0..width {
@@ -741,7 +1092,6 @@ impl<'a, 'db> Emitter<'a, 'db> {
                 ctx.body.local_set(target + slot);
             }
         }
-        Ok(())
     }
 
     fn push_range(
@@ -802,7 +1152,7 @@ impl<'a, 'db> Emitter<'a, 'db> {
             // `layout::slots`).
             Const::Char(value) => Ok(vec![i64::from(u32::from(*value))]),
             Const::Str(text) => {
-                let (offset, len) = self.strings.intern(text);
+                let (offset, len) = self.rodata.intern(text);
                 Ok(vec![i64::from(offset), i64::from(len)])
             }
             Const::Item(item) => {
@@ -833,6 +1183,23 @@ impl<'a, 'db> Emitter<'a, 'db> {
         }
     }
 
+    /// Where `item`'s value sits in the module's data: baked once, the
+    /// first time anything borrows it, and shared by every borrow after
+    /// (a static has one place, so all its borrows are one address).
+    fn static_place(
+        &mut self,
+        ctx: &mut Ctx<'db>,
+        item: &ItemLoc,
+        ty: &Ty,
+        origin: ExprId,
+    ) -> Result<u32, Refusal> {
+        if let Some(offset) = self.rodata.static_offset(item) {
+            return Ok(offset);
+        }
+        let slots = self.const_slots(ctx, &Const::Item(item.clone()), ty, origin)?;
+        Ok(self.rodata.place_static(item, &slots))
+    }
+
     /// Lay out an interpreter value — the bridge that makes const-baked
     /// statics literally the same values the interpreter computes.
     fn value_slots(
@@ -860,7 +1227,7 @@ impl<'a, 'db> Emitter<'a, 'db> {
             Value::Bool(b) => Ok(vec![i64::from(*b)]),
             Value::Char(c) => Ok(vec![i64::from(u32::from(*c))]),
             Value::Str(text) => {
-                let (offset, len) = self.strings.intern(text);
+                let (offset, len) = self.rodata.intern(text);
                 Ok(vec![i64::from(offset), i64::from(len)])
             }
             Value::Record { fields } => {
@@ -1463,9 +1830,18 @@ impl<'a, 'db> Emitter<'a, 'db> {
             TerminatorKind::Return => {
                 let ret = ctx.mir.return_local();
                 let width = ctx.slots[raw(ret)];
-                let base = ctx.base[raw(ret)];
+                let mut base = ctx.base[raw(ret)];
+                if let Some(addr) = ctx.frame[raw(ret)] {
+                    base = ctx.claim_scratch(width);
+                    self.load_memory(ctx, addr, base, width);
+                }
                 for slot in 0..width {
                     ctx.body.local_get(base + slot);
+                }
+                // Pop this call's frame.
+                if let (Some(fp), Some(sp)) = (ctx.fp, self.stack_pointer) {
+                    ctx.body.local_get(fp);
+                    ctx.body.global_set(sp);
                 }
                 ctx.body.return_();
                 Ok(())
@@ -1551,7 +1927,11 @@ impl<'a, 'db> Emitter<'a, 'db> {
         // by the expectation at its use site. Reconcile — the surplus code
         // is dead either way, since such a call never returns.
         let width = ctx.slots[raw(dest)];
-        let base = ctx.base[raw(dest)];
+        let mut base = ctx.base[raw(dest)];
+        let frame_slot = ctx.frame[raw(dest)];
+        if frame_slot.is_some() {
+            base = ctx.claim_scratch(width);
+        }
         for _ in width..results {
             ctx.body.drop_();
         }
@@ -1560,6 +1940,9 @@ impl<'a, 'db> Emitter<'a, 'db> {
         }
         for slot in (0..width).rev() {
             ctx.body.local_set(base + slot);
+        }
+        if let Some(addr) = frame_slot {
+            self.store_memory(ctx, addr, base, width);
         }
         Ok(())
     }
@@ -1635,12 +2018,7 @@ impl<'a, 'db> Emitter<'a, 'db> {
                         .0
                 }
                 ProjElem::Deref => {
-                    return Err(Refusal::new(
-                        "writing through a raw pointer (`p.* = …`) — raw pointers and \
-                         the heap are out of scope for this backend",
-                        &ctx.loc,
-                        origin,
-                    ));
+                    layout::referent(&ty).map_err(|err| self.refuse(ctx, err, origin))?
                 }
             };
         }

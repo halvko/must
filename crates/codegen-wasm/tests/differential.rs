@@ -1848,3 +1848,181 @@ static array = fn() -> usize {
         check(PROGRAM, entry);
     }
 }
+
+// --- safe borrows: frame slots on the shadow stack -------------------------
+
+#[test]
+fn a_runtime_index_through_a_borrow_reads_writes_and_traps() {
+    const PROGRAM: &str = r#"
+static set = fn::<@a>(r: [usize; 4].&mut::<@a>, i: usize, v: usize) -> () {
+    r.*[i] = v;
+};
+static get = fn::<@a>(r: [usize; 4].&::<@a>, i: usize) -> usize { r.*[i] };
+static go = fn(i: usize) -> usize {
+    let mut a: [usize; 4] = [1, 2, 3, 4];
+    set(a.&mut, i, 40);
+    get(a.&, i) + a[0] + a[3]
+};
+static elem = fn(i: usize) -> usize {
+    let mut a: [usize; 3] = [7, 8, 9];
+    let e = a[i].&mut;
+    e.* = e.* + 1;
+    a[0] + a[1] + a[2]
+};
+"#;
+    for entry in ["go(1)", "go(3)", "go(4)", "elem(2)"] {
+        check(PROGRAM, entry);
+    }
+}
+
+#[test]
+fn borrowed_frames_nest_under_recursion_and_unwind_on_return() {
+    // Every level borrows its own local; a frame that was not popped, or
+    // two levels sharing a slot, would change the sum.
+    check(
+        r#"
+static add_to = fn::<@a>(r: usize.&mut::<@a>, v: usize) -> () { r.* = r.* + v; };
+static walk = fn(n: usize) -> usize {
+    let mut here: usize = n;
+    add_to(here.&mut, 1);
+    if n == 0 { here } else { here + walk(n - 1) }
+};
+static go = fn() -> usize { walk(30) + walk(5) };
+"#,
+        "go()",
+    );
+}
+
+#[test]
+fn the_shadow_stack_grows_memory_past_its_first_page() {
+    // 300 frames of a 64-slot array: well past one 64KiB page.
+    check(
+        r#"
+static first = fn::<@a>(r: [u64; 64].&::<@a>) -> u64 { r.*[63] };
+static deep = fn(n: u64) -> u64 {
+    let big: [u64; 64] = [n; 64];
+    let mine = first(big.&);
+    if n == 0 { mine } else { mine + deep(n - 1) }
+};
+"#,
+        "deep(300)",
+    );
+}
+
+#[test]
+fn a_borrowed_parameter_and_a_returned_borrow_point_into_the_callers_frame() {
+    check(
+        r#"
+static pick = fn::<@a>(x: struct { a: usize, b: usize }.&::<@a>) -> usize.&::<@a> { x.*.b.& };
+static bump_param = fn(n: usize) -> usize {
+    let r = n.&;
+    r.* + n
+};
+static go = fn() -> usize {
+    let s = struct { a = 1, b = 2 };
+    let b = pick(s.&);
+    b.* * 100 + bump_param(21)
+};
+"#,
+        "go()",
+    );
+}
+
+#[test]
+fn writes_through_a_borrow_land_in_the_borrowed_field() {
+    check(
+        r#"
+type P = struct { x: usize, y: usize };
+static shift = fn::<@a>(p: P.&mut::<@a>) -> () {
+    p.*.x = p.*.x + 10;
+    p.*.y = p.*.y * 2;
+};
+static make = fn() -> P { P(struct { x = 1, y = 2 }) };
+static go = fn() -> usize {
+    let mut p = make();
+    shift(p.&mut);
+    shift(p.&mut);
+    let mut total: usize = 0;
+    let mut i: usize = 0;
+    loop {
+        if i == 3 { break; }
+        let r = total.&mut;
+        r.* = r.* + p.x;
+        i = i + 1;
+    };
+    total + p.y
+};
+"#,
+        "go()",
+    );
+}
+
+#[test]
+fn a_borrowed_str_prints_through_the_borrow() {
+    check(
+        r#"
+static say = fn::<@a>(s: str.&::<@a>) -> () { print(s.*); };
+static main = fn() -> () {
+    let s = "through a borrow\n";
+    say(s.&);
+    let pair = struct { left = "l\n", right = "r\n" };
+    say(pair.right.&);
+};
+"#,
+        "main()",
+    );
+}
+
+#[test]
+fn a_borrowed_static_reads_its_baked_value_from_the_module_data() {
+    const PROGRAM: &str = r#"
+static TABLE: [usize; 4] = [10, 20, 30, 40];
+static GREETING = "hello from a static\n";
+static PAIR: struct { left: usize, right: str } = struct { left = 3, right = "right\n" };
+static at = fn::<@a>(t: [usize; 4].&::<@a>, i: usize) -> usize { t.*[i] };
+static say = fn::<@a>(s: str.&::<@a>) -> () { print(s.*); };
+static go = fn(i: usize) -> usize {
+    say(GREETING.&);
+    say(PAIR.right.&);
+    let third = TABLE[2].&;
+    at(TABLE.&, i) + third.* + PAIR.left.&.*
+};
+"#;
+    for entry in ["go(0)", "go(3)", "go(4)"] {
+        check(PROGRAM, entry);
+    }
+}
+
+#[test]
+fn a_borrowed_temporary_gets_a_frame_slot() {
+    const PROGRAM: &str = r#"
+static get = fn::<@a>(r: i64.&::<@a>) -> i64 { r.* };
+static bump = fn::<@a>(r: i64.&mut::<@a>) -> i64 { r.* = r.* + 1; r.* };
+static mk = fn () -> i64 { 7 };
+static go = fn () -> i64 { get(mk().&) * 10 + bump(mk().&mut) };
+"#;
+    check(PROGRAM, "go()");
+}
+
+/// The backend checks no aliasing at runtime: a borrow the loan checker
+/// refused must trap where it was refused, before the conflicting access
+/// runs, exactly as under the interpreter.
+#[test]
+fn a_loan_refusal_traps_before_the_conflicting_access() {
+    const PROGRAM: &str = r#"
+static go = fn () -> usize {
+    let mut a: usize = 1;
+    let m = a.&mut;
+    print("before\n");
+    a = 5;
+    m.* = 2;
+    print("after\n");
+    a
+};
+"#;
+    check(PROGRAM, "go()");
+    assert_eq!(
+        trap_kind(PROGRAM, "go()"),
+        codegen_wasm::TrapKind::Diagnostic
+    );
+}
