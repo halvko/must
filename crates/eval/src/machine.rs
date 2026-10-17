@@ -2356,7 +2356,7 @@ impl<'db, M: Mode> Machine<'db, M> {
             return Err(self.host_signature_error("read", SHAPE, loc, origin));
         };
         // `read` writes through its pointer, so it must be declared `unsafe fn`.
-        if !sig.unsafe_to_call {
+        if !sig.unsafe_to_call() {
             return Err(self.host_signature_error("read", SHAPE, loc, origin));
         }
         // A MUTABLE raw pointer to `u8`: `read` writes bytes, so a shared

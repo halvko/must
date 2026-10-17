@@ -153,7 +153,7 @@ impl CheckCtx<'_> {
     fn calls_an_unsafe_fn_value(&self, callee: ExprId) -> bool {
         matches!(
             self.infer.type_of_expr.get(callee),
-            Some(crate::ty::Ty::Fn(f)) if f.unsafe_to_call
+            Some(crate::ty::Ty::Fn(f)) if f.unsafe_to_call()
         )
     }
 

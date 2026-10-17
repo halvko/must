@@ -449,15 +449,12 @@ pub fn infer_group<'db>(db: &'db dyn Db, group: GroupId<'db>) -> GroupSignatures
             true,
         );
         let root_ty = ctx.infer_expr(root, &expected);
-        let unified = ctx.adopt(&in_group[loc], &root_ty);
-        // Solve this member's deferred joins *before* the next member runs:
-        // a member's signature is decided by its own body (its axioms and
-        // conclusions); later members may only fill variables the body left
-        // genuinely free, never override its conclusions. Without this, a
-        // use like `print(g(..))` in a sibling would set an unannotated
-        // `g`'s return type to `str` while its branches say `usize` — and
-        // the mismatch would be visible from no single item.
+        // Solve this member's joins *before* its type meets what other members
+        // committed it to: its signature is decided by its own body, and others
+        // may only fill what the body left free, never override its
+        // conclusions. That includes the safety of what the body calls.
         ctx.solve();
+        let unified = ctx.adopt(&in_group[loc], &root_ty);
         let left_unbound = ctx.left_unbound().to_vec();
         let mut own_error = false;
         if !left_unbound.is_empty() || root_ty.contains_error() {

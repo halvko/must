@@ -23,12 +23,12 @@
 
 use ena::unify::{InPlace, InPlaceUnificationTable, Snapshot};
 use la_arena::ArenaMap;
-use rustc_hash::{FxHashMap, FxHashSet};
+use rustc_hash::FxHashMap;
 
 use crate::ItemLoc;
 use crate::body::{BindingId, ExprId, PatId};
 use crate::infer::InferenceDiagnostic;
-use crate::ty::{ConstArgValue, GenericArg, NamedTy, Region, Ty, TyVar, TyVarValue};
+use crate::ty::{ConstArgValue, GenericArg, NamedTy, Region, Safety, Ty, TyVar, TyVarValue};
 
 /// Why a type was required or concluded. Attached to
 /// [`InferenceDiagnostic::TypeMismatch`] to render "because of this" hints;
@@ -159,6 +159,23 @@ pub(crate) struct Join {
     pub witnesses: Vec<Witness>,
 }
 
+/// What [`Constraints::rollback_to`] restores.
+pub(crate) struct ConstraintSnapshot {
+    table: Snapshot<InPlace<TyVar>>,
+    region_edges: usize,
+    safety_edges: Vec<(TyVar, TyVar)>,
+}
+
+/// How a value met its expected type at a check site
+/// ([`Constraints::relate_value`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Relation {
+    Equal,
+    /// Through the safe-to-unsafe conversion.
+    Converted,
+    Mismatch,
+}
+
 /// Unification plus the provenance and deferred-join state accumulated over
 /// one inference pass. Owned by `InferCtx`; [`Constraints::solve`] runs after
 /// traversal, in both the per-item query and group inference (group mode
@@ -220,6 +237,11 @@ pub(crate) struct Constraints {
     next_region: u32,
     /// Canonical root var → the causes that decided its concrete type.
     causes: FxHashMap<TyVar, Vec<Cause>>,
+    /// `(sub, sup)`: open safety variables related by the safe-to-unsafe
+    /// conversion, `sub <= sup` ([`Self::coerce_safety`]). Read when either
+    /// side is decided, which can decide the other: an `unsafe` sub makes
+    /// the sup `unsafe`, a safe sup makes the sub safe.
+    safety_edges: Vec<(TyVar, TyVar)>,
     /// Set for every body checked inside an inference group (T11): an
     /// unbound variable meeting an erroneous type stays unbound, and
     /// [`Self::poison`] poisons nothing, so one body's own error never
@@ -332,74 +354,6 @@ impl Constraints {
         self.joins.push(join);
     }
 
-    /// Whether a join that has NOT been solved yet will fill `var` with a
-    /// function value that must be vouched for — asked by a CALL whose
-    /// callee is still a free variable.
-    ///
-    /// A call learns the callee's SHAPE (its arity, and the types either
-    /// side of it) and has no business deciding its SAFETY: safety is
-    /// decided by whatever produces the value. Usually the value is already
-    /// there and the question does not arise; when it comes from a join
-    /// that solves later, its witnesses are the only thing that knows, so
-    /// they are asked here rather than guessed at.
-    ///
-    /// ANY unsafe witness is enough, and that is the least upper bound
-    /// rather than a lenient approximation of one: a safe `fn` converts to
-    /// an `unsafe fn` and nothing converts back, so a join with one unsafe
-    /// leaf can only be an `unsafe fn`. Guessing safe instead is what made
-    /// `let g = if c { read } else { read }; g(p, n)` refuse a value every
-    /// branch actually produced, blaming a shape nothing in the source
-    /// asked for.
-    ///
-    /// The question is transitive, because joins are: a witness that is
-    /// itself a free variable can be another pending join's result (`let h
-    /// = if d { read } else { read }; let g = if c { h } else { h };`), and
-    /// stopping at the first hop would mint `safe` for exactly the program
-    /// above one `let` further away. Witnesses that are free variables no
-    /// pending join fills contribute nothing, as before.
-    pub(crate) fn pending_join_mints_unsafe_fn(
-        &self,
-        table: &mut InPlaceUnificationTable<TyVar>,
-        var: TyVar,
-    ) -> bool {
-        // Collected first: `resolve_shallow` needs the table mutably, and
-        // the joins live behind `&self`.
-        let candidates: Vec<(Ty, Vec<Ty>)> = self
-            .joins
-            .iter()
-            .map(|join| {
-                (
-                    join.result.clone(),
-                    join.witnesses.iter().map(|w| w.ty.clone()).collect(),
-                )
-            })
-            .collect();
-        let mut seen = FxHashSet::default();
-        let mut pending = vec![table.find(var)];
-        while let Some(root) = pending.pop() {
-            if !seen.insert(root) {
-                continue;
-            }
-            for (result, witnesses) in &candidates {
-                if !matches!(resolve_shallow(table, result), Ty::Infer(v) if table.find(v) == root)
-                {
-                    continue;
-                }
-                for ty in witnesses {
-                    match resolve_shallow(table, ty) {
-                        Ty::Fn(f) if f.unsafe_to_call => return true,
-                        // Another join's result, most likely — follow it.
-                        // A free variable nothing fills adds no root and so
-                        // says nothing either way.
-                        Ty::Infer(w) => pending.push(table.find(w)),
-                        _ => {}
-                    }
-                }
-            }
-        }
-        false
-    }
-
     pub(crate) fn take_region_edges(&mut self) -> Vec<RegionConstraint> {
         std::mem::take(&mut self.region_edges)
     }
@@ -418,18 +372,22 @@ impl Constraints {
     pub(crate) fn snapshot(
         &mut self,
         table: &mut InPlaceUnificationTable<TyVar>,
-    ) -> (Snapshot<InPlace<TyVar>>, usize) {
+    ) -> ConstraintSnapshot {
         self.snapshot_depth += 1;
-        (table.snapshot(), self.region_edges.len())
+        ConstraintSnapshot {
+            table: table.snapshot(),
+            region_edges: self.region_edges.len(),
+            safety_edges: self.safety_edges.clone(),
+        }
     }
 
     pub(crate) fn commit(
         &mut self,
         table: &mut InPlaceUnificationTable<TyVar>,
-        (snapshot, _): (Snapshot<InPlace<TyVar>>, usize),
+        snapshot: ConstraintSnapshot,
     ) {
         self.snapshot_depth -= 1;
-        table.commit(snapshot);
+        table.commit(snapshot.table);
     }
 
     /// Undo a speculative unification — INCLUDING any obligations it
@@ -437,11 +395,13 @@ impl Constraints {
     pub(crate) fn rollback_to(
         &mut self,
         table: &mut InPlaceUnificationTable<TyVar>,
-        (snapshot, edges): (Snapshot<InPlace<TyVar>>, usize),
+        snapshot: ConstraintSnapshot,
     ) {
         self.snapshot_depth -= 1;
-        table.rollback_to(snapshot);
-        self.region_edges.truncate(edges);
+        table.rollback_to(snapshot.table);
+        self.region_edges.truncate(snapshot.region_edges);
+        // Copied whole: deciding a safety spends edges, not only adds them.
+        self.safety_edges = snapshot.safety_edges;
     }
 
     pub(crate) fn region_count(&self) -> u32 {
@@ -866,20 +826,22 @@ impl Constraints {
             // mixing, an ordinary type mismatch (no conversions in v1).
             (Ty::Int(k1), Ty::Int(k2)) => k1 == k2,
             // Exact, like everything else here, and that includes the
-            // SAFETY flag: `fn(usize)` and `unsafe fn(usize)` are two types,
+            // SAFETY: `fn(usize)` and `unsafe fn(usize)` are two types,
             // and going from the first to the second is a directed
-            // conversion applied at check sites (`InferCtx::check`), never
-            // an equation: inferring it backwards through a variable would
-            // let an `unsafe fn` arrive where a safe one was promised.
+            // conversion applied at check sites ([`Self::relate_value`]),
+            // never an equation: inferring it backwards through a variable
+            // would let an `unsafe fn` arrive where a safe one was promised.
             (Ty::Fn(f1), Ty::Fn(f2)) => {
-                f1.unsafe_to_call == f2.unsafe_to_call && f1.params.len() == f2.params.len() && {
-                    let params_ok = f1
-                        .params
-                        .iter()
-                        .zip(&f2.params)
-                        .all(|(p1, p2)| self.unify(table, p1, p2, cause));
-                    params_ok && self.unify(table, &f1.ret, &f2.ret, cause)
-                }
+                f1.params.len() == f2.params.len()
+                    && self.unify_safety(table, f1.safety, f2.safety)
+                    && {
+                        let params_ok = f1
+                            .params
+                            .iter()
+                            .zip(&f2.params)
+                            .all(|(p1, p2)| self.unify(table, p1, p2, cause));
+                        params_ok && self.unify(table, &f1.ret, &f2.ret, cause)
+                    }
             }
             // Exact and equational: same mutability, pointwise pointee. No
             // variance (nothing to be variant over without subtyping), and
@@ -982,48 +944,146 @@ impl Constraints {
             })
     }
 
-    /// SAFE `fn` → `unsafe fn`, the one directed conversion on function
-    /// types — applied where unification has already failed, at both check
-    /// sites (a direct one in `InferCtx::check`, and a join's witness loop
-    /// below). ONE home, because two would drift: `hir::widens_to` answers
-    /// the same question for the editor's ranker and has no table to relate
-    /// through, so it stays the predicate and this stays the operation.
-    ///
-    /// Written as "relate `actual` against the expectation MADE SAFE"
-    /// rather than as a shape comparison, so parameters and results still
-    /// unify — an expectation may be `unsafe fn(usize) -> _`, and a generic
-    /// instantiated here still gets its variables pinned.
-    ///
-    /// ONE-WAY by construction: the mirrored case does not exist, so an
-    /// `unsafe fn` in a safe `fn` position falls through to the ordinary
-    /// mismatch, whose two rendered types differ by the one token that is
-    /// the whole story. Returns `true` when the conversion applied; there
-    /// is nothing to hand back, because it converts no bits — a caller
-    /// records no edge for MIR.
-    pub(crate) fn coerce_fn_to_unsafe(
+    /// A value meeting its expected type at a check site: [`Self::relate`],
+    /// except that function types relate their safety by `actual <=
+    /// expected` ([`Self::coerce_safety`]). A free side meeting a function
+    /// gets a safety of its own, since an `unsafe fn` position only says the
+    /// value MAY be unsafe (#168).
+    pub(crate) fn relate_value(
         &mut self,
         table: &mut InPlaceUnificationTable<TyVar>,
         actual: &Ty,
         expected: &Ty,
         origin: ExprId,
-    ) -> bool {
-        let (Ty::Fn(a), Ty::Fn(b)) = (
+        cause: Option<Cause>,
+    ) -> Relation {
+        let related = match (
             resolve_shallow(table, actual),
             resolve_shallow(table, expected),
-        ) else {
-            return false;
+        ) {
+            (Ty::Fn(a), Ty::Fn(b)) => {
+                let target = b.with_safety(a.safety);
+                self.relate(table, actual, &target, origin, cause)
+                    .then_some((a.safety, b.safety))
+            }
+            (free, Ty::Fn(b)) if is_free(table, &free) => {
+                let own = Safety::Infer(table.new_key(TyVarValue::Unknown));
+                let target = b.with_safety(own);
+                self.relate(table, actual, &target, origin, cause)
+                    .then_some((own, b.safety))
+            }
+            (Ty::Fn(a), free) if is_free(table, &free) => {
+                // The position adopts the value's shape wholesale, so there
+                // are no regions to relate; only the safety is its own.
+                let own = Safety::Infer(table.new_key(TyVarValue::Unknown));
+                self.unify(table, expected, &a.with_safety(own), cause)
+                    .then_some((a.safety, own))
+            }
+            _ => {
+                return if self.relate(table, actual, expected, origin, cause) {
+                    Relation::Equal
+                } else {
+                    Relation::Mismatch
+                };
+            }
         };
-        if a.unsafe_to_call || !b.unsafe_to_call {
-            return false;
+        let Some((sub, sup)) = related else {
+            return Relation::Mismatch;
+        };
+        if !self.coerce_safety(table, sub, sup) {
+            Relation::Mismatch
+        } else if resolve_safety(table, sub) == resolve_safety(table, sup) {
+            Relation::Equal
+        } else {
+            Relation::Converted
         }
-        let expected_safe = Ty::fn_type(b.params.clone(), b.ret.clone());
-        self.relate(table, actual, &expected_safe, origin, None)
-        // NOT recorded on the expression: the caller returns the EXPECTED
-        // type, so hover past a converted edge reads `unsafe fn(...)` — the
-        // type the value has in the position it landed in. That is a
-        // decision: the conversion happens HERE, and showing the
-        // pre-conversion type would describe a type the value does not
-        // have in that position.
+    }
+
+    /// Two safeties that must be EQUAL — two fn types unifying.
+    fn unify_safety(
+        &mut self,
+        table: &mut InPlaceUnificationTable<TyVar>,
+        a: Safety,
+        b: Safety,
+    ) -> bool {
+        match (resolve_safety(table, a), resolve_safety(table, b)) {
+            (Safety::Infer(x), Safety::Infer(y)) => {
+                table.union(x, y);
+                true
+            }
+            (Safety::Infer(var), known) | (known, Safety::Infer(var)) => {
+                self.decide_safety(table, var, known)
+            }
+            (a, b) => a == b,
+        }
+    }
+
+    /// `actual <= expected` on the two-point lattice `safe <= unsafe`: the
+    /// safe-to-unsafe conversion. Decides a variable only when the other
+    /// side forces it; two open variables keep an edge, so the conversion
+    /// stays directed whichever side is decided later.
+    pub(crate) fn coerce_safety(
+        &mut self,
+        table: &mut InPlaceUnificationTable<TyVar>,
+        actual: Safety,
+        expected: Safety,
+    ) -> bool {
+        match (
+            resolve_safety(table, actual),
+            resolve_safety(table, expected),
+        ) {
+            (Safety::Safe, _) | (_, Safety::Unsafe) => true,
+            (Safety::Unsafe, Safety::Safe) => false,
+            (Safety::Unsafe, Safety::Infer(var)) => self.decide_safety(table, var, Safety::Unsafe),
+            (Safety::Infer(var), Safety::Safe) => self.decide_safety(table, var, Safety::Safe),
+            (Safety::Infer(sub), Safety::Infer(sup)) => {
+                if !table.unioned(sub, sup) {
+                    self.safety_edges.push((sub, sup));
+                }
+                true
+            }
+        }
+    }
+
+    /// Decide an open safety variable to `Safe` or `Unsafe`, and through the
+    /// edges whatever that forces. False when an edge contradicts it: some
+    /// value flows from an `unsafe fn` into a position decided safe.
+    fn decide_safety(
+        &mut self,
+        table: &mut InPlaceUnificationTable<TyVar>,
+        var: TyVar,
+        decided: Safety,
+    ) -> bool {
+        table.union_value(var, TyVarValue::Safety(decided));
+        // Only the edges touching `var` can fire, and each one that fires
+        // decides its other end or fails, so it is spent.
+        let root = table.find(var);
+        let (fired, kept): (Vec<_>, Vec<_>) = std::mem::take(&mut self.safety_edges)
+            .into_iter()
+            .partition(|&(sub, sup)| table.find(sub) == root || table.find(sup) == root);
+        self.safety_edges = kept;
+        fired.into_iter().fold(true, |ok, (sub, sup)| {
+            self.coerce_safety(table, Safety::Infer(sub), Safety::Infer(sup)) && ok
+        })
+    }
+
+    /// Close a body's safety constraints once its joins have solved. Each of
+    /// `called` (a call outside `unsafe { }`) still open becomes safe; one already
+    /// `unsafe` is `unsafe_check`'s to report. Each edge still open at both ends
+    /// becomes an equation, since the edge dies with the body.
+    pub(crate) fn settle_safety(
+        &mut self,
+        table: &mut InPlaceUnificationTable<TyVar>,
+        called: Vec<Safety>,
+    ) {
+        for safety in called {
+            if let Safety::Infer(var) = resolve_safety(table, safety) {
+                self.decide_safety(table, var, Safety::Safe);
+            }
+        }
+        for (sub, sup) in std::mem::take(&mut self.safety_edges) {
+            self.unify_safety(table, Safety::Infer(sub), Safety::Infer(sup));
+        }
     }
 
     /// Solve all deferred joins, emitting blame-attributed diagnostics.
@@ -1084,15 +1144,18 @@ impl Constraints {
                 // A leaf with a poisoned part votes only when no clean leaf
                 // does: `{error}` matches any family, but two poisoned leaves
                 // of different shapes disagree.
-                let clean_vote = leaves
-                    .iter()
-                    .any(|(_, ty)| !ty.contains_infer() && !ty.contains_error());
+                let clean_vote = leaves.iter().any(|(_, ty)| {
+                    !ty.contains_infer() && !ty.has_open_safety() && !ty.contains_error()
+                });
                 for (_, ty) in &leaves {
                     // A leaf with ANY undetermined part doesn't vote: two
                     // `[{number}; 2]`s must end up unified (the tie-them-
                     // together path below), never counted as two distinct
                     // families.
+                    // An open safety is undetermined too: it would fit
+                    // either family, so it decides neither.
                     if ty.contains_infer()
+                        || ty.has_open_safety()
                         || matches!(ty, Ty::Error)
                         || (clean_vote && ty.contains_error())
                     {
@@ -1106,9 +1169,20 @@ impl Constraints {
                 }
                 let Some(max) = tally.iter().map(|&(_, n)| n).max() else {
                     // Every leaf is still free: tie them together and let
-                    // downstream axioms (or a caller) decide.
+                    // downstream axioms (or a caller) decide. A function
+                    // leaf keeps its own safety, related to the result's.
                     for witness in &join.witnesses {
-                        self.adopt(table, &join.result, &witness.ty, None);
+                        if matches!(resolve_shallow(table, &witness.ty), Ty::Fn(_)) {
+                            self.relate_value(
+                                table,
+                                &witness.ty,
+                                &join.result,
+                                witness.blame,
+                                None,
+                            );
+                        } else {
+                            self.adopt(table, &join.result, &witness.ty, None);
+                        }
                     }
                     return;
                 };
@@ -1131,10 +1205,8 @@ impl Constraints {
                 // key is: differing regions are not differing types, so
                 // they must not send this down the nominal path (which
                 // would be unreachable for a borrow family).
-                let winner = if winners
-                    .iter()
-                    .all(|(_, ty)| ty.erase_regions() == winners[0].1.erase_regions())
-                {
+                let first = winners[0].1.erase_regions();
+                let winner = if winners.iter().all(|(_, ty)| ty.erase_regions() == first) {
                     // A voted BORROW result gets a FRESH region, not the
                     // first branch's. `if c { p } else { q }` produces a
                     // borrow good for as long as BOTH branches are — the
@@ -1240,28 +1312,17 @@ impl Constraints {
                     // Invariant, both directions, because a borrow UNDER a
                     // type constructor is not being formed — it is being
                     // required to be the same type.
-                    if self.relate(table, &witness.ty, &expected, witness.blame, None) {
+                    match self.relate_value(table, &witness.ty, &expected, witness.blame, None) {
                         // Hint on the tail sub-expression that produced the
                         // type, not the whole branch.
-                        siblings.push(Cause::Branch(witness.blame));
-                    } else if self.coerce_fn_to_unsafe(table, &witness.ty, &expected, witness.blame)
-                    {
-                        // A SAFE fn leaf meeting an `unsafe fn` context —
-                        // the second check site the direct one has, and it
-                        // was missing here for the reason the reborrow arm
-                        // above was missing before it: a join is a check
-                        // site, and every conversion a direct check
-                        // performs it must perform too, or wrapping a value
-                        // in an `if` changes what the language accepts.
-                        // Records nothing: this converts no bits, so there
-                        // is no edge for MIR to act on.
-                        //
-                        // Not a sibling: "this branch has type
-                        // `unsafe fn(...)`" would lie about a leaf that is
-                        // a safe `fn`.
-                        coerced += 1;
-                    } else {
-                        culprits.push((witness, actual));
+                        Relation::Equal => siblings.push(Cause::Branch(witness.blame)),
+                        // A SAFE fn leaf meeting an `unsafe fn` context: a
+                        // join is a check site, and every conversion a
+                        // direct check performs it must perform too. Not a
+                        // sibling: "this branch has type `unsafe fn(...)`"
+                        // would lie about a leaf that is a safe `fn`.
+                        Relation::Converted => coerced += 1,
+                        Relation::Mismatch => culprits.push((witness, actual)),
                     }
                 }
             }
@@ -1357,6 +1418,23 @@ fn family_of(ty: &Ty) -> Family {
     }
 }
 
+/// An unbound plain type variable (not a number-class one).
+fn is_free(table: &mut InPlaceUnificationTable<TyVar>, ty: &Ty) -> bool {
+    matches!(ty, Ty::Infer(var) if matches!(table.probe_value(*var), TyVarValue::Unknown))
+}
+
+/// A safety with its variable, if decided, replaced by the decision; an
+/// open one by its root.
+pub(crate) fn resolve_safety(table: &mut InPlaceUnificationTable<TyVar>, safety: Safety) -> Safety {
+    match safety {
+        Safety::Infer(var) => match table.probe_value(var) {
+            TyVarValue::Safety(decided) => decided,
+            _ => Safety::Infer(table.find(var)),
+        },
+        known => known,
+    }
+}
+
 /// The tie diagnostic: the first leaf against the first one that concretely
 /// disagrees with it (for a plain `if` that is then vs. else).
 fn push_tie_mismatch(leaves: &[(ExprId, Ty)], diagnostics: &mut Vec<InferenceDiagnostic>) {
@@ -1400,6 +1478,7 @@ pub(crate) fn resolve_shallow(table: &mut InPlaceUnificationTable<TyVar>, ty: &T
         match table.probe_value(var) {
             TyVarValue::Known(known) => ty = known,
             TyVarValue::Unknown | TyVarValue::UnknownNumber => break,
+            TyVarValue::Safety(_) => unreachable!("a type variable holds a safety"),
         }
     }
     ty
@@ -1461,11 +1540,13 @@ pub(crate) fn resolve_fully(table: &mut InPlaceUnificationTable<TyVar>, ty: &Ty)
             // number flavor stays in the table here — `resolve_finished`
             // is the one place it becomes a rendered `{number}`.
             TyVarValue::Unknown | TyVarValue::UnknownNumber => Ty::Infer(table.find(*var)),
+            TyVarValue::Safety(_) => unreachable!("a type variable holds a safety"),
         },
         Ty::Fn(f) => {
             let params = f.params.iter().map(|p| resolve_fully(table, p)).collect();
             let ret = resolve_fully(table, &f.ret);
-            f.rebuilt(params, ret)
+            let safety = resolve_safety(table, f.safety);
+            Ty::fn_type_safety(safety, params, ret)
         }
         Ty::RawPtr { mutable, pointee } => Ty::raw_ptr(*mutable, resolve_fully(table, pointee)),
         // The REGION is carried through untouched: it is not this table's
@@ -1509,7 +1590,9 @@ fn render_unresolved_numbers(table: &mut InPlaceUnificationTable<TyVar>, ty: &Ty
             TyVarValue::UnknownNumber => Ty::UnresolvedNumber,
             _ => ty.clone(),
         },
-        Ty::Fn(f) => f.rebuilt(
+        // A safety nothing decided is safe: the least solution.
+        Ty::Fn(f) => Ty::fn_type_with(
+            f.unsafe_to_call(),
             f.params
                 .iter()
                 .map(|p| render_unresolved_numbers(table, p))
@@ -1574,6 +1657,7 @@ fn occurs(table: &mut InPlaceUnificationTable<TyVar>, var: TyVar, ty: &Ty) -> bo
             match table.probe_value(*other) {
                 TyVarValue::Known(known) => occurs(table, var, &known),
                 TyVarValue::Unknown | TyVarValue::UnknownNumber => false,
+                TyVarValue::Safety(_) => unreachable!("a type variable holds a safety"),
             }
         }
         Ty::Fn(f) => f.params.iter().any(|p| occurs(table, var, p)) || occurs(table, var, &f.ret),
