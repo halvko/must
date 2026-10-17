@@ -54,8 +54,10 @@ pub(crate) fn lower_item(db: &dyn Db, item: ItemId<'_>) -> MirLowered {
         let ty = ctx.ty(root);
         ctx.lower_fn(&[], root, ty)
     });
+    let mut bodies = ctx.bodies;
+    crate::cfg::inherit_closure_places(&mut bodies);
     MirLowered {
-        bodies: ctx.bodies,
+        bodies,
         root,
         const_blocks: ctx.const_blocks,
         const_args: ctx.const_args,
@@ -713,6 +715,7 @@ impl LowerCtx<'_> {
             params: b.params,
             entry: b.entry,
             outer,
+            outer_closures: Vec::new(),
         })
     }
 
@@ -1613,28 +1616,12 @@ impl LowerCtx<'_> {
                 // of its binder's bounds.
                 let with_dicts = Some(expr) == self.body.root
                     && hir::dict_param_count(self.db, self.loc.file, self.own_generics) > 0;
-                // A closure's outer places (#175). One that holds a closure
-                // itself is refused: its captures are not this body's to
-                // see, so a call of it could not be checked against the
-                // loans this body holds.
+                // A closure's outer places (#175). What the closures they
+                // hold reach is filled in once the whole item is lowered
+                // (`cfg::inherit_closure_places`).
                 let captures = hir::captures::closure_captures(self.db, self.item)
                     .of(expr)
                     .to_vec();
-                if let Some(capture) = captures.iter().find(|capture| {
-                    self.infer
-                        .type_of_binding
-                        .get(capture.binding)
-                        .is_some_and(Ty::may_hold_closure)
-                }) {
-                    let name = self.body.bindings[capture.binding]
-                        .written_name()
-                        .unwrap_or_default()
-                        .to_owned();
-                    let diag = MirDiagnostic::ReachesClosure { expr, name };
-                    let message = diag.message();
-                    self.diagnostics.push(diag);
-                    return self.trap(b, expr, message);
-                }
                 let saved = std::mem::replace(&mut self.initializer_context, false);
                 let body_id = self.lower_fn_inner(params, *fn_body, ret_ty, with_dicts, &captures);
                 self.initializer_context = saved;
@@ -1667,6 +1654,7 @@ impl LowerCtx<'_> {
                             projection: lead.into_iter().collect(),
                         },
                         mutable: capture.mutable,
+                        binding: capture.binding,
                     });
                 }
                 let dest = b.temp(self.ty(expr));
@@ -3459,6 +3447,7 @@ impl LowerCtx<'_> {
             params: b.params,
             entry: b.entry,
             outer: Vec::new(),
+            outer_closures: Vec::new(),
         })
     }
 

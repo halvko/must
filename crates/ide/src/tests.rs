@@ -619,20 +619,27 @@ fn highlights_character_literals_as_strings() {
 
 #[test]
 fn diagnostics_include_mir_findings() {
-    // Which closures a place holds is invisible to name resolution and
-    // inference — only MIR lowering refuses a closure reaching one.
+    // Whether a closure moves out of a place it reaches is invisible to
+    // name resolution and inference — only MIR lowering refuses it.
     let (analysis, file, _pos) = fixture(
-        "static f = fn () -> usize { let a = 1; let g = fn () -> usize { a }; let h = fn () -> usize { g$0() }; h() };",
+        "type Tok = struct { n: usize } only move; static f = fn () -> Tok { let t = Tok(struct { n = 3 }); let take = fn () -> Tok { t$0 }; take() };",
     );
     let diagnostics = analysis.diagnostics(file);
-    assert_eq!(diagnostics.len(), 1);
+    // The linear check's findings about `t` come too; the MIR one is
+    // on the `t` the closure moves out.
+    let mir: Vec<_> = diagnostics
+        .iter()
+        .filter(|d| d.message.starts_with("cannot move"))
+        .map(|d| (u32::from(d.range.start()), d.message.as_str()))
+        .collect();
     assert_eq!(
-        diagnostics[0].message,
-        "this closure reaches `g`, which holds a closure; a closure that reaches another \
-         closure is not supported yet"
+        mir,
+        [(
+            125,
+            "cannot move `t` out of the enclosing function: a closure only borrows the places \
+             it reaches, for the length of each call"
+        )]
     );
-    // On the `fn` literal that reaches `g`.
-    assert_eq!(u32::from(diagnostics[0].range.start()), 77);
 }
 
 /// A member's loan findings are reported with the file's diagnostics.

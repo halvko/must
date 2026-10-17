@@ -627,6 +627,13 @@ struct Loan {
     flows_everywhere: bool,
 }
 
+/// Where two closures handed to one call overlap: a place of this body,
+/// or a binding of an enclosing one that both reach out of its sight.
+enum Overlap {
+    Place(Place),
+    Binding(BindingId),
+}
+
 /// What a loan was minted by.
 #[derive(Clone, Copy)]
 enum Mint {
@@ -682,7 +689,7 @@ struct BodyCheck<'a> {
     /// point here like a universal does (#175).
     outer_universals: Vec<u32>,
     /// The closures this body binds, and which locals may hold them.
-    closures: cfg::ClosureFlow<'a>,
+    closures: cfg::ClosureFlow,
 }
 
 impl<'a> BodyCheck<'a> {
@@ -966,7 +973,7 @@ impl<'a> BodyCheck<'a> {
         &self,
         callee: &Operand,
         args: &[Operand],
-    ) -> Option<(usize, usize, Place)> {
+    ) -> Option<(usize, usize, Overlap)> {
         let handed: Vec<&[usize]> = std::iter::once(callee)
             .chain(args)
             .map(|op| self.closures.held_by(op))
@@ -985,7 +992,16 @@ impl<'a> BodyCheck<'a> {
                                     && px.local == py.local
                                     && paths_overlap(&px.projection, &py.projection)
                                 {
-                                    return Some((a, b, px));
+                                    return Some((a, b, Overlap::Place(px)));
+                                }
+                            }
+                        }
+                        // A place out of this body's sight, which held
+                        // closures may both reach.
+                        for (x, x_mut) in self.closures.bindings(a) {
+                            for (y, y_mut) in self.closures.bindings(b) {
+                                if x == y && (x_mut || y_mut) {
+                                    return Some((a, b, Overlap::Binding(x)));
                                 }
                             }
                         }
@@ -1592,7 +1608,15 @@ impl<'a> BodyCheck<'a> {
                     out.report(point, &mut overlapping, call, || {
                         Some(LoanDiagnostic::ClosuresOverlap {
                             call,
-                            place: self.render_place(&place, false),
+                            place: match &place {
+                                Overlap::Place(place) => self.render_place(place, false),
+                                Overlap::Binding(binding) => format!(
+                                    "`{}`",
+                                    self.hir_body.bindings[*binding]
+                                        .written_name()
+                                        .unwrap_or_default()
+                                ),
+                            },
                             first: self.closures.origin(first),
                             second: self.closures.origin(second),
                         })

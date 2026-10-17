@@ -405,7 +405,7 @@ struct BodyCheck<'a> {
     scratch: RefCell<State>,
     /// The closures this body binds, and which locals may hold them: a
     /// call through one, or handed one, uses the places it reaches.
-    closures: cfg::ClosureFlow<'a>,
+    closures: cfg::ClosureFlow,
 }
 
 impl<'a> BodyCheck<'a> {

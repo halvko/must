@@ -6780,3 +6780,66 @@ static f = fn() -> usize {
         "#]],
     );
 }
+
+/// A closure reaching a closure of the same body also borrows the held
+/// closure's places for each call, after its own; the one the held
+/// closure writes, `.&mut`. Its body learns nothing new: it reaches
+/// nothing the held closure does.
+#[test]
+fn a_closure_inherits_the_places_of_a_closure_it_reaches() {
+    check_mir(
+        "static f = fn () -> usize { let mut a: usize = 1; let g = fn () -> () { a = 2; }; let h = fn () -> () { g(); }; h(); a };",
+        expect![[r#"
+            item f:
+            fn b0(_1: usize.&mut) -> () {
+              _0: ()  // return
+              _1: usize.&mut  // param a
+              bb0:
+                _1.* = 2
+                _0 = ()
+                return
+            }
+            fn b1(_1: fn().&) -> () {
+              _0: ()  // return
+              _1: fn().&  // param g
+              _2: fn()
+              _3: ()
+              bb0:
+                _2 = _1.*
+                _3 = call _2() -> bb1
+              bb1:
+                _0 = ()
+                return
+            }
+            fn b2() -> usize {
+              _0: usize  // return
+              _1: usize  // a
+              _2: fn()
+              _3: fn()  // g
+              _4: fn()
+              _5: fn()  // h
+              _6: fn()
+              _7: ()
+              _8: usize
+              bb0:
+                _1 = 1
+                _2 = closure b0(&mut _1)
+                _3 = _2
+                _4 = closure b1(&_3, &mut _1)
+                _5 = _4
+                _6 = _5
+                _7 = call _6() -> bb1
+              bb1:
+                _8 = _1
+                _0 = _8
+                return
+            }
+            fn b3() -> fn() -> usize {
+              _0: fn() -> usize  // return
+              bb0:
+                _0 = fn b2
+                return
+            }
+        "#]],
+    );
+}
