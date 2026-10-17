@@ -204,12 +204,15 @@ jobs:
             echo "You have reviewed this PR before, at $last, so this is a later round. $since"
             echo "Do both: check whether each of your earlier findings was fixed, and review"
             echo "what changed since then for new problems, including ones the fixes brought."
-            echo "Where a fix falls short, or someone answered a finding and you still"
-            echo "disagree, reply in that thread rather than opening a new one. On code"
-            echo "that has not changed, raise only real defects, not points an earlier"
-            echo "round could have raised, and never add a second finding on a line where"
-            echo "you already have one. If nothing new reaches that bar, say \"No new"
-            echo "findings\" in one line."
+            echo "Judge a fix by the head's code: a commit named in a reply may since have"
+            echo "been squashed into another, so its absence from \`git log\` says nothing."
+            echo "Where a fix falls short, reply in that thread rather than opening a new"
+            echo "one. Where someone declined a finding with a reason, that settles it;"
+            echo "reply only if the reason is wrong about the code, and do not mark it"
+            echo "open. On code that has not changed, raise only real defects, not points"
+            echo "an earlier round could have raised, and never add a second finding on a"
+            echo "line where you already have one. If nothing new reaches that bar, say"
+            echo "\"No new findings\" in one line."
             echo "$delim"
           } >> "$GITHUB_OUTPUT"
       # The reviewer's own inline threads in full, and a line for each other
@@ -293,8 +296,9 @@ jobs:
             reply there (asked for, accepted, or declined with a reason) is not
             a finding, unless the code has changed since in a way that reopens
             it. Do not repeat a finding an earlier review round already posted;
-            if it is still unaddressed, list it once in your summary as still
-            open, with no new inline comment.
+            if it is still unaddressed, reply in its thread saying what is
+            still wrong, with no new inline comment, and mark the reply open:
+            that reopens the thread so the PR cannot merge over it.
 
             ${{ steps.threads.outputs.text }}
 
@@ -310,8 +314,9 @@ jobs:
               finding, `{"path": "<repo-relative file>", "line": <line in the
               head version, on a line the diff shows>, "body": "<the finding>"}`,
               and one per reply in an existing thread, `{"reply_to": <id of the
-              comment you answer>, "body": "<your reply>"}`, or `[]` if there
-              are none.
+              comment you answer>, "body": "<your reply>", "open": true}`, with
+              `"open": true` only when your finding there is still unaddressed
+              or its fix falls short, or `[]` if there are none.
             - `review-summary.md`: the findings in a sentence each, then any
               earlier findings still open, or one line saying there are none.
               No heading; the workflow adds one.
@@ -479,14 +484,46 @@ jobs:
             [ -s "$f" ] || continue
             jq -c --arg r "$role" '[.[]? | objects
               | select((.reply_to | type) == "number" and (.body | type) == "string")
-              | {reply_to, body: ("**\($r):** " + (.body | sub("^(\\*\\*\($r):\\*\\* *)+"; "") | gsub("<!--"; "&lt;!--")))}]' "$f" \
+              | {reply_to: (.reply_to | tostring), open: (.open == true), role: $r, body: ("**\($r):** " + (.body | sub("^(\\*\\*\($r):\\*\\* *)+"; "") | gsub("<!--"; "&lt;!--")))}]' "$f" \
               || echo '[]'
           done | jq -sc 'add // []')
+          # A reply that marks its finding still open reopens the resolved
+          # thread its reviewer started, so the review gate counts it again.
+          post_replies() {
+            [ "$replies" = "[]" ] && return
+            # Comment ids outgrow GraphQL's Int, so they are compared as the
+            # strings `fullDatabaseId` gives.
+            raw=$(gh api graphql --paginate -F owner="${REPO%/*}" -F name="${REPO#*/}" -F pr="$PR" -f query='
+              query($owner: String!, $name: String!, $pr: Int!, $endCursor: String) {
+                repository(owner: $owner, name: $name) {
+                  pullRequest(number: $pr) {
+                    reviewThreads(first: 100, after: $endCursor) {
+                      pageInfo { hasNextPage endCursor }
+                      nodes { id isResolved comments(first: 100) { nodes { fullDatabaseId body author { __typename login } } } }
+                    }
+                  }
+                }
+              }' --jq '.data.repository.pullRequest.reviewThreads.nodes[]
+                | select(.isResolved and (.comments.nodes[0]
+                  | .author.__typename == "Bot" and .author.login == "github-actions"))
+                | {id, root: .comments.nodes[0].body, comments: [.comments.nodes[].fullDatabaseId]}') \
+              || { echo "could not read the review threads"; raw=''; }
+            threads=$(jq -sc . <<< "$raw")
+            jq -c ".[]" <<< "$replies" | while read -r reply; do
+              to=$(jq -r .reply_to <<< "$reply")
+              gh api -X POST "repos/$REPO/pulls/$PR/comments/$to/replies" \
+                -f body="$(jq -r .body <<< "$reply")" > /dev/null || { echo "could not post a reply"; continue; }
+              thread=$(jq -r --argjson reply "$reply" 'if $reply.open then
+                map(select((.comments | index($reply.reply_to))
+                  and (.root | startswith("**\($reply.role):**")))) | .[0].id // empty
+                else empty end' <<< "$threads")
+              [ -z "$thread" ] || gh api graphql -F id="$thread" \
+                -f query='mutation($id: ID!) { unresolveReviewThread(input: {threadId: $id}) { thread { id } } }' \
+                > /dev/null || echo "could not reopen thread $thread"
+            done
+          }
           # Replies come after the review, so it lands as one event.
-          trap 'jq -c ".[]" <<< "$replies" | while read -r reply; do
-            gh api -X POST "repos/$REPO/pulls/$PR/comments/$(jq .reply_to <<< "$reply")/replies" \
-              -f body="$(jq -r .body <<< "$reply")" > /dev/null || echo "could not post a reply"
-          done' EXIT
+          trap post_replies EXIT
           [ "$findings" = "[]" ] && exit 0
           review=$(mktemp)
           jq -n --arg sha "$SHA" --argjson c "$findings" '{commit_id: $sha,
