@@ -366,10 +366,11 @@ pub enum InferenceDiagnostic {
         name: String,
         receiver_ty: Ty,
     },
-    /// A field access whose receiver's type is still undetermined when the
-    /// access is checked. Structural records use exact equality, so a field
-    /// name can never determine the receiver's type backwards — the way out
-    /// is an annotation.
+    /// A field access (or index, or deref) whose receiver's type nothing
+    /// determined. Structural records use exact equality, so a field name
+    /// can never determine the receiver's type backwards — the way out is
+    /// an annotation. A field access or index waits for the rest of the
+    /// body and the item's inference group first ([`DeferredProjection`]).
     FieldOnUnknownType {
         /// The field-access expression (where MIR will trap).
         expr: ExprId,
@@ -2734,6 +2735,9 @@ pub(crate) struct InferCtx<'db> {
     /// against its resolved type — or reports the no-defining-use
     /// diagnostic when nothing ever pinned it (never defaulted — T01).
     pending_number_literals: Vec<PendingNumberLiteral>,
+    /// Field accesses and indexes waiting for their receiver's type, in
+    /// traversal order.
+    deferred_projections: Vec<DeferredProjection>,
     /// Matches that already told the user their scrutinee has no known
     /// type ([`InferenceDiagnostic::VariantPatUnknownScrutinee`], which
     /// names the fix: annotate the scrutinee). A PATTERN literal in such a
@@ -2817,6 +2821,31 @@ struct PendingObligation {
     /// `const` block): a Forward resolution there would need to capture
     /// the root body's dictionary — reserved ([`InferenceDiagnostic::NestedBoundUse`]).
     nested: bool,
+}
+
+/// A field access or index whose receiver's type was undetermined when
+/// it was checked. Its value is a fresh variable, and the projection is
+/// retried once the receiver is determined, later in the body or by a
+/// caller in the item's inference group ([`InferCtx::resolve_deferred_projections`]).
+#[derive(Debug, Clone)]
+struct DeferredProjection {
+    /// The field-access or index expression.
+    expr: ExprId,
+    /// Its receiver (the indexed base for an index).
+    receiver: ExprId,
+    receiver_ty: Ty,
+    kind: ProjectionKind,
+    /// The value's variable, the expression's type meanwhile.
+    value: Ty,
+    /// Why the value's context expects what it does, for the mismatch.
+    cause: Option<Cause>,
+}
+
+#[derive(Debug, Clone)]
+enum ProjectionKind {
+    Field(String),
+    /// The index expression, for the compile-time bounds check.
+    Index(ExprId),
 }
 
 /// One integer literal awaiting its post-traversal range/pinned check —
@@ -2947,6 +2976,7 @@ impl<'db> InferCtx<'db> {
             open_bound_vars: rustc_hash::FxHashSet::default(),
             pending_instantiations: Vec::new(),
             pending_empty_arrays: Vec::new(),
+            deferred_projections: Vec::new(),
             pending_number_literals: Vec::new(),
             unresolved_scrutinees: rustc_hash::FxHashSet::default(),
             negated_literals: rustc_hash::FxHashSet::default(),
@@ -3572,14 +3602,100 @@ impl<'db> InferCtx<'db> {
     /// body's traversal, so a body's joins are settled by the body alone,
     /// before its copies of other members' signatures are merged.
     pub(crate) fn solve(&mut self) {
+        // The body's own traversal may have determined a receiver after
+        // its projection was checked; the joins see those projections'
+        // types, and may determine further receivers in turn.
+        self.resolve_deferred_projections();
         let diagnostics = self.constraints.solve(&mut self.table);
         self.result.diagnostics.extend(diagnostics);
+        self.resolve_deferred_projections();
         let called = std::mem::take(&mut self.safe_calls);
         self.constraints.settle_safety(&mut self.table, called);
     }
 
+    /// Retry the projections whose receiver was undetermined, now that the
+    /// inference group may have determined it; whether any was projected.
+    pub(crate) fn retry_deferred_projections(&mut self) -> bool {
+        let before = self.deferred_projections.len();
+        self.resolve_deferred_projections();
+        self.deferred_projections.len() < before
+    }
+
+    /// Report each projection whose receiver nothing determined: the
+    /// annotation is the way out. Its value becomes `{error}`.
+    pub(crate) fn report_undetermined_projections(&mut self) {
+        for projection in std::mem::take(&mut self.deferred_projections) {
+            self.result
+                .diagnostics
+                .push(InferenceDiagnostic::FieldOnUnknownType {
+                    expr: projection.expr,
+                    receiver: projection.receiver,
+                });
+            self.adopt(&projection.value, &Ty::Error);
+        }
+    }
+
+    /// Whether a projection still waits for its receiver.
+    pub(crate) fn has_deferred_projections(&self) -> bool {
+        !self.deferred_projections.is_empty()
+    }
+
+    /// Defer a projection of `receiver`, whose type is undetermined; its
+    /// value is a fresh variable.
+    fn defer_projection(
+        &mut self,
+        expr: ExprId,
+        receiver: ExprId,
+        receiver_ty: Ty,
+        kind: ProjectionKind,
+        cause: Option<Cause>,
+    ) -> Ty {
+        let value = self.fresh_var();
+        self.deferred_projections.push(DeferredProjection {
+            expr,
+            receiver,
+            receiver_ty,
+            kind,
+            value: value.clone(),
+            cause,
+        });
+        value
+    }
+
+    /// Project every deferred field access or index whose receiver is
+    /// determined, repeating while any is: one projection's value can be
+    /// another's receiver (`p.q.x`). The value meets the projected type
+    /// like any checked expression, so a context that already decided the
+    /// value reports the mismatch at the projection.
+    fn resolve_deferred_projections(&mut self) {
+        loop {
+            let pending = std::mem::take(&mut self.deferred_projections);
+            let before = pending.len();
+            for projection in pending {
+                let resolved = self.resolve_shallow(&projection.receiver_ty);
+                if matches!(resolved, Ty::Infer(_)) {
+                    self.deferred_projections.push(projection);
+                    continue;
+                }
+                let ty = match &projection.kind {
+                    ProjectionKind::Field(name) => {
+                        self.field_access_ty(projection.expr, projection.receiver, name, resolved)
+                    }
+                    ProjectionKind::Index(index) => {
+                        self.index_element_ty(projection.expr, *index, resolved)
+                    }
+                };
+                self.check(projection.expr, ty, &projection.value, projection.cause);
+            }
+            if self.deferred_projections.len() == before {
+                return;
+            }
+        }
+    }
+
     pub(crate) fn finish(mut self) -> InferenceResult {
         self.solve();
+        self.report_undetermined_projections();
         // Bound obligations, after every join and axiom has spoken: each
         // resolves into a dictionary entry — a concrete impl's member set,
         // a forward of the enclosing binder's own dictionary, or an error
@@ -4962,19 +5078,25 @@ impl<'db> InferCtx<'db> {
                     Ty::Error
                 } else {
                     let resolved = self.resolve_shallow(&receiver_ty);
-                    let ty = self.field_access_ty(expr, receiver, &name, resolved);
-                    // `h.go::<usize>` NOT under call syntax: the dot selects
-                    // a FIELD, and a field has no binder — the third place
-                    // the refusal is true, and only when a field was
-                    // actually found. A dot that landed on a member
-                    // (`MemberNotCalled`), on nothing, or on a half-typed
-                    // `o.map::<` already carries its own diagnostic, and
-                    // that one is the whole story.
-                    if self.resolve_shallow(&ty).contains_error() {
-                        self.drop_member_args(&mut member_args);
+                    let ty = if matches!(resolved, Ty::Infer(_)) && member_args.is_none() {
+                        let kind = ProjectionKind::Field(name);
+                        self.defer_projection(expr, receiver, receiver_ty, kind, cause)
                     } else {
-                        self.refuse_member_args(expr, expr, |_| name.clone(), &mut member_args);
-                    }
+                        let ty = self.field_access_ty(expr, receiver, &name, resolved);
+                        // `h.go::<usize>` NOT under call syntax: the dot
+                        // selects a FIELD, and a field has no binder — the
+                        // third place the refusal is true, and only when a
+                        // field was actually found. A dot that landed on a
+                        // member (`MemberNotCalled`), on nothing, or on a
+                        // half-typed `o.map::<` already carries its own
+                        // diagnostic, and that one is the whole story.
+                        if self.resolve_shallow(&ty).contains_error() {
+                            self.drop_member_args(&mut member_args);
+                        } else {
+                            self.refuse_member_args(expr, expr, |_| name.clone(), &mut member_args);
+                        }
+                        ty
+                    };
                     self.carry_borrow_projection(expr, receiver, &ty);
                     ty
                 }
@@ -5125,49 +5247,11 @@ impl<'db> InferCtx<'db> {
                 // Indexing pins `usize` — a defining use.
                 self.infer_expr_with(index, &Ty::Int(IntKind::Usize), None);
                 let element = match self.resolve_shallow(&base_ty) {
-                    Ty::Array { elem, len } => {
-                        // Both the length and the index compile-time known
-                        // and out of bounds: squiggle here, trap at this
-                        // expression — with exactly the text the runtime
-                        // bounds check uses.
-                        if let ConstArgValue::Int(len_value) = len
-                            && let ExprData::Literal(LiteralData::Int(Some(index_value))) =
-                                &self.body.exprs[index]
-                            && *index_value >= len_value
-                        {
-                            let index_value = *index_value;
-                            self.result
-                                .diagnostics
-                                .push(InferenceDiagnostic::IndexOutOfBounds {
-                                    expr,
-                                    len: len_value,
-                                    index: index_value,
-                                });
-                        }
-                        (*elem).clone()
-                    }
-                    // Evaluating the base already diverges.
-                    Ty::Never => Ty::Never,
-                    // An undetermined base: like a field access, the
-                    // element type can't be run backwards — ask for an
-                    // annotation.
                     Ty::Infer(_) => {
-                        self.result
-                            .diagnostics
-                            .push(InferenceDiagnostic::FieldOnUnknownType {
-                                expr,
-                                receiver: base,
-                            });
-                        Ty::Error
+                        let kind = ProjectionKind::Index(index);
+                        self.defer_projection(expr, base, base_ty, kind, cause)
                     }
-                    // Errors are infectious and silent.
-                    broken if broken.contains_error() => Ty::Error,
-                    other => {
-                        self.result
-                            .diagnostics
-                            .push(InferenceDiagnostic::IndexNonArray { expr, ty: other });
-                        Ty::Error
-                    }
+                    resolved => self.index_element_ty(expr, index, resolved),
                 };
                 self.carry_borrow_projection(expr, base, &element);
                 element
@@ -5239,9 +5323,10 @@ impl<'db> InferCtx<'db> {
                     }
                     // Evaluating the receiver already diverges.
                     Ty::Never => Ty::Never,
-                    // An undetermined receiver: like a field access, the
-                    // pointee can't be run backwards — ask for an
-                    // annotation (same message, same recovery).
+                    // An undetermined receiver: the pointee can't be run
+                    // backwards — ask for an annotation (the field access
+                    // message). TODO: halvko/must#161: wait for the
+                    // receiver, as a field access does.
                     Ty::Infer(_) => {
                         self.result
                             .diagnostics
@@ -5573,10 +5658,51 @@ impl<'db> InferCtx<'db> {
         ty
     }
 
+    /// The element type of `base[index]` given the base's determined,
+    /// shallow-resolved type; reports a non-array base or a constant index
+    /// out of bounds.
+    fn index_element_ty(&mut self, expr: ExprId, index: ExprId, resolved: Ty) -> Ty {
+        match resolved {
+            Ty::Array { elem, len } => {
+                // Both the length and the index compile-time known
+                // and out of bounds: squiggle here, trap at this
+                // expression — with exactly the text the runtime
+                // bounds check uses.
+                if let ConstArgValue::Int(len_value) = len
+                    && let ExprData::Literal(LiteralData::Int(Some(index_value))) =
+                        &self.body.exprs[index]
+                    && *index_value >= len_value
+                {
+                    let index_value = *index_value;
+                    self.result
+                        .diagnostics
+                        .push(InferenceDiagnostic::IndexOutOfBounds {
+                            expr,
+                            len: len_value,
+                            index: index_value,
+                        });
+                }
+                (*elem).clone()
+            }
+            // Evaluating the base already diverges.
+            Ty::Never => Ty::Never,
+            // Every caller defers an undetermined base.
+            Ty::Infer(_) => unreachable!("an undetermined base is deferred, not projected"),
+            // Errors are infectious and silent.
+            broken if broken.contains_error() => Ty::Error,
+            other => {
+                self.result
+                    .diagnostics
+                    .push(InferenceDiagnostic::IndexNonArray { expr, ty: other });
+                Ty::Error
+            }
+        }
+    }
+
     /// The type of `receiver.name` given the receiver's SHALLOW-RESOLVED
-    /// type — the Field arm's judgement, factored out so the dot-call
-    /// path in the `Call` arm (which must decide field-vs-member before
-    /// choosing a callee) shares it verbatim.
+    /// type, for a field access and for a dot-call's field path; reports
+    /// a missing field, a member reached without a call, and a dot through
+    /// a borrow.
     fn field_access_ty(&mut self, expr: ExprId, receiver: ExprId, name: &str, resolved: Ty) -> Ty {
         // A BORROW receiver. Reaching through it to the referent's FIELDS
         // would be auto-deref, which G14 rules out absolutely — and the
@@ -5746,10 +5872,10 @@ impl<'db> InferCtx<'db> {
     ) -> Ty {
         match self.resolve_shallow(&callee_ty) {
             // The callee's type is still being inferred (an
-            // in-group signature, e.g. mutual recursion): calling
-            // it commits it to a function of this shape. A
-            // NUMBER-CLASS callee refuses the commitment — a
-            // number is not callable.
+            // in-group signature, e.g. mutual recursion, or a field whose
+            // receiver is undetermined): calling it commits it to a
+            // function of this shape. A NUMBER-CLASS callee refuses the
+            // commitment — a number is not callable.
             Ty::Infer(var) => {
                 let params: Vec<Ty> = args.iter().map(|_| self.fresh_var()).collect();
                 let ret = self.fresh_var();
@@ -6243,7 +6369,8 @@ impl<'db> InferCtx<'db> {
         }
 
         // The field path: the callee is an ordinary field access, judged
-        // by the shared helper, and the call proceeds on its value.
+        // by the shared helper, and the call proceeds on its value. TODO:
+        // halvko/must#162: wait for an undetermined receiver.
         let callee_ty = if name.is_empty() {
             Ty::Error
         } else {
