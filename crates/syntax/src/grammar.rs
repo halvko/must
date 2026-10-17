@@ -746,23 +746,22 @@ fn expr_bp(p: &mut Parser<'_>, min_bp: u8) -> Option<CompletedMarker> {
             lhs = m.complete(p, DEREF_EXPR);
             continue;
         }
-        // Postfix address-of `x.&raw` / `x.&raw mut` — the dual of `.*`,
-        // sitting in the same field-access tier so it chains greedily
-        // (`x.&raw mut.*`, `p.*.&raw mut`) — and its SAFE siblings
+        // Postfix address-of `x.&raw` — the dual of `.*`, sitting in the
+        // same field-access tier so it chains greedily (`x.&raw.*`,
+        // `p.*.&raw`) — and its SAFE siblings
         // `x.&` / `x.&mut` (DOT AMP without `raw`). Those still ACCEPT the
         // borrow operator's turbofish (`x.&mut::<@a>`) even though a
         // region there is refused: parsing the superset is what lets
         // validation name the argument and offer to delete it, rather than
-        // the parser inventing a recovery. Lexed DOT AMP [raw] [mut];
-        // checked before the plain field arm so the `.` never half-parses
-        // as a broken field access.
+        // the parser inventing a recovery. Lexed DOT AMP raw, or DOT AMP
+        // [mut]. Checked before the plain field arm so the `.` never
+        // half-parses as a broken field access.
         if p.at(DOT) && p.nth(1) == AMP {
             let m = lhs.precede(p);
             p.bump(DOT);
             p.bump(AMP);
             if p.at(RAW_KW) {
                 p.bump(RAW_KW);
-                p.eat(MUT_KW);
                 lhs = m.complete(p, ADDR_OF_EXPR);
             } else {
                 p.eat(MUT_KW);
@@ -852,9 +851,9 @@ fn primary_expr(p: &mut Parser<'_>) -> Option<CompletedMarker> {
     if p.at(ENUM_KW) && at_type_literal_body(p) {
         return Some(enum_expr(p));
     }
-    // The RETIRED prefix `&raw x` / `&raw mut x` — kept only to emit the
+    // The RETIRED prefix `&raw x` — kept only to emit the
     // migration diagnostic (see `addr_of_expr`); the live spelling is
-    // postfix `x.&raw` / `x.&raw mut`. Checked first so `raw` claims this
+    // postfix `x.&raw`. Checked first so `raw` claims this
     // shape ahead of the general prefix-borrow arm below.
     if p.at(AMP) && p.nth(1) == RAW_KW {
         return Some(addr_of_expr(p));
@@ -1331,20 +1330,19 @@ fn array_expr(p: &mut Parser<'_>) -> CompletedMarker {
     m.complete(p, ARRAY_EXPR)
 }
 
-/// The RETIRED prefix address-of `&raw x` / `&raw mut x`. The caller has
-/// already confirmed `p.at(AMP) && p.nth(1) == RAW_KW`. Raw borrows are now
-/// spelled postfix (`x.&raw` / `x.&raw mut`); the prefix form superset-parses
-/// into the same `ADDR_OF_EXPR` node (never a silent reinterpretation) so
-/// downstream keeps working, with a targeted migration diagnostic anchored on
-/// the leading `&`. The operand parses with a binding power above every
-/// binary operator, so it takes exactly a primary expression plus its postfix
-/// chain — a superset of the place expressions the language accepts.
+/// The RETIRED prefix address-of `&raw x`. The caller has already confirmed
+/// `p.at(AMP) && p.nth(1) == RAW_KW`. Raw borrows are spelled postfix
+/// (`x.&raw`); the prefix form superset-parses into the same `ADDR_OF_EXPR`
+/// node (never a silent reinterpretation) so downstream keeps working, with
+/// a targeted migration diagnostic anchored on the leading `&`. The operand
+/// parses with a binding power above every binary operator, so it takes
+/// exactly a primary expression plus its postfix chain — a superset of the
+/// place expressions the language accepts.
 fn addr_of_expr(p: &mut Parser<'_>) -> CompletedMarker {
     let m = p.start();
-    p.error("raw borrows are spelled postfix: `x.&raw` / `x.&raw mut`");
+    p.error("raw borrows are spelled postfix: `x.&raw`");
     p.bump(AMP);
     p.bump(RAW_KW);
-    p.eat(MUT_KW);
     expr_bp(p, 7);
     m.complete(p, ADDR_OF_EXPR)
 }
@@ -2218,19 +2216,18 @@ fn let_stmt(p: &mut Parser<'_>) {
 fn type_(p: &mut Parser<'_>) {
     let Some(mut lhs) = type_core(p) else { return };
     loop {
-        // Postfix raw pointer `T.&raw` / `T.&raw mut`, mirroring the
-        // expression-side postfix address-of, and the SAFE borrow types
+        // Postfix raw pointer `T.&raw`, mirroring the expression-side
+        // postfix address-of, and the SAFE borrow types
         // `T.&::<@a>` / `T.&mut::<@a>` (DOT AMP without `raw`), whose
         // region rides the borrow operator's own turbofish. Chains the same
-        // way its expression dual does (`T.&raw mut.&raw`,
-        // `T.&::<@a>.&::<@b>`). Lexed DOT AMP [raw] [mut].
+        // way its expression dual does (`T.&raw.&raw`,
+        // `T.&::<@a>.&::<@b>`). Lexed DOT AMP raw, or DOT AMP [mut].
         if p.at(DOT) && p.nth(1) == AMP {
             let m = lhs.precede(p);
             p.bump(DOT);
             p.bump(AMP);
             if p.at(RAW_KW) {
                 p.bump(RAW_KW);
-                p.eat(MUT_KW);
                 lhs = m.complete(p, RAW_PTR_TYPE);
             } else {
                 p.eat(MUT_KW);
@@ -2265,7 +2262,7 @@ fn borrow_op_generic_args(p: &mut Parser<'_>) {
 
 /// A fn type: optional `unsafe`, `fn`, an optional binder (`::<...>`), a
 /// parameter list of bare types, and an optional return type —
-/// `unsafe fn(u8.&raw mut, usize) -> isize`.
+/// `unsafe fn(u8.&raw, usize) -> isize`.
 fn anon_fn_type(p: &mut Parser<'_>) -> CompletedMarker {
     let m = p.start();
     p.eat(UNSAFE_KW);
@@ -2349,16 +2346,15 @@ fn type_core(p: &mut Parser<'_>) -> Option<CompletedMarker> {
             p.bump(BANG);
             m.complete(p, NEVER_TYPE)
         }
-        // The RETIRED prefix raw pointer type `&raw T` / `&raw mut T`. Raw
-        // pointers are now spelled postfix (`T.&raw` / `T.&raw mut`); the
-        // prefix form superset-parses into the same `RAW_PTR_TYPE` node (never
-        // a silent reinterpretation) with a migration diagnostic.
+        // The RETIRED prefix raw pointer type `&raw T`. Raw pointers are
+        // spelled postfix (`T.&raw`); the prefix form superset-parses into
+        // the same `RAW_PTR_TYPE` node (never a silent reinterpretation)
+        // with a migration diagnostic.
         AMP if p.nth(1) == RAW_KW => {
             let m = p.start();
-            p.error("raw pointer types are spelled postfix: `T.&raw` / `T.&raw mut`");
+            p.error("raw pointer types are spelled postfix: `T.&raw`");
             p.bump(AMP);
             p.bump(RAW_KW);
-            p.eat(MUT_KW);
             type_(p);
             m.complete(p, RAW_PTR_TYPE)
         }

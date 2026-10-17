@@ -328,11 +328,6 @@ impl LowerCtx<'_> {
                 InferenceDiagnostic::AddrOfNonPlace { expr, .. } => {
                     push_trap(&mut self.value_traps, *expr, diag.message());
                 }
-                InferenceDiagnostic::AddrOfMutImmutable { addr_of, .. }
-                | InferenceDiagnostic::AddrOfMutItem { addr_of, .. }
-                | InferenceDiagnostic::AddrOfMutThroughShared { addr_of, .. } => {
-                    push_trap(&mut self.value_traps, *addr_of, diag.message());
-                }
                 // The safe-borrow twins, keyed the same way: the value that
                 // cannot be produced is the borrow.
                 InferenceDiagnostic::DotThroughBorrow { expr, .. }
@@ -352,17 +347,6 @@ impl LowerCtx<'_> {
                 // other assign traps.
                 InferenceDiagnostic::AssignThroughShared { target, .. } => {
                     push_trap(&mut self.assign_traps, *target, diag.message());
-                }
-                // A flavor-polymorphic builtin (`add`/`copy`) applied
-                // to a non-pointer: the diagnostic squiggles the argument,
-                // but the operation that cannot execute is the call.
-                InferenceDiagnostic::BuiltinExpectsRawPtr { call, .. } => {
-                    push_trap(&mut self.call_traps, *call, diag.message());
-                }
-                // The name itself is the value that cannot be produced,
-                // like `TypeNotValue`.
-                InferenceDiagnostic::BuiltinNotFirstClass { expr, .. } => {
-                    push_trap(&mut self.value_traps, *expr, diag.message());
                 }
                 // A broken dot-call: the call operation itself cannot
                 // execute (arguments still evaluate for effects).
@@ -1486,15 +1470,14 @@ impl LowerCtx<'_> {
                     }
                 }
             }
-            // `place.&raw` / `place.&raw mut`. The diagnosed cases (not a
-            // place, immutable root, `static mut`, deref-rooted) are all
-            // pending value traps on this expression — the placeholder is
+            // `place.&raw`. The diagnosed case (not a place) is a
+            // pending value trap on this expression — the placeholder is
             // never observed. The clean cases resolve the place like a
             // field-assign target does: root local (or a temp holding a
             // `const` use's copy, or a `static`'s one allocation) plus the
             // chain's field indices.
-            ExprData::AddrOf { mutable, place } => {
-                self.lower_addr_of_flavored(b, expr, *mutable, *place, PtrFlavor::Raw)
+            ExprData::AddrOf { place } => {
+                self.lower_addr_of_flavored(b, expr, *place, PtrFlavor::Raw)
             }
             // A SAFE borrow lowers exactly like its raw sibling — same
             // place walk, same addressable marking, same resulting
@@ -1504,9 +1487,12 @@ impl LowerCtx<'_> {
             // them is `ValueExpr::Borrow`'s tag minting — the loan the
             // checker (`crate::loans`) tracks, and the node the
             // interpreter's aliasing tree creates.
-            ExprData::Borrow { mutable, place } => {
-                self.lower_addr_of_flavored(b, expr, *mutable, *place, PtrFlavor::Borrow)
-            }
+            ExprData::Borrow { mutable, place } => self.lower_addr_of_flavored(
+                b,
+                expr,
+                *place,
+                PtrFlavor::Borrow { mutable: *mutable },
+            ),
             // `p.*` — a read through the pointer: a place-based load,
             // `Copy` of the pointer local's place extended with a `Deref`
             // step (materialized into a temp right here, so the read
@@ -2233,6 +2219,7 @@ impl LowerCtx<'_> {
             name: data.written_name().map(str::to_owned),
             binding: Some(binding),
             addressable: false,
+            read_only: (!data.mutable).then_some(crate::ReadOnly::Binding),
         });
         b.local_for_binding.insert(binding, local);
         b.declare(local);
@@ -2266,6 +2253,7 @@ impl LowerCtx<'_> {
                     name: None,
                     binding: None,
                     addressable: false,
+                    read_only: None,
                 });
                 self.bind_binding_pattern(b, pat, &Operand::Copy(local.into()), origin);
                 local
@@ -2284,6 +2272,7 @@ impl LowerCtx<'_> {
                     name: None,
                     binding: None,
                     addressable: false,
+                    read_only: None,
                 })
             }
         }
@@ -2606,12 +2595,12 @@ impl LowerCtx<'_> {
         let (root, chain) = self.place_chain(target);
         // A deref roots the chain (`p.* = v;`, `p.*.x = v;`, `p.*[i] = v;`):
         // the store goes through the raw pointer — a new root whose
-        // legality is the pointer's `.&raw mut`-ness, not any binding's
-        // `mut`-ness. The pointer (the deref's receiver) evaluates like any
-        // read — deeper derefs inside it are ordinary loads with their own
-        // unsafe gating — and the store's place is a pointer-rooted temp
-        // with a leading `Deref` projection; liveness and writability are
-        // the machine's store-time checks.
+        // legality is the pointer's provenance (judged by the machine),
+        // not any binding's `mut`-ness. The pointer (the deref's receiver)
+        // evaluates like any read — deeper derefs inside it are ordinary
+        // loads with their own unsafe gating — and the store's place is a
+        // pointer-rooted temp with a leading `Deref` projection; liveness
+        // and writability are the machine's store-time checks.
         if let ExprData::Deref { receiver } = &self.body.exprs[root] {
             let receiver = *receiver;
             let deref = root;
@@ -2892,7 +2881,7 @@ impl LowerCtx<'_> {
         Some(Operand::Copy(dest.into()))
     }
 
-    /// Lower `place.&raw [mut]` for the accepted place shapes (everything
+    /// Lower `place.&raw` for the accepted place shapes (everything
     /// else was diagnosed and value-trapped upstream): the chain's field
     /// and element steps resolve exactly like a field-assign target's,
     /// then the root decides the flavor —
@@ -2904,7 +2893,7 @@ impl LowerCtx<'_> {
     /// - a **`const` item**: the value is copied into a fresh temp and the
     ///   temp's address is taken — const=copied, now observable (each
     ///   `C.&raw` mention is its own address, honestly);
-    /// - a **deref** (`p.*.x.&raw mut`): the pointer (the deref's
+    /// - a **deref** (`p.*.x.&raw`): the pointer (the deref's
     ///   receiver) evaluates as an ordinary read, and the result is that
     ///   pointer — the ORIGINAL allocation's identity — with the extended
     ///   path: no intermediate materialization, no new allocation. Nothing
@@ -2922,7 +2911,6 @@ impl LowerCtx<'_> {
         &mut self,
         b: &mut BodyBuilder,
         expr: ExprId,
-        mutable: bool,
         place: ExprId,
         flavor: PtrFlavor,
     ) -> Operand {
@@ -2951,11 +2939,7 @@ impl LowerCtx<'_> {
                 return Operand::Const(Const::Unit);
             };
             let dest = b.temp(self.ty(expr));
-            b.push_assign(
-                dest,
-                flavor.address_of(mutable, Place { local, projection }),
-                expr,
-            );
+            b.push_assign(dest, flavor.address_of(Place { local, projection }), expr);
             return Operand::Copy(dest.into());
         }
         // A broken link in the chain (unknown field, non-record receiver,
@@ -2971,7 +2955,7 @@ impl LowerCtx<'_> {
             let value = self.lower_expr(b, root);
             let local = self.alloc_binding_local(b, binding);
             b.push_assign(local, ValueExpr::Use(value), root);
-            return self.address_of_local(b, flavor, mutable, local, &chain, expr);
+            return self.address_of_local(b, flavor, local, &chain, expr);
         }
         let ExprData::NameRef(name) = &self.body.exprs[root] else {
             // Non-place roots were diagnosed (`AddrOfNonPlace`) and
@@ -2980,7 +2964,7 @@ impl LowerCtx<'_> {
         };
         match self.resolutions.get(root) {
             Some(Resolution::Local(binding)) => match b.local_for_binding.get(binding) {
-                Some(&local) => self.address_of_local(b, flavor, mutable, local, &chain, expr),
+                Some(&local) => self.address_of_local(b, flavor, local, &chain, expr),
                 // A local of an enclosing function: the same unsupported
                 // capture the read path reports.
                 None => {
@@ -3035,9 +3019,12 @@ impl LowerCtx<'_> {
                         // The address of THIS use's copy: materialize the
                         // (cloned) const value in a temp and point at it.
                         let copy = b.temp(self.ty(root));
+                        // A `const` stays one value at every use: writing
+                        // into this copy through the pointer is UB.
+                        b.locals[copy].read_only = Some(crate::ReadOnly::ConstCopy);
                         b.declare(copy);
                         b.push_assign(copy, ValueExpr::Use(Operand::Const(Const::Item(loc))), root);
-                        self.address_of_local(b, flavor, mutable, copy, &chain, expr)
+                        self.address_of_local(b, flavor, copy, &chain, expr)
                     }
                 }
             }
@@ -3064,7 +3051,6 @@ impl LowerCtx<'_> {
         &mut self,
         b: &mut BodyBuilder,
         flavor: PtrFlavor,
-        mutable: bool,
         local: LocalId,
         chain: &[ExprId],
         expr: ExprId,
@@ -3074,11 +3060,7 @@ impl LowerCtx<'_> {
             return Operand::Const(Const::Unit);
         };
         let dest = b.temp(self.ty(expr));
-        b.push_assign(
-            dest,
-            flavor.address_of(mutable, Place { local, projection }),
-            expr,
-        );
+        b.push_assign(dest, flavor.address_of(Place { local, projection }), expr);
         Operand::Copy(dest.into())
     }
 
@@ -3315,6 +3297,7 @@ impl LowerCtx<'_> {
                 name: None,
                 binding: None,
                 addressable: false,
+                read_only: None,
             });
             b.params.push(local);
         }
@@ -3819,6 +3802,7 @@ impl BodyBuilder {
             name: None,
             binding: None,
             addressable: false,
+            read_only: None,
         });
         let mut blocks = Arena::default();
         let entry = blocks.alloc(BlockData {
@@ -3889,6 +3873,7 @@ impl BodyBuilder {
             name: None,
             binding: None,
             addressable: false,
+            read_only: None,
         })
     }
 
@@ -3924,17 +3909,17 @@ impl BodyBuilder {
 /// smeared across the walk.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum PtrFlavor {
-    /// `.&raw` / `.&raw mut` — by-access semantics, no aliasing node.
+    /// `.&raw` — by-access semantics, no aliasing node.
     Raw,
     /// `.&` / `.&mut` — a safe borrow, which mints an aliasing-tree node.
-    Borrow,
+    Borrow { mutable: bool },
 }
 
 impl PtrFlavor {
-    fn address_of(self, mutable: bool, place: Place) -> ValueExpr {
+    fn address_of(self, place: Place) -> ValueExpr {
         match self {
-            PtrFlavor::Raw => ValueExpr::AddrOf { mutable, place },
-            PtrFlavor::Borrow => ValueExpr::Borrow { mutable, place },
+            PtrFlavor::Raw => ValueExpr::AddrOf { place },
+            PtrFlavor::Borrow { mutable } => ValueExpr::Borrow { mutable, place },
         }
     }
 }

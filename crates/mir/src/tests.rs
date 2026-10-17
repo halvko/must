@@ -2242,7 +2242,7 @@ fn addr_of_deref_and_deref_store_lower_to_place_ops() {
 static s: usize = 7;
 static main = fn() -> usize {
     let mut x = 1;
-    let p = x.&raw mut;
+    let p = x.&raw;
     let q = s.&raw;
     unsafe {
         p.* = 2;
@@ -2262,19 +2262,19 @@ static main = fn() -> usize {
             fn b0() -> usize {
               _0: usize  // return
               _1: usize  // x
-              _2: usize.&raw mut
-              _3: usize.&raw mut  // p
+              _2: usize.&raw
+              _3: usize.&raw  // p
               _4: usize.&raw
               _5: usize.&raw  // q
-              _6: usize.&raw mut
-              _7: usize.&raw mut
+              _6: usize.&raw
+              _7: usize.&raw
               _8: usize
               _9: usize.&raw
               _10: usize
               _11: usize
               bb0:
                 _1 = 1
-                _2 = _1.&raw mut
+                _2 = _1.&raw
                 _3 = _2
                 _4 = static s.&raw
                 _5 = _4
@@ -2304,7 +2304,7 @@ fn deref_outside_unsafe_lowers_to_a_trap_not_a_load() {
         r#"
 static main = fn() -> usize {
     let mut x: usize = 1;
-    let p = x.&raw mut;
+    let p = x.&raw;
     p.*
 };
 "#,
@@ -2313,13 +2313,13 @@ static main = fn() -> usize {
             fn b0() -> usize {
               _0: usize  // return
               _1: usize  // x
-              _2: usize.&raw mut
-              _3: usize.&raw mut  // p
-              _4: usize.&raw mut
+              _2: usize.&raw
+              _3: usize.&raw  // p
+              _4: usize.&raw
               _5: usize
               bb0:
                 _1 = 1
-                _2 = _1.&raw mut
+                _2 = _1.&raw
                 _3 = _2
                 _4 = _3
                 _5 = trap "dereferencing a raw pointer requires an `unsafe { ... }` block" -> bb1
@@ -2343,7 +2343,7 @@ fn through_pointer_writes_lower_to_deref_projected_places() {
         r#"
 static main = fn() {
     let mut r: struct { x: usize, buf: [usize; 2] } = struct { x = 1, buf = [1, 2] };
-    let p = r.&raw mut;
+    let p = r.&raw;
     let i = 1;
     unsafe {
         p.*.x = 2;
@@ -2358,17 +2358,17 @@ static main = fn() {
               _1: [usize; 2]
               _2: struct { buf: [usize; 2], x: usize }
               _3: struct { buf: [usize; 2], x: usize }  // r
-              _4: struct { buf: [usize; 2], x: usize }.&raw mut
-              _5: struct { buf: [usize; 2], x: usize }.&raw mut  // p
+              _4: struct { buf: [usize; 2], x: usize }.&raw
+              _5: struct { buf: [usize; 2], x: usize }.&raw  // p
               _6: usize  // i
-              _7: struct { buf: [usize; 2], x: usize }.&raw mut
-              _8: struct { buf: [usize; 2], x: usize }.&raw mut
+              _7: struct { buf: [usize; 2], x: usize }.&raw
+              _8: struct { buf: [usize; 2], x: usize }.&raw
               _9: usize
               bb0:
                 _1 = [1, 2]
                 _2 = { buf: _1, x: 1 }
                 _3 = _2
-                _4 = _3.&raw mut
+                _4 = _3.&raw
                 _5 = _4
                 _6 = 1
                 _7 = _5
@@ -2402,7 +2402,7 @@ fn place_shaped_reads_lower_to_one_projection() {
         r#"
 static main = fn() {
     let mut r: struct { x: usize, buf: [usize; 2] } = struct { x = 1, buf = [1, 2] };
-    let p = r.&raw mut;
+    let p = r.&raw;
     let i = 1;
     let a = r.buf[i];
     unsafe {
@@ -2418,16 +2418,16 @@ static main = fn() {
               _1: [usize; 2]
               _2: struct { buf: [usize; 2], x: usize }
               _3: struct { buf: [usize; 2], x: usize }  // r
-              _4: struct { buf: [usize; 2], x: usize }.&raw mut
-              _5: struct { buf: [usize; 2], x: usize }.&raw mut  // p
+              _4: struct { buf: [usize; 2], x: usize }.&raw
+              _5: struct { buf: [usize; 2], x: usize }.&raw  // p
               _6: usize  // i
               _7: usize
               _8: usize
               _9: usize  // a
-              _10: struct { buf: [usize; 2], x: usize }.&raw mut
+              _10: struct { buf: [usize; 2], x: usize }.&raw
               _11: usize
               _12: usize  // b
-              _13: struct { buf: [usize; 2], x: usize }.&raw mut
+              _13: struct { buf: [usize; 2], x: usize }.&raw
               _14: usize
               _15: usize
               _16: usize  // c
@@ -2435,7 +2435,7 @@ static main = fn() {
                 _1 = [1, 2]
                 _2 = { buf: _1, x: 1 }
                 _3 = _2
-                _4 = _3.&raw mut
+                _4 = _3.&raw
                 _5 = _4
                 _6 = 1
                 _7 = _6
@@ -2469,8 +2469,8 @@ fn mid_chain_deref_write_reads_the_inner_pointer_then_stores() {
         r#"
 static main = fn() {
     let mut x: usize = 1;
-    let mut p = x.&raw mut;
-    let pp = p.&raw mut;
+    let mut p = x.&raw;
+    let pp = p.&raw;
     unsafe { pp.*.* = 7; }
 };
 "#,
@@ -2479,17 +2479,17 @@ static main = fn() {
             fn b0() -> () {
               _0: ()  // return
               _1: usize  // x
-              _2: usize.&raw mut
-              _3: usize.&raw mut  // p
-              _4: usize.&raw mut.&raw mut
-              _5: usize.&raw mut.&raw mut  // pp
-              _6: usize.&raw mut.&raw mut
-              _7: usize.&raw mut
+              _2: usize.&raw
+              _3: usize.&raw  // p
+              _4: usize.&raw.&raw
+              _5: usize.&raw.&raw  // pp
+              _6: usize.&raw.&raw
+              _7: usize.&raw
               bb0:
                 _1 = 1
-                _2 = _1.&raw mut
+                _2 = _1.&raw
                 _3 = _2
-                _4 = _3.&raw mut
+                _4 = _3.&raw
                 _5 = _4
                 _6 = _5
                 _7 = _6.*
@@ -2513,11 +2513,11 @@ fn addr_of_array_element_and_through_deref_lower_without_promotion_of_the_pointe
         r#"
 static main = fn() -> usize {
     let mut a: [usize; 2] = [1, 2];
-    let e = a[0].&raw mut;
+    let e = a[0].&raw;
     let mut r = struct { x = 1 };
-    let p = r.&raw mut;
+    let p = r.&raw;
     unsafe {
-        let q = p.*.x.&raw mut;
+        let q = p.*.x.&raw;
         q.*
     }
 };
@@ -2528,28 +2528,28 @@ static main = fn() -> usize {
               _0: usize  // return
               _1: [usize; 2]
               _2: [usize; 2]  // a
-              _3: usize.&raw mut
-              _4: usize.&raw mut  // e
+              _3: usize.&raw
+              _4: usize.&raw  // e
               _5: struct { x: usize }
               _6: struct { x: usize }  // r
-              _7: struct { x: usize }.&raw mut
-              _8: struct { x: usize }.&raw mut  // p
-              _9: struct { x: usize }.&raw mut
-              _10: usize.&raw mut
-              _11: usize.&raw mut  // q
-              _12: usize.&raw mut
+              _7: struct { x: usize }.&raw
+              _8: struct { x: usize }.&raw  // p
+              _9: struct { x: usize }.&raw
+              _10: usize.&raw
+              _11: usize.&raw  // q
+              _12: usize.&raw
               _13: usize
               bb0:
                 _1 = [1, 2]
                 _2 = _1
-                _3 = _2[0].&raw mut
+                _3 = _2[0].&raw
                 _4 = _3
                 _5 = { x: 1 }
                 _6 = _5
-                _7 = _6.&raw mut
+                _7 = _6.&raw
                 _8 = _7
                 _9 = _8
-                _10 = _9.*.0.&raw mut
+                _10 = _9.*.0.&raw
                 _11 = _10
                 _12 = _11
                 _13 = _12.*
@@ -2682,7 +2682,7 @@ fn heap_builtin_calls_lower_as_plain_builtin_calls() {
     // allocates `n` uninit elements whatever `T` was.
     check_mir(
         r#"
-static f = fn (p: usize.&raw mut, n: usize) -> () {
+static f = fn (p: usize.&raw, n: usize) -> () {
     unsafe {
         let r = alloc_array::<usize>(n);
         dealloc_array(p, 1)
@@ -2691,14 +2691,14 @@ static f = fn (p: usize.&raw mut, n: usize) -> () {
 "#,
         expect![[r#"
             item f:
-            fn b0(_1: usize.&raw mut, _2: usize) -> () {
+            fn b0(_1: usize.&raw, _2: usize) -> () {
               _0: ()  // return
-              _1: usize.&raw mut  // param p
+              _1: usize.&raw  // param p
               _2: usize  // param n
               _3: usize
               _4: AllocResult::<usize>
               _5: AllocResult::<usize>  // r
-              _6: usize.&raw mut
+              _6: usize.&raw
               _7: ()
               bb0:
                 _3 = _2
@@ -2712,8 +2712,8 @@ static f = fn (p: usize.&raw mut, n: usize) -> () {
                 _0 = ()
                 return
             }
-            fn b1() -> fn(usize.&raw mut, usize) {
-              _0: fn(usize.&raw mut, usize)  // return
+            fn b1() -> fn(usize.&raw, usize) {
+              _0: fn(usize.&raw, usize)  // return
               bb0:
                 _0 = fn b0
                 return
@@ -2728,16 +2728,16 @@ fn unsafe_builtin_call_outside_unsafe_lowers_to_a_trap() {
     // squiggle's message (arguments still evaluated for their effects).
     check_mir(
         r#"
-static f = fn (p: usize.&raw mut) -> () {
+static f = fn (p: usize.&raw) -> () {
     dealloc_array(p, 1);
 };
 "#,
         expect![[r#"
             item f:
-            fn b0(_1: usize.&raw mut) -> () {
+            fn b0(_1: usize.&raw) -> () {
               _0: ()  // return
-              _1: usize.&raw mut  // param p
-              _2: usize.&raw mut
+              _1: usize.&raw  // param p
+              _2: usize.&raw
               _3: ()
               bb0:
                 _2 = _1
@@ -2746,8 +2746,8 @@ static f = fn (p: usize.&raw mut) -> () {
                 _0 = ()
                 return
             }
-            fn b1() -> fn(usize.&raw mut) {
-              _0: fn(usize.&raw mut)  // return
+            fn b1() -> fn(usize.&raw) {
+              _0: fn(usize.&raw)  // return
               bb0:
                 _0 = fn b0
                 return
@@ -2880,17 +2880,19 @@ fn mir_is_region_erased() {
 
 #[test]
 fn a_safe_borrow_is_its_own_value_expr() {
-    // `.&`/`.&mut` and `.&raw`/`.&raw mut` compute the same address and
+    // `.&`/`.&mut` and `.&raw` compute the same address and
     // lower through the same place walk, but they are DIFFERENT value expressions —
     // so every exhaustive consumer has to decide what a borrow means for
     // it instead of inheriting the raw answer. The wasm backend's refusal
     // hangs off exactly this.
     check_mir(
-        "static f = fn () -> () {\n\
-             let mut n: usize = 1;\n\
-             let borrowed = n.&mut;\n\
-             let r = n.&raw mut;\n\
-         };",
+        r#"
+static f = fn () -> () {
+    let mut n: usize = 1;
+    let borrowed = n.&mut;
+    let r = n.&raw;
+};
+"#,
         expect![[r#"
             item f:
             fn b0() -> () {
@@ -2898,13 +2900,13 @@ fn a_safe_borrow_is_its_own_value_expr() {
               _1: usize  // n
               _2: usize.&mut
               _3: usize.&mut  // borrowed
-              _4: usize.&raw mut
-              _5: usize.&raw mut  // r
+              _4: usize.&raw
+              _5: usize.&raw  // r
               bb0:
                 _1 = 1
                 _2 = _1.&mut
                 _3 = _2
-                _4 = _1.&raw mut
+                _4 = _1.&raw
                 _5 = _4
                 _0 = ()
                 return
@@ -2922,14 +2924,16 @@ fn a_safe_borrow_is_its_own_value_expr() {
 #[test]
 fn a_reborrow_through_a_borrow_stays_a_borrow() {
     // `m.*.&mut` mints a NEW node (it is `ValueExpr::Borrow`), while
-    // `m.*.&raw mut` inherits `m`'s (it is `ValueExpr::AddrOf`). That split
+    // `m.*.&raw` inherits `m`'s (it is `ValueExpr::AddrOf`). That split
     // is the ruling that `.&raw` is deliberately not a decayed safe
     // borrow, visible in the IR.
     check_mir(
-        "static f = fn::<@a>(m: usize.&mut::<@a>) -> () {\n\
-             let child = m.*.&mut;\n\
-             let r = m.*.&raw mut;\n\
-         };",
+        r#"
+static f = fn::<@a>(m: usize.&mut::<@a>) -> () {
+    let child = m.*.&mut;
+    let r = m.*.&raw;
+};
+"#,
         expect![[r#"
             item f:
             fn b0(_1: usize.&mut) -> () {
@@ -2939,14 +2943,14 @@ fn a_reborrow_through_a_borrow_stays_a_borrow() {
               _3: usize.&mut
               _4: usize.&mut  // child
               _5: usize.&mut
-              _6: usize.&raw mut
-              _7: usize.&raw mut  // r
+              _6: usize.&raw
+              _7: usize.&raw  // r
               bb0:
                 _2 = _1
                 _3 = _2.*.&mut
                 _4 = _3
                 _5 = _1
-                _6 = _5.*.&raw mut
+                _6 = _5.*.&raw
                 _7 = _6
                 _0 = ()
                 return
@@ -3545,7 +3549,7 @@ fn check_loans(text: &str, expect: Expect) {
 const LOAN_PRELUDE: &str = r#"
 type Option = enum::<T> { Some(T), None };
 type Reader = struct {
-    buf: u8.&raw mut,
+    buf: u8.&raw,
     cap: usize,
     line: usize,
     n: usize,
@@ -3600,9 +3604,9 @@ static main = fn() -> usize {
 };
 "#,
         expect![[r#"
-            1049..1050: using `m` mutably here invalidates a borrow of it that is still live: the borrow is used after this point, and reading through it then would read through an invalidated borrow
-              note at 1030..1031: this borrow was created here
-              note at 1084..1086: and it is still used here
+            1045..1046: using `m` mutably here invalidates a borrow of it that is still live: the borrow is used after this point, and reading through it then would read through an invalidated borrow
+              note at 1026..1027: this borrow was created here
+              note at 1080..1082: and it is still used here
         "#]],
     );
 }
@@ -3692,9 +3696,9 @@ static main = fn() -> usize {
 };
 "#,
         expect![[r#"
-            1049..1050: moving `r` here invalidates a borrow of it that is still live: the borrow points into storage this move takes away, and it is used after this point
-              note at 1009..1015: this borrow was created here
-              note at 1071..1073: and it is still used here
+            1045..1046: moving `r` here invalidates a borrow of it that is still live: the borrow points into storage this move takes away, and it is used after this point
+              note at 1005..1011: this borrow was created here
+              note at 1067..1069: and it is still used here
         "#]],
     );
 }
@@ -4251,7 +4255,7 @@ static f = fn() -> usize {
 fn reassigning_an_owner_beside_its_dead_loans_is_fine() {
     check_loans(
         r#"
-type Text = struct { buf: u8.&raw mut, cap: usize } only move with {
+type Text = struct { buf: u8.&raw, cap: usize } only move with {
     impl Self {
         len = fn::<@a>(s: Self.&::<@a>) -> usize { s.*.cap };
         drop = fn(s: Self) -> () {

@@ -134,9 +134,9 @@
   spellings, which is why both are `unsafe`; "checked" names the other half. Whether the
   bytes spell a string is answered by one spelling and asserted by the other, and a false
   assertion is detected UB naming the offset. The pointee is pinned to `u8`, because a bless
-  over another element type would be a layout claim. Both are flavour-polymorphic and so not
-  first-class values, and both are pure and so const-legal. The error carries no payload,
-  because a payload cannot be taken away later.
+  over another element type would be a layout claim. Both are ordinary first-class `unsafe fn`
+  values over the raw pointer type (M23), and both are pure and so const-legal. The error
+  carries no payload, because a payload cannot be taken away later.
 - **T18** Two `str` primitives read the bless backwards. `s.len()` is the byte length, because
   bytes are what every other `str` operation counts and a character count under the shorter
   name would be a trap. `str_bytes(s, dst)` writes those bytes into storage the caller owns;

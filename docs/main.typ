@@ -1122,25 +1122,25 @@ value — see "Members with their own type parameters" below.
 
 == Raw pointers and unsafe
 
-Raw pointers reach places all the way down. The types are `T.&raw`
-(shared) and `T.&raw mut` (mutable). An address is taken with `place.&raw` /
-`place.&raw mut`, and a place is now the full grammar: a variable, a chain
+Raw pointers reach places all the way down. The raw pointer type is
+`T.&raw`, and an address is taken with `place.&raw`. A place is the full
+grammar: a variable, a chain
 of its fields and elements (`r.a`, `a[i]`, `a[i][j]`), a `static` or `const`
 item (a `const` use's own copy), or a chain rooted in a deref (`p.*.x` — a
 place reached *through* a pointer). An operand that is not a place is
 materialized as a temporary first (see "Borrowing a temporary" below). A
 pointer is followed with the postfix deref `p.*`; there is **no
 auto-deref**, so `p.*` is the only way a pointer is ever read or written.
-The old prefix spelling (`&raw place` / `&raw mut place`) is retired:
-writing it gets a targeted migration diagnostic pointing at the postfix
-form, not a silent reinterpretation. Plain `.&` / `.&mut`, with no `raw`,
+The old prefix spelling (`&raw place`) is retired: writing it gets a
+targeted migration diagnostic pointing at the postfix form, not a silent
+reinterpretation. Plain `.&` / `.&mut`, with no `raw`,
 are the SAFE borrows — see "Safe borrows and regions" below. Everything
-else in this chapter is about the raw flavor.
+else in this chapter is about raw pointers.
 
 ```must
 static main = fn () -> usize {
     let mut x = 1;
-    let p = x.&raw mut;
+    let p = x.&raw;
     unsafe { p.* = 42; }
     x                       // 42
 };
@@ -1151,36 +1151,33 @@ write — must sit inside an `unsafe { ... }` block, a lexical checker region
 within a function; the message otherwise is `dereferencing a raw pointer
 requires an `unsafe { ... }` block`. The deref rule covers the new places
 evenhandedly: an assignment target like `p.*.x` *is* a deref write, and so
-is the `p.*` inside `p.*.x.&raw mut` — computing an address through a
-pointer follows one first. `place.&raw mut` additionally requires the root
-binding to be `mut` — the existing transitivity rule verbatim — and blames
-the root with the same "make it `mut`" quick fix an assignment would;
-`place.&raw` (shared) needs no `mut`. `.&raw mut` of a `static` is rejected:
-`static mut` stays deferred.
+is the `p.*` inside `p.*.x.&raw` — computing an address through a pointer
+follows one first.
 
-Writes through pointers are judged on the pointer, never on a binding. The
-target of an assignment may be any deref-rooted chain — `p.* = v;`,
-`p.*.x = v;`, even `p.*.xs[i] = v;` — and the judgment is the GOVERNING
-pointer: the receiver of the chain's outermost deref must be `T.&raw mut`.
-Writing through a shared `T.&raw` is rejected (`cannot assign through
-`T.&raw`: writing needs a `.&raw mut` pointer`), and so is `p.*.x.&raw mut`
-through a shared pointer — minting a mutating address must not launder the
-shared flavor into a write permission. `p` itself never needs to be a `mut`
-binding — writing through it reassigns nothing — and derefs deeper in the
-chain are ordinary *reads* of raw pointers, which copy the pointer, and a
-copy carries its whole permission, so their flavors don't matter. A
-deref-rooted address is the original allocation's address with the path
-extended — `p.*.x.&raw mut` hands out the very place `p` points to, one
-field in; no copy is materialized on the way.
+A raw pointer's type says nothing about whether it may write. Whether a
+write through it is allowed is decided by the place it was taken from, its
+*provenance*. `x.&raw` of a non-`mut` local, of a `static` or of a `const`
+(that use's own copy) is legal, and so is `b.*.x.&raw` through a shared
+borrow `b`, but writing through any of them is undefined behavior: the
+program has promised not to change that storage. The interpreter detects
+it — those allocations are read-only (`error[UndefinedBehavior]: write
+through a pointer into read-only memory (the local `x`, which is not
+declared `mut`)`), and a write under a `.&` lands on the borrow's frozen node — but
+compiled code gets no such check, and the optimizer may assume the write
+never happens. `p` itself never needs to be a `mut` binding: writing
+through it reassigns nothing. A deref-rooted address is the original
+allocation's address with the path extended — `p.*.x.&raw` hands out the
+very place `p` points to, one field in; no copy is materialized on the
+way.
 
 `x.&raw` on a local is the address of that frame slot, for that frame's
 lifetime — and no longer. Nothing here promises stable addresses for locals
 beyond their frame's life, nor address preservation across copies: copying a
 value copies the pointer bits, never the pointee's identity. Return an
-`x.&raw mut` past the frame that owns `x` and a later deref is a dangling
+`x.&raw` past the frame that owns `x` and a later deref is a dangling
 pointer. The interpreter *detects* the misuse cases and traps
 deterministically. Address-taking itself never bounds-checks —
-`a[i + 1].&raw mut` mints silently even past the end — so validity is
+`a[i + 1].&raw` mints silently even past the end — so validity is
 judged where the pointer is *used*: every deref first checks liveness and
 the pointer's stored path, and a write through one mutates the pointee in
 place, so pointers into it survive the write, exactly like real memory. The
@@ -1248,10 +1245,8 @@ that is the whole story.
 
 Two kinds of function have an `unsafe fn` type without anyone writing one:
 an `extern` item (the "Extern items" chapter), and the builtins that both
-require the marker and have a function type at all — `dealloc_array` and
-`str_bytes`. (`copy`, `add`, `offset` and the two blesses are polymorphic
-in a pointer's flavor, so they have no single `fn` type to carry anything;
-they are not values, and never were.) That first pair closes a real hole:
+require the marker — `dealloc_array`, `add`, `offset`, `copy`,
+`str_bytes` and the two blesses. That closes a real hole:
 `let d = dealloc_array::<usize>; d(p, 1);` used to run with no marker
 anywhere, because the check looked at the *name* being called, and once the
 builtin was a value there was no name left to look at.
@@ -1278,7 +1273,7 @@ ordinary Must code (`examples/heap.must` is that library, twice over: a
 growable vector and a typed arena).
 
 - `alloc_array::<T>(n)` is safe and result-shaped. It returns
-  `AllocResult::<T>`, a compiler-provided `enum { Ok(T.&raw mut), Err }`,
+  `AllocResult::<T>`, a compiler-provided `enum { Ok(T.&raw), Err }`,
   so every allocation site says what it does when memory runs out (the
   interpreter's own allocator never answers `Err`; allocators written over
   it do). Fresh elements are *uninitialized*: reading one before its first
@@ -1290,7 +1285,7 @@ growable vector and a typed arena).
   each detected UB, with an "allocated here" note at the allocation's
   birth site. Not freeing is a leak, and a leak is not UB.
 - `add(p, i)` is `unsafe` and takes a `usize`. Minting the address is
-  unchecked, like `a[i].&raw mut` — an out-of-range result derefs to
+  unchecked, like `a[i].&raw` — an out-of-range result derefs to
   detected UB — but advancing a pointer that does not address an array
   element, with `i > 0`, is detected UB at the call itself, which is why
   it needs `unsafe` before any deref.
@@ -1302,7 +1297,7 @@ growable vector and a typed arena).
   overlapping ranges are defined, uninitialized elements copy silently,
   out of range on either side is detected UB, and a zero-length copy is
   valid through any pointer.
-- `dangling::<T>()` is safe: a `T.&raw mut` that was never valid, the
+- `dangling::<T>()` is safe: a `T.&raw` that was never valid, the
   stand-in for "no buffer yet" (there is no null). Any deref is detected
   UB.
 
@@ -1480,13 +1475,13 @@ one. That is judged over the whole place rather than its outermost step:
 writing through a `.&` is rejected (`cannot assign through `T.&`: writing
 needs a `.&mut` borrow`), and so is writing through a `.&mut` that is itself
 held behind a `.&`, because reading a `.&mut` out of a place *reborrows* it,
-and a shared place may grant no such reborrow. Minting `.&mut` or `.&raw mut`
-anywhere along such a chain is rejected the same way, and so is the implicit
-reborrow, which is that mint with the `.&mut` left unwritten. A `.&raw mut`
+and a shared place may grant no such reborrow. Minting `.&mut` anywhere
+along such a chain is rejected the same way, and so is the implicit
+reborrow, which is that mint with the `.&mut` left unwritten. A `.&raw`
 in the middle stops the walk instead: reading a raw pointer out copies it,
-and a copy carries its whole permission — the raw world's own laundering,
-gated by `unsafe`. Neither safe flavor can be minted through a *raw* pointer
-(`p.*.&`, `p.*.&mut`) — a raw pointer carries no region, so a safe borrow
+and whether a write through the copy is allowed is its provenance — the
+raw world's own rule, gated by `unsafe`. Neither safe flavor can be minted
+through a *raw* pointer (`p.*.&`, `p.*.&mut`) — a raw pointer carries no region, so a safe borrow
 minted through one would have nothing to bound it.
 
 Reading `r.*` copies the referent when the referent is copyable. When it is
@@ -1572,8 +1567,8 @@ is left, at its closing brace or at a `break` or `continue` out of it, is
 refused there. A borrow that has to outlive the body is refused as `borrowed
 value does not live long enough`, naming the temporary.
 
-`.&raw` and `.&raw mut` materialize the same storage. One thing is refused
-under every flavor: a temporary of a type that *must be consumed*. It has no
+`.&raw` materializes the same storage. One thing is refused under every
+flavor: a temporary of a type that *must be consumed*. It has no
 name, so nothing could consume it; bind it with `let` first. A *name* is
 never materialized, whatever it resolves to.
 
@@ -2241,14 +2236,14 @@ that the bytes there are text, and there are two ways to say it — one that
 checks and one that does not:
 
 ```must
-static text = fn (p: u8.&raw mut, len: usize) -> str {
+static text = fn (p: u8.&raw, len: usize) -> str {
     match unsafe { str_from_utf8(p, len) } {
         ::Ok(s) => s,
         ::Err => panic("not text"),
     }
 };
 
-static claimed = fn (p: u8.&raw mut, len: usize) -> str {
+static claimed = fn (p: u8.&raw, len: usize) -> str {
     unsafe { str_from_utf8_unchecked(p, len) }
 };
 ```
@@ -2277,8 +2272,7 @@ storage came from.
 
 The pointer is to `u8`, always: this is a bytes-first boundary, and a
 claim about some other element type would be about layout, not text. Both
-spellings take either pointer flavor, like `copy`'s source does, and both
-are pure — so a `const` context accepts them too. A zero length is the
+spellings are pure — so a `const` context accepts them too. A zero length is the
 empty string and looks at no pointer at all, which is what lets a line
 scanner bless a blank line with no special case.
 
@@ -2363,7 +2357,7 @@ program can also declare an `extern` item of its own, and the compiler learns
 nothing at all about what it does:
 
 ```must
-unsafe extern static read: unsafe fn(u8.&raw mut, usize) -> isize;
+unsafe extern static read: unsafe fn(u8.&raw, usize) -> isize;
 ```
 
 Read that as what it is: a DECLARATION. There is no `=` and no value,
@@ -2398,8 +2392,8 @@ needs none, wherever the call happens:
 unsafe extern static now: fn() -> i64;
 static safe = fn () -> i64 { now() };
 
-static f = fn (p: u8.&raw mut) -> isize { unsafe { read(p, 8) } };
-static g = fn (p: u8.&raw mut) -> isize { let h = read; unsafe { h(p, 8) } };
+static f = fn (p: u8.&raw) -> isize { unsafe { read(p, 8) } };
+static g = fn (p: u8.&raw) -> isize { let h = read; unsafe { h(p, 8) } };
 ```
 
 `read` writes through the caller's raw pointer, so it is declared
@@ -2474,7 +2468,7 @@ The host provides one primitive, POSIX's `read`, declared by the program
 itself:
 
 ```must
-unsafe extern static read: unsafe fn(u8.&raw mut, usize) -> isize;
+unsafe extern static read: unsafe fn(u8.&raw, usize) -> isize;
 ```
 
 Fill a caller-owned buffer with at most `len` bytes; answer how many, `0` at
@@ -2544,7 +2538,7 @@ type, not a compiler feature. Nothing below is built into the language:
 
 ```must
 type String = struct {
-    ptr: u8.&raw mut,
+    ptr: u8.&raw,
     len: usize,
     cap: usize,
 } only move with {

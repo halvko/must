@@ -6477,95 +6477,42 @@ fn raw_pointer_types_infer_and_display() {
         r#"
 static main = fn() -> usize {
     let mut x = 1;
-    let p = x.&raw mut;
+    let p = x.&raw;
     let q = x.&raw;
     unsafe { p.* }
 };
 "#,
         expect![[r#"
-            15..114 'fn() -> usize {  ...': fn() -> usize
-            29..114 '{     let mut x =...': usize
+            15..110 'fn() -> usize {  ...': fn() -> usize
+            29..110 '{     let mut x =...': usize
             43..44 'x': usize
             47..48 '1': usize
-            58..59 'p': usize.&raw mut
+            58..59 'p': usize.&raw
             62..63 'x': usize
-            62..72 'x.&raw mut': usize.&raw mut
-            82..83 'q': usize.&raw
-            86..87 'x': usize
-            86..92 'x.&raw': usize.&raw
-            98..112 'unsafe { p.* }': usize
-            105..112 '{ p.* }': usize
-            107..108 'p': usize.&raw mut
-            107..110 'p.*': usize
+            62..68 'x.&raw': usize.&raw
+            78..79 'q': usize.&raw
+            82..83 'x': usize
+            82..88 'x.&raw': usize.&raw
+            94..108 'unsafe { p.* }': usize
+            101..108 '{ p.* }': usize
+            103..104 'p': usize.&raw
+            103..106 'p.*': usize
         "#]],
     );
 }
 
 #[test]
-fn addr_of_mut_requires_a_mut_root() {
+fn addr_of_needs_no_mut_root() {
+    // `.&raw` of a non-`mut` local, or of a field of one, is legal; a write
+    // through it is UB the interpreter detects, not a checker error.
     check_diagnostics(
-        "static main = fn { let x = 1; let p = x.&raw mut; };",
-        expect![[r#"
-            27..28: cannot infer the type of this number: it has no defining use — add a type annotation
-            38..39: cannot take `.&raw mut` of `x`: it is not declared `mut` (`x` is declared without `mut` here at 23..24)
-        "#]],
+        "static main = fn { let x: usize = 1; let r = struct { a: usize = 1 }; let p = x.&raw; let q = r.a.&raw; };",
+        expect![[r#""#]],
     );
 }
 
 #[test]
-fn addr_of_mut_immutable_offers_the_make_mut_fix() {
-    // Same machinery as `assign_to_immutable_let_offers_a_make_mutable_fix`:
-    // `.&raw mut` of a non-`mut` root anchors the insert-`mut` fix at the
-    // binding's declaration, not the address-of.
-    let text = "static f = fn { let x: usize = 1; let p = x.&raw mut; };";
-    let db = RootDatabase::default();
-    let file = SourceFile::new(&db, "test.must".to_owned(), text.to_owned());
-    let diagnostics = crate::file_diagnostics(&db, file);
-    assert_eq!(diagnostics.len(), 1, "diagnostics: {diagnostics:?}");
-    let fix = diagnostics[0].fix.as_ref().expect("diagnostic has a fix");
-    assert_eq!(fix.label, "Make `x` mutable");
-    assert_eq!(fix.edits.len(), 1);
-    assert_eq!(fix.edits[0].insert, "mut ");
-    // Immediately before the binding's name `x` in `let x` (offset 20):
-    // applying it yields `let mut x = 1;`.
-    assert_eq!(u32::from(fix.edits[0].range.start()), 20);
-}
-
-#[test]
-fn addr_of_mut_of_a_field_blames_the_root() {
-    check_diagnostics(
-        "static main = fn { let r = struct { a = 1 }; let p = r.a.&raw mut; };",
-        expect![[r#"
-            40..41: cannot infer the type of this number: it has no defining use — add a type annotation
-            53..54: cannot take `.&raw mut` of `r.a`: `r` is not declared `mut` (`r` is declared without `mut` here at 23..24)
-        "#]],
-    );
-}
-
-#[test]
-fn addr_of_shared_needs_no_mut() {
-    check_diagnostics(
-        "static main = fn { let x = 1; let p = x.&raw; };",
-        expect![[r#"
-            27..28: cannot infer the type of this number: it has no defining use — add a type annotation
-        "#]],
-    );
-}
-
-#[test]
-fn addr_of_mut_of_a_static_is_reserved() {
-    check_diagnostics(
-        "static s = 7;\nstatic main = fn { let p = s.&raw mut; };",
-        expect![[r#"
-            11..12: cannot infer the type of this number: it has no defining use — add a type annotation
-            41..42: not enough information to infer the type of `s`; add a type annotation to its definition (defined here at 7..8)
-            41..42: cannot take `.&raw mut` of `s`: `static mut` is not supported yet (`s` is defined here at 7..8)
-        "#]],
-    );
-}
-
-#[test]
-fn addr_of_shared_of_items_is_fine() {
+fn addr_of_items_is_fine() {
     check_diagnostics(
         "static s = 7;\nconst c = 8;\nstatic main = fn { let p = s.&raw; let q = c.&raw; };",
         expect![[r#"
@@ -6617,7 +6564,7 @@ fn safe_borrow_type_without_a_region_is_reported() {
 #[test]
 fn addr_of_through_a_deref_works_inside_unsafe() {
     check_diagnostics(
-        "static main = fn { let mut x = 1; let p = x.&raw mut; let q = unsafe { p.*.&raw mut }; };",
+        "static main = fn { let mut x = 1; let p = x.&raw; let q = unsafe { p.*.&raw }; };",
         expect![[r#"
             31..32: cannot infer the type of this number: it has no defining use — add a type annotation
         "#]],
@@ -6629,35 +6576,23 @@ fn addr_of_through_a_deref_still_requires_unsafe() {
     // The deref rule is uniform: the deref inside a `.&raw` place needs
     // `unsafe` like any other deref site.
     check_diagnostics(
-        "static main = fn { let mut x = 1; let p = x.&raw mut; let q = p.*.&raw mut; };",
+        "static main = fn { let mut x = 1; let p = x.&raw; let q = p.*.&raw; };",
         expect![[r#"
             31..32: cannot infer the type of this number: it has no defining use — add a type annotation
-            62..65: dereferencing a raw pointer requires an `unsafe { ... }` block
+            58..61: dereferencing a raw pointer requires an `unsafe { ... }` block
         "#]],
     );
 }
 
 #[test]
-fn addr_of_mut_through_a_shared_pointer_errors() {
+fn addr_of_through_any_pointer_is_fine() {
+    // Through a raw pointer, and through a SHARED borrow: the address
+    // carries no write permission of its own. A write through it lands
+    // on the borrow's frozen aliasing node, which the interpreter
+    // detects.
     check_diagnostics(
         r#"
-static main = fn {
-    let mut r = struct { a = 1 };
-    let p = r.&raw;
-    let q = unsafe { p.*.a.&raw mut };
-};
-"#,
-        expect![[r#"
-            49..50: cannot infer the type of this number: it has no defining use — add a type annotation
-            95..109: cannot take `.&raw mut` through `struct { a: {number} }.&raw`: minting a mutating address needs a `.&raw mut` pointer
-        "#]],
-    );
-}
-
-#[test]
-fn addr_of_shared_through_any_pointer_is_fine() {
-    check_diagnostics(
-        r#"
+static f = fn::<@a>(b: struct { a: usize }.&::<@a>) -> usize.&raw { b.*.a.&raw };
 static main = fn {
     let mut r = struct { a = 1 };
     let p = r.&raw;
@@ -6665,7 +6600,7 @@ static main = fn {
 };
 "#,
         expect![[r#"
-            49..50: cannot infer the type of this number: it has no defining use — add a type annotation
+            131..132: cannot infer the type of this number: it has no defining use — add a type annotation
         "#]],
     );
 }
@@ -6676,27 +6611,27 @@ fn addr_of_through_a_deref_types_as_the_projected_pointee() {
         r#"
 static main = fn {
     let mut r = struct { a = 1, b = 2 };
-    let p = r.&raw mut;
-    let q = unsafe { p.*.a.&raw mut };
+    let p = r.&raw;
+    let q = unsafe { p.*.a.&raw };
 };
 "#,
         expect![[r#"
-            15..125 'fn {     let mut ...': fn()
-            18..125 '{     let mut r =...': ()
+            15..117 'fn {     let mut ...': fn()
+            18..117 '{     let mut r =...': ()
             32..33 'r': struct { a: {number}, b: {number} }
             36..59 'struct { a = 1, b...': struct { a: {number}, b: {number} }
             49..50 '1': {number}
             56..57 '2': {number}
-            69..70 'p': struct { a: {number}, b: {number} }.&raw mut
+            69..70 'p': struct { a: {number}, b: {number} }.&raw
             73..74 'r': struct { a: {number}, b: {number} }
-            73..83 'r.&raw mut': struct { a: {number}, b: {number} }.&raw mut
-            93..94 'q': {number}.&raw mut
-            97..122 'unsafe { p.*.a.&r...': {number}.&raw mut
-            104..122 '{ p.*.a.&raw mut }': {number}.&raw mut
-            106..107 'p': struct { a: {number}, b: {number} }.&raw mut
-            106..109 'p.*': struct { a: {number}, b: {number} }
-            106..111 'p.*.a': {number}
-            106..120 'p.*.a.&raw mut': {number}.&raw mut
+            73..79 'r.&raw': struct { a: {number}, b: {number} }.&raw
+            89..90 'q': {number}.&raw
+            93..114 'unsafe { p.*.a.&r...': {number}.&raw
+            100..114 '{ p.*.a.&raw }': {number}.&raw
+            102..103 'p': struct { a: {number}, b: {number} }.&raw
+            102..105 'p.*': struct { a: {number}, b: {number} }
+            102..107 'p.*.a': {number}
+            102..112 'p.*.a.&raw': {number}.&raw
         "#]],
     );
 }
@@ -6704,9 +6639,9 @@ static main = fn {
 #[test]
 fn deref_outside_unsafe_errors() {
     check_diagnostics(
-        "static main = fn() -> usize { let mut x = 1; let p = x.&raw mut; p.* };",
+        "static main = fn() -> usize { let mut x = 1; let p = x.&raw; p.* };",
         expect![[r#"
-            65..68: dereferencing a raw pointer requires an `unsafe { ... }` block
+            61..64: dereferencing a raw pointer requires an `unsafe { ... }` block
         "#]],
     );
 }
@@ -6714,7 +6649,7 @@ fn deref_outside_unsafe_errors() {
 #[test]
 fn deref_inside_unsafe_is_clean() {
     check_diagnostics(
-        "static main = fn() -> usize { let mut x = 1; let p = x.&raw mut; unsafe { p.* } };",
+        "static main = fn() -> usize { let mut x = 1; let p = x.&raw; unsafe { p.* } };",
         expect![[r#""#]],
     );
 }
@@ -6722,45 +6657,30 @@ fn deref_inside_unsafe_is_clean() {
 #[test]
 fn deref_write_outside_unsafe_errors() {
     check_diagnostics(
-        "static main = fn { let mut x = 1; let p = x.&raw mut; p.* = 2; };",
+        "static main = fn { let mut x = 1; let p = x.&raw; p.* = 2; };",
         expect![[r#"
             31..32: cannot infer the type of this number: it has no defining use — add a type annotation
-            54..57: dereferencing a raw pointer requires an `unsafe { ... }` block
+            50..53: dereferencing a raw pointer requires an `unsafe { ... }` block
         "#]],
     );
 }
 
 #[test]
-fn deref_write_through_a_shared_pointer_errors() {
+fn deref_write_through_a_pointer_to_a_non_mut_local_is_accepted() {
+    // The checker does not judge a raw write's permission (#183): the
+    // write is UB, detected by the interpreter, which mints `x` read-only.
     check_diagnostics(
-        "static main = fn { let mut x = 1; let p = x.&raw; unsafe { p.* = 2; } };",
-        expect![[r#"
-            31..32: cannot infer the type of this number: it has no defining use — add a type annotation
-            59..62: cannot assign through `{number}.&raw`: writing needs a `.&raw mut` pointer
-        "#]],
+        "static main = fn { let x: usize = 1; let p = x.&raw; unsafe { p.* = 2; } };",
+        expect![[r#""#]],
     );
 }
 
 #[test]
 fn deref_write_into_a_pointee_field_works() {
     check_diagnostics(
-        "static main = fn { let mut r = struct { a = 1 }; let p = r.&raw mut; unsafe { p.*.a = 2; } };",
-        expect![[r#"
-            44..45: cannot infer the type of this number: it has no defining use — add a type annotation
-        "#]],
-    );
-}
-
-#[test]
-fn deref_write_into_a_pointee_field_through_a_shared_pointer_errors() {
-    // A shared step anywhere in the chain refuses the write: `p` is
-    // shared, so the field write is refused at the pointer's flavor —
-    // same message as `p.* = v;`.
-    check_diagnostics(
         "static main = fn { let mut r = struct { a = 1 }; let p = r.&raw; unsafe { p.*.a = 2; } };",
         expect![[r#"
             44..45: cannot infer the type of this number: it has no defining use — add a type annotation
-            74..77: cannot assign through `struct { a: {number} }.&raw`: writing needs a `.&raw mut` pointer
         "#]],
     );
 }
@@ -6768,10 +6688,10 @@ fn deref_write_into_a_pointee_field_through_a_shared_pointer_errors() {
 #[test]
 fn deref_write_into_a_pointee_field_still_requires_unsafe() {
     check_diagnostics(
-        "static main = fn { let mut r = struct { a = 1 }; let p = r.&raw mut; p.*.a = 2; };",
+        "static main = fn { let mut r = struct { a = 1 }; let p = r.&raw; p.*.a = 2; };",
         expect![[r#"
             44..45: cannot infer the type of this number: it has no defining use — add a type annotation
-            69..72: dereferencing a raw pointer requires an `unsafe { ... }` block
+            65..68: dereferencing a raw pointer requires an `unsafe { ... }` block
         "#]],
     );
 }
@@ -6781,7 +6701,7 @@ fn deref_write_needs_no_mut_binding_on_the_pointer() {
     // `p` itself is not `mut` — writing through it does not reassign it,
     // for projected targets exactly like for `p.* = v;`.
     check_diagnostics(
-        "static main = fn { let mut r = struct { a = 1 }; let p = r.&raw mut; unsafe { p.*.a = 2; }; let x = p; };",
+        "static main = fn { let mut r = struct { a = 1 }; let p = r.&raw; unsafe { p.*.a = 2; }; let x = p; };",
         expect![[r#"
             44..45: cannot infer the type of this number: it has no defining use — add a type annotation
         "#]],
@@ -6791,37 +6711,26 @@ fn deref_write_needs_no_mut_binding_on_the_pointer() {
 #[test]
 fn pointee_field_reads_work() {
     check_diagnostics(
-        "static main = fn() -> usize { let mut r = struct { a = 1, b = 2 }; let p = r.&raw mut; unsafe { p.*.a + p.*.b } };",
+        "static main = fn() -> usize { let mut r = struct { a = 1, b = 2 }; let p = r.&raw; unsafe { p.*.a + p.*.b } };",
         expect![[r#""#]],
     );
 }
 
 #[test]
-fn raw_pointer_unification_is_exact_no_mut_mixing() {
+fn raw_pointers_have_one_kind() {
+    // `x.&raw` of a `mut` and a non-`mut` root are the same type.
     check_diagnostics(
-        "static f = fn(p: usize.&raw) {};\nstatic main = fn { let mut x = 1; f(x.&raw mut); };",
-        expect![[r#"
-            69..79: type mismatch: expected `usize.&raw`, found `{number}.&raw mut`
-        "#]],
-    );
-}
-
-#[test]
-fn raw_pointer_unification_is_exact_no_shared_to_mut() {
-    check_diagnostics(
-        "static f = fn(p: usize.&raw mut) {};\nstatic main = fn { let x = 1; f(x.&raw); };",
-        expect![[r#"
-            69..75: type mismatch: expected `usize.&raw mut`, found `{number}.&raw`
-        "#]],
+        "static f = fn(p: usize.&raw) {};\nstatic main = fn { let mut x: usize = 1; let y: usize = 2; f(x.&raw); f(y.&raw); };",
+        expect![""],
     );
 }
 
 #[test]
 fn raw_pointer_pointee_must_match_exactly() {
     check_diagnostics(
-        r#"static main = fn { let mut x = 1; let p: str.&raw mut = x.&raw mut; };"#,
+        r#"static main = fn { let mut x = 1; let p: str.&raw = x.&raw; };"#,
         expect![[r#"
-            56..66: type mismatch: expected `str.&raw mut`, found `{number}.&raw mut` (expected `str.&raw mut` because of this annotation at 41..53)
+            52..58: type mismatch: expected `str.&raw`, found `{number}.&raw` (expected `str.&raw` because of this annotation at 41..49)
         "#]],
     );
 }
@@ -6829,9 +6738,9 @@ fn raw_pointer_pointee_must_match_exactly() {
 #[test]
 fn raw_pointer_does_not_coerce_to_pointee() {
     check_diagnostics(
-        "static main = fn { let mut x = 1; let y: usize = x.&raw mut; };",
+        "static main = fn { let mut x = 1; let y: usize = x.&raw; };",
         expect![[r#"
-            49..59: type mismatch: expected `usize`, found `{number}.&raw mut` (expected `usize` because of this annotation at 41..46)
+            49..55: type mismatch: expected `usize`, found `{number}.&raw` (expected `usize` because of this annotation at 41..46)
         "#]],
     );
 }
@@ -6850,7 +6759,7 @@ fn deref_of_a_non_pointer_errors() {
 #[test]
 fn pointer_equality_is_legal_and_safe() {
     check_diagnostics(
-        "static main = fn() -> bool { let mut x = 1; x.&raw mut == x.&raw mut };",
+        "static main = fn() -> bool { let mut x = 1; x.&raw == x.&raw };",
         expect![[r#"
             41..42: cannot infer the type of this number: it has no defining use — add a type annotation
         "#]],
@@ -7169,8 +7078,8 @@ fn addr_of_whole_array_and_element_work() {
         r#"
 static f = fn {
     let mut a = [1, 2];
-    let p = unsafe { (a.&raw mut).* };
-    let q = a[0].&raw mut;
+    let p = unsafe { (a.&raw).* };
+    let q = a[0].&raw;
 };
 "#,
         expect![[r#"
@@ -7185,32 +7094,31 @@ fn addr_of_array_element_types_as_element_pointer() {
         r#"
 static f = fn {
     let mut a = [1, 2];
-    let q = a[0].&raw mut;
+    let q = a[0].&raw;
 };
 "#,
         expect![[r#"
-            12..69 'fn {     let mut ...': fn()
-            15..69 '{     let mut a =...': ()
+            12..65 'fn {     let mut ...': fn()
+            15..65 '{     let mut a =...': ()
             29..30 'a': [{number}; 2]
             33..39 '[1, 2]': [{number}; 2]
             34..35 '1': {number}
             37..38 '2': {number}
-            49..50 'q': {number}.&raw mut
+            49..50 'q': {number}.&raw
             53..54 'a': [{number}; 2]
             53..57 'a[0]': {number}
-            53..66 'a[0].&raw mut': {number}.&raw mut
+            53..62 'a[0].&raw': {number}.&raw
             55..56 '0': usize
         "#]],
     );
 }
 
 #[test]
-fn addr_of_mut_of_an_element_still_requires_a_mut_root() {
+fn addr_of_an_element_of_a_non_mut_array_is_fine() {
     check_diagnostics(
-        "static f = fn { let a = [1, 2]; let q = a[0].&raw mut; };",
+        "static f = fn { let a = [1, 2]; let q = a[0].&raw; };",
         expect![[r#"
             25..26: cannot infer the type of this number: it has no defining use — add a type annotation
-            40..41: cannot take `.&raw mut` of `a[_]`: `a` is not declared `mut` (`a` is declared without `mut` here at 20..21)
         "#]],
     );
 }
@@ -7319,10 +7227,10 @@ static f = fn () -> usize {
             39..59 'alloc_array::<usize>': fn(usize) -> AllocResult::<usize>
             39..62 'alloc_array::<usi...': AllocResult::<usize>
             60..61 '2': usize
-            89..90 'p': usize.&raw mut
+            89..90 'p': usize.&raw
             95..109 'unsafe { p.* }': usize
             102..109 '{ p.* }': usize
-            104..105 'p': usize.&raw mut
+            104..105 'p': usize.&raw
             104..107 'p.*': usize
             139..140 '0': usize
         "#]],
@@ -7351,20 +7259,20 @@ static f = fn () -> () {
 fn dealloc_array_infers_its_type_argument_from_the_pointer() {
     check_infer(
         r#"
-static f = fn (p: str.&raw mut) {
+static f = fn (p: str.&raw) {
     unsafe { dealloc_array(p, 1) };
 };
 "#,
         expect![[r#"
-            12..72 'fn (p: str.&raw m...': fn(str.&raw mut)
-            16..17 'p': str.&raw mut
-            33..72 '{     unsafe { de...': ()
-            39..69 'unsafe { dealloc_...': ()
-            46..69 '{ dealloc_array(p...': ()
-            48..61 'dealloc_array': unsafe fn(str.&raw mut, usize)
-            48..67 'dealloc_array(p, 1)': ()
-            62..63 'p': str.&raw mut
-            65..66 '1': usize
+            12..68 'fn (p: str.&raw) ...': fn(str.&raw)
+            16..17 'p': str.&raw
+            29..68 '{     unsafe { de...': ()
+            35..65 'unsafe { dealloc_...': ()
+            42..65 '{ dealloc_array(p...': ()
+            44..57 'dealloc_array': unsafe fn(str.&raw, usize)
+            44..63 'dealloc_array(p, 1)': ()
+            58..59 'p': str.&raw
+            61..62 '1': usize
         "#]],
     );
 }
@@ -7373,12 +7281,12 @@ static f = fn (p: str.&raw mut) {
 fn dealloc_array_outside_unsafe_is_rejected() {
     check_diagnostics(
         r#"
-static f = fn (p: usize.&raw mut) {
+static f = fn (p: usize.&raw) {
     dealloc_array(p, 1);
 };
 "#,
         expect![[r#"
-            41..60: calling `dealloc_array` requires an `unsafe { ... }` block
+            37..56: calling `dealloc_array` requires an `unsafe { ... }` block
         "#]],
     );
 }
@@ -7387,12 +7295,12 @@ static f = fn (p: usize.&raw mut) {
 fn copy_outside_unsafe_is_rejected() {
     check_diagnostics(
         r#"
-static f = fn (p: usize.&raw, q: usize.&raw mut) {
+static f = fn (p: usize.&raw, q: usize.&raw) {
     copy(p, q, 1);
 };
 "#,
         expect![[r#"
-            56..69: calling `copy` requires an `unsafe { ... }` block
+            52..65: calling `copy` requires an `unsafe { ... }` block
         "#]],
     );
 }
@@ -7401,12 +7309,12 @@ static f = fn (p: usize.&raw, q: usize.&raw mut) {
 fn turbofished_dealloc_outside_unsafe_is_rejected_too() {
     check_diagnostics(
         r#"
-static f = fn (p: usize.&raw mut) {
+static f = fn (p: usize.&raw) {
     dealloc_array::<usize>(p, 1);
 };
 "#,
         expect![[r#"
-            41..69: calling `dealloc_array` requires an `unsafe { ... }` block
+            37..65: calling `dealloc_array` requires an `unsafe { ... }` block
         "#]],
     );
 }
@@ -7418,7 +7326,7 @@ fn alloc_and_dangling_need_no_unsafe() {
     // carries a real precondition, so it is wrapped in `unsafe` here.
     check_diagnostics(
         r#"
-static f = fn (p: usize.&raw mut) {
+static f = fn (p: usize.&raw) {
     let r = alloc_array::<usize>(1);
     let q = unsafe { add(p, 1) };
     let d = dangling::<usize>();
@@ -7435,70 +7343,58 @@ fn add_outside_unsafe_is_rejected() {
     // detected UB at the call, so the call needs the marker.
     check_diagnostics(
         r#"
-static f = fn (p: usize.&raw mut) {
+static f = fn (p: usize.&raw) {
     let q = add(p, 1);
 };
 "#,
         expect![[r#"
-            49..58: calling `add` requires an `unsafe { ... }` block
+            45..54: calling `add` requires an `unsafe { ... }` block
         "#]],
     );
 }
 
 #[test]
-fn add_preserves_the_pointer_flavor() {
+fn add_preserves_the_pointee() {
     check_infer(
         r#"
-static f = fn (s: usize.&raw, m: usize.&raw mut) {
+static f = fn (s: usize.&raw, m: str.&raw) {
     let a = unsafe { add(s, 1) };
     let b = unsafe { add(m, 1) };
 };
 "#,
         expect![[r#"
-            12..121 'fn (s: usize.&raw...': fn(usize.&raw, usize.&raw mut)
+            12..115 'fn (s: usize.&raw...': fn(usize.&raw, str.&raw)
             16..17 's': usize.&raw
-            31..32 'm': usize.&raw mut
-            50..121 '{     let a = uns...': ()
-            60..61 'a': usize.&raw
-            64..84 'unsafe { add(s, 1) }': usize.&raw
-            71..84 '{ add(s, 1) }': usize.&raw
-            73..82 'add(s, 1)': usize.&raw
-            77..78 's': usize.&raw
-            80..81 '1': usize
-            94..95 'b': usize.&raw mut
-            98..118 'unsafe { add(m, 1) }': usize.&raw mut
-            105..118 '{ add(m, 1) }': usize.&raw mut
-            107..116 'add(m, 1)': usize.&raw mut
-            111..112 'm': usize.&raw mut
-            114..115 '1': usize
+            31..32 'm': str.&raw
+            44..115 '{     let a = uns...': ()
+            54..55 'a': usize.&raw
+            58..78 'unsafe { add(s, 1) }': usize.&raw
+            65..78 '{ add(s, 1) }': usize.&raw
+            67..70 'add': unsafe fn(usize.&raw, usize) -> usize.&raw
+            67..76 'add(s, 1)': usize.&raw
+            71..72 's': usize.&raw
+            74..75 '1': usize
+            88..89 'b': str.&raw
+            92..112 'unsafe { add(m, 1) }': str.&raw
+            99..112 '{ add(m, 1) }': str.&raw
+            101..104 'add': unsafe fn(str.&raw, usize) -> str.&raw
+            101..110 'add(m, 1)': str.&raw
+            105..106 'm': str.&raw
+            108..109 '1': usize
         "#]],
     );
 }
 
 #[test]
-fn copy_requires_a_mutable_destination() {
+fn copy_pointees_must_agree() {
     check_diagnostics(
         r#"
-static f = fn (p: usize.&raw, q: usize.&raw) {
+static f = fn (p: str.&raw, q: usize.&raw) {
     unsafe { copy(p, q, 1) };
 };
 "#,
         expect![[r#"
-            69..70: type mismatch: expected `usize.&raw mut`, found `usize.&raw`
-        "#]],
-    );
-}
-
-#[test]
-fn copy_source_may_be_either_flavor_but_pointees_must_agree() {
-    check_diagnostics(
-        r#"
-static f = fn (p: str.&raw, q: usize.&raw mut) {
-    unsafe { copy(p, q, 1) };
-};
-"#,
-        expect![[r#"
-            71..72: type mismatch: expected `str.&raw mut`, found `usize.&raw mut`
+            67..68: type mismatch: expected `str.&raw`, found `usize.&raw`
         "#]],
     );
 }
@@ -7508,27 +7404,23 @@ fn add_of_a_non_pointer_is_rejected() {
     check_diagnostics(
         r#"
 static f = fn {
-    let a = unsafe { add(4, 1) };
+    let a = unsafe { add::<usize>(4, 1) };
 };
 "#,
         expect![[r#"
-            42..43: `add` expects a raw pointer (`T.&raw` or `T.&raw mut`) here, found `{number}`
-            42..43: cannot infer the type of this number: it has no defining use — add a type annotation
+            51..52: type mismatch: expected `usize.&raw`, found `{number}`
         "#]],
     );
 }
 
 #[test]
 fn offset_is_a_free_identifier_after_the_rename() {
-    // `offset` is reserved for a future signed (`isize`) variant but binds
-    // NOTHING builtin today: a user item named `offset` is an ordinary
-    // item. It even works as a first-class value and needs no `unsafe` —
-    // neither of which the flavor-polymorphic `add` builtin could do —
-    // proving `offset` no longer resolves to a builtin.
+    // A user item named `offset` shadows the builtin like any other: it is
+    // an ordinary item, first-class, and needs no `unsafe` to call.
     check_diagnostics(
         r#"
-static offset = fn (p: usize.&raw mut) { };
-static main = fn (p: usize.&raw mut) {
+static offset = fn (p: usize.&raw) { };
+static main = fn (p: usize.&raw) {
     let g = offset;
     offset(p);
 };
@@ -7538,9 +7430,42 @@ static main = fn (p: usize.&raw mut) {
 }
 
 #[test]
-fn add_is_not_a_first_class_value() {
-    // Its pointer parameter accepts both flavors, so there is no one fn
-    // type for a `let` to bind.
+fn pointer_builtins_are_first_class_values() {
+    // `add`, `offset`, `copy` and the blesses have ordinary fn types, so
+    // they bind like any generic or monomorphic fn; calling the binding
+    // needs `unsafe`.
+    check_diagnostics(
+        r#"
+static f = fn (p: usize.&raw, b: u8.&raw) {
+    let g = add::<usize>;
+    let h = offset::<usize>;
+    let c = copy::<usize>;
+    let s = str_from_utf8;
+    let u = str_from_utf8_unchecked;
+    let q: usize.&raw = unsafe { g(p, 1) };
+    let r: usize.&raw = unsafe { h(q, -1) };
+    unsafe { c(p, r, 1) };
+    let t: str = unsafe { u(b, 0) };
+    let w = unsafe { s(b, 0) };
+};
+"#,
+        expect![[r#""#]],
+    );
+    check_diagnostics(
+        r#"
+static f = fn (p: usize.&raw) {
+    let g = add::<usize>;
+    let q = g(p, 1);
+};
+"#,
+        expect![[r#"
+            71..78: calling a value of `unsafe fn` type requires an `unsafe { ... }` block
+        "#]],
+    );
+}
+
+#[test]
+fn a_bare_add_needs_its_type_argument() {
     check_diagnostics(
         r#"
 static f = fn {
@@ -7548,7 +7473,7 @@ static f = fn {
 };
 "#,
         expect![[r#"
-            29..32: `add` must be called directly; its pointer parameter accepts both `T.&raw` and `T.&raw mut`, so it has no one function type to be a value at
+            29..32: cannot infer the type parameter `T` of `add`; write `add::<...>` to specify it
         "#]],
     );
 }
@@ -7577,22 +7502,22 @@ static ok = const {
 
 #[test]
 fn raw_pointer_fields_in_type_declarations_lower() {
-    // The declaration side: `T.&raw mut` is a legal field type in
+    // The declaration side: `T.&raw` is a legal field type in
     // a `type` declaration, rigid params included.
     check_infer(
         r#"
-type HeapVec = struct::<T> { ptr: T.&raw mut, len: usize, cap: usize };
+type HeapVec = struct::<T> { ptr: T.&raw, len: usize, cap: usize };
 static f = fn (v: HeapVec::<str>) {
     let p = v.ptr;
 };
 "#,
         expect![[r#"
-            84..129 'fn (v: HeapVec::<...': fn(HeapVec::<str>)
-            88..89 'v': HeapVec::<str>
-            107..129 '{     let p = v.p...': ()
-            117..118 'p': str.&raw mut
-            121..122 'v': HeapVec::<str>
-            121..126 'v.ptr': str.&raw mut
+            80..125 'fn (v: HeapVec::<...': fn(HeapVec::<str>)
+            84..85 'v': HeapVec::<str>
+            103..125 '{     let p = v.p...': ()
+            113..114 'p': str.&raw
+            117..118 'v': HeapVec::<str>
+            117..122 'v.ptr': str.&raw
         "#]],
     );
 }
@@ -7627,7 +7552,7 @@ fn alloc_result_can_be_named_constructed_and_returned() {
     // enum it is.
     check_diagnostics(
         r#"
-static maybe = fn::<T>(p: T.&raw mut, full: bool) -> AllocResult::<T> {
+static maybe = fn::<T>(p: T.&raw, full: bool) -> AllocResult::<T> {
     if full {
         AllocResult::<T>::Err
     } else {
@@ -8569,9 +8494,8 @@ fn every_builtin_answers_its_properties() {
     use crate::{Builtin, ConstLegality};
 
     // The property TABLE, written out: what each builtin answers when
-    // asked whether const evaluation accepts it (and if not, why), whether
-    // calling it needs `unsafe`, and whether it takes a pointer argument
-    // in both raw flavors. All three properties are EXHAUSTIVE matches on
+    // asked whether const evaluation accepts it (and if not, why), and
+    // whether calling it needs `unsafe`. Both properties are EXHAUSTIVE matches on
     // the enum, so it is the compiler, not this test, that forces a new
     // builtin to have answers; what this adds is that a CHANGED answer
     // must be changed twice, deliberately.
@@ -8602,52 +8526,42 @@ fn every_builtin_answers_its_properties() {
         Builtin::StrBytes,
     ];
 
-    // `(const_legality, requires_unsafe, flavor_polymorphic)` per builtin.
-    fn expected(builtin: Builtin) -> (ConstLegality, bool, bool) {
+    // `(const_legality, requires_unsafe)` per builtin.
+    fn expected(builtin: Builtin) -> (ConstLegality, bool) {
         match builtin {
             // The host effects: refused by const evaluation, safe to
-            // call, no pointer argument.
-            Builtin::Print | Builtin::ReadLine => (ConstLegality::HostEffect, false, false),
+            // call.
+            Builtin::Print | Builtin::ReadLine => (ConstLegality::HostEffect, false),
             // The heap pair: const-FENCED, not effectful (C04) — and
             // freeing is UNSAFE because it invalidates every pointer into
-            // the allocation, while allocating cannot UB. Neither takes a
-            // flavor-polymorphic pointer: `alloc_array` takes a count,
-            // and `dealloc_array` frees one fixed flavor.
-            Builtin::AllocArray => (ConstLegality::HeapFence, false, false),
-            Builtin::DeallocArray => (ConstLegality::HeapFence, true, false),
+            // the allocation, while allocating cannot UB.
+            Builtin::AllocArray => (ConstLegality::HeapFence, false),
+            Builtin::DeallocArray => (ConstLegality::HeapFence, true),
             // Pure and safe: `panic` is the one effect const contexts
             // allow, `dangling` only names an address, and the two `str`
-            // MEMBERS read what the receiver already holds. None reads a
-            // caller-supplied pointer in either flavor.
+            // MEMBERS read what the receiver already holds.
             Builtin::Panic | Builtin::Dangling | Builtin::NextChar | Builtin::StrLen => {
-                (ConstLegality::Legal, false, false)
+                (ConstLegality::Legal, false)
             }
             // Const-legal AND unsafe — the two properties are orthogonal:
-            // pointer arithmetic and range reads carry preconditions
-            // nothing checks, but const evaluation detects every would-be
-            // UB as a deterministic trap, so it need not refuse them. All
-            // four read a pointer in either raw flavor.
+            // pointer arithmetic and range reads and writes carry
+            // preconditions nothing checks, but const evaluation detects
+            // every would-be UB as a deterministic trap, so it need not
+            // refuse them.
             Builtin::Add
             | Builtin::Offset
             | Builtin::Copy
             | Builtin::StrFromUtf8
-            | Builtin::StrFromUtf8Unchecked => (ConstLegality::Legal, true, true),
-            // Const-legal and unsafe like the group above, but a WRITE
-            // through one fixed flavor (`u8.&raw mut`) rather than a read
-            // through either — not flavor-polymorphic.
-            Builtin::StrBytes => (ConstLegality::Legal, true, false),
+            | Builtin::StrFromUtf8Unchecked
+            | Builtin::StrBytes => (ConstLegality::Legal, true),
         }
     }
 
     for builtin in ALL {
         assert_eq!(
-            (
-                builtin.const_legality(),
-                builtin.requires_unsafe(),
-                builtin.flavor_polymorphic()
-            ),
+            (builtin.const_legality(), builtin.requires_unsafe()),
             expected(builtin),
-            "{}: (const_legality, requires_unsafe, flavor_polymorphic)",
+            "{}: (const_legality, requires_unsafe)",
             builtin.name()
         );
     }
@@ -8796,15 +8710,15 @@ fn dangling_infers_from_the_expected_pointer_type() {
     check_infer(
         r#"
 static f = fn {
-    let p: str.&raw mut = dangling();
+    let p: str.&raw = dangling();
 };
 "#,
         expect![[r#"
-            12..56 'fn {     let p: s...': fn()
-            15..56 '{     let p: str....': ()
-            25..26 'p': str.&raw mut
-            43..51 'dangling': fn() -> str.&raw mut
-            43..53 'dangling()': str.&raw mut
+            12..52 'fn {     let p: s...': fn()
+            15..52 '{     let p: str....': ()
+            25..26 'p': str.&raw
+            39..47 'dangling': fn() -> str.&raw
+            39..49 'dangling()': str.&raw
         "#]],
     );
 }
@@ -9087,23 +9001,24 @@ fn unary_minus_types_as_its_operand() {
 }
 
 #[test]
-fn offset_builtin_takes_an_isize_and_preserves_the_flavor() {
+fn offset_builtin_takes_an_isize() {
     check_infer(
         r#"
-static f = fn (p: u8.&raw mut, i: isize) -> u8.&raw mut {
+static f = fn (p: u8.&raw, i: isize) -> u8.&raw {
     unsafe { offset(p, i) }
 };
 "#,
         expect![[r#"
-            12..88 'fn (p: u8.&raw mu...': fn(u8.&raw mut, isize) -> u8.&raw mut
-            16..17 'p': u8.&raw mut
-            32..33 'i': isize
-            57..88 '{     unsafe { of...': u8.&raw mut
-            63..86 'unsafe { offset(p...': u8.&raw mut
-            70..86 '{ offset(p, i) }': u8.&raw mut
-            72..84 'offset(p, i)': u8.&raw mut
-            79..80 'p': u8.&raw mut
-            82..83 'i': isize
+            12..80 'fn (p: u8.&raw, i...': fn(u8.&raw, isize) -> u8.&raw
+            16..17 'p': u8.&raw
+            28..29 'i': isize
+            49..80 '{     unsafe { of...': u8.&raw
+            55..78 'unsafe { offset(p...': u8.&raw
+            62..78 '{ offset(p, i) }': u8.&raw
+            64..70 'offset': unsafe fn(u8.&raw, isize) -> u8.&raw
+            64..76 'offset(p, i)': u8.&raw
+            71..72 'p': u8.&raw
+            74..75 'i': isize
         "#]],
     );
     // The literal pins to `isize` through the parameter position.
@@ -9119,6 +9034,7 @@ static f = fn (p: u8.&raw) -> u8.&raw {
             39..70 '{     unsafe { of...': u8.&raw
             45..68 'unsafe { offset(p...': u8.&raw
             52..68 '{ offset(p, 1) }': u8.&raw
+            54..60 'offset': unsafe fn(u8.&raw, isize) -> u8.&raw
             54..66 'offset(p, 1)': u8.&raw
             61..62 'p': u8.&raw
             64..65 '1': isize
@@ -9130,12 +9046,12 @@ static f = fn (p: u8.&raw) -> u8.&raw {
 fn offset_outside_unsafe_is_rejected() {
     check_diagnostics(
         r#"
-static f = fn (p: u8.&raw mut, i: isize) {
+static f = fn (p: u8.&raw, i: isize) {
     let q = offset(p, i);
 };
 "#,
         expect![[r#"
-            56..68: calling `offset` requires an `unsafe { ... }` block
+            52..64: calling `offset` requires an `unsafe { ... }` block
         "#]],
     );
 }
@@ -9144,12 +9060,12 @@ static f = fn (p: u8.&raw mut, i: isize) {
 fn offset_index_must_be_isize() {
     check_diagnostics(
         r#"
-static f = fn (p: u8.&raw mut, n: usize) {
+static f = fn (p: u8.&raw, n: usize) {
     let q = unsafe { offset(p, n) };
 };
 "#,
         expect![[r#"
-            75..76: type mismatch: expected `isize`, found `usize`
+            71..72: type mismatch: expected `isize`, found `usize`
         "#]],
     );
 }
@@ -9768,12 +9684,12 @@ type A = struct { x: usize } with {
 };
 static main = fn() -> usize {
     let mut a = A(struct { x = 1 });
-    let p = a.&raw mut;
+    let p = a.&raw;
     p.get()
 };
 "#,
         expect![[r#"
-            203..206: no field `get` on `A.&raw mut`
+            199..202: no field `get` on `A.&raw`
         "#]],
     );
 }
@@ -14046,7 +13962,7 @@ fn a_dot_call_receiver_is_a_value_position() {
 
 #[test]
 fn exclusive_borrow_needs_a_mut_root() {
-    // Same transitive-root judgement as an assignment or a `.&raw mut`,
+    // Same transitive-root judgement as an assignment or a `.&raw`,
     // with the same "declared without `mut` here" note on the declaration.
     check_diagnostics(
         "static f = fn () -> () { let n: usize = 1; let m = n.&mut; };",
@@ -14070,7 +13986,7 @@ fn exclusive_borrow_needs_a_mut_root() {
 fn an_exclusive_borrow_of_an_item_points_at_its_definition() {
     // Neither item is an exclusively-borrowable place, each for its own
     // reason, and both say where the name is defined — the courtesy
-    // `AssignToItem` and `AddrOfMutItem` already extend.
+    // `AssignToItem` already extends.
     check_diagnostics(
         "static s: usize = 7;\nconst g: usize = 8;\n\
          static f = fn () -> () { let a = s.&mut; let b = g.&mut; };",
@@ -14126,13 +14042,10 @@ fn a_shared_step_anywhere_in_a_place_refuses_a_write() {
                 55..58: cannot assign through `usize.&::<@a>`: writing needs a `.&mut` borrow
             "#]],
         ),
-        (
-            direct,
-            "{ let p = b.*.&raw mut; 0 }",
-            expect![[r#"
-                63..75: cannot take `.&raw mut` through `usize.&::<@a>`: minting a mutating address needs a `.&mut` borrow
-            "#]],
-        ),
+        // `.&raw` carries no write permission of its own (#183), so it
+        // is minted through a `.&` freely; a write through it lands on
+        // the borrow's frozen node, which the interpreter detects.
+        (direct, "{ let p = b.*.&raw; 0 }", expect![""]),
         (
             nested,
             "{ b.*.* = 5; 0 }",
@@ -14147,13 +14060,7 @@ fn a_shared_step_anywhere_in_a_place_refuses_a_write() {
                 74..84: cannot borrow `.&mut` through `usize.&mut::<@a>.&::<@b>`: an exclusive borrow needs a `.&mut` parent
             "#]],
         ),
-        (
-            nested,
-            "{ let p = b.*.*.&raw mut; 0 }",
-            expect![[r#"
-                74..88: cannot take `.&raw mut` through `usize.&mut::<@a>.&::<@b>`: minting a mutating address needs a `.&mut` borrow
-            "#]],
-        ),
+        (nested, "{ let p = b.*.*.&raw; 0 }", expect![""]),
         (
             "usize.&::<@a>.&mut::<@b>",
             "{ b.*.* = 5; 0 }",
@@ -14189,36 +14096,25 @@ fn a_shared_step_anywhere_in_a_place_refuses_a_write() {
 }
 
 #[test]
-fn a_raw_mut_step_grants_the_permission_it_carries() {
-    // The raw world's own laundering, and the reason the walk stops at a
-    // `.&raw mut`: reading a raw pointer out of a place COPIES it, and a
-    // copy carries the whole permission. `unsafe` is what gates it — a
-    // `.&raw` above makes no difference.
+fn a_raw_step_grants_the_permission_of_its_provenance() {
+    // The reason the walk stops at a `.&raw`: reading a raw pointer out of
+    // a place COPIES it, and whether a write through the copy is allowed
+    // is the provenance of the place it was taken from, which the
+    // interpreter judges (#183). `unsafe` is what gates it.
     check_diagnostics(
-        "static f = fn (pp: usize.&raw mut.&raw) -> () { unsafe { pp.*.* = 5; } };",
+        "static f = fn (pp: usize.&raw.&raw) -> () { unsafe { pp.*.* = 5; } };",
         expect![[r#""#]],
     );
-    // A `.&mut` in the same position does NOT stop the walk: reading it
-    // out is a reborrow, not a copy.
+    // A `.&mut` reached through a raw pointer writes and reborrows: the
+    // walk stops at the raw step above it.
     check_diagnostics(
         "static f = fn::<@a>(pb: usize.&mut::<@a>.&raw) -> () { unsafe { pb.*.* = 5; } };",
-        expect![[r#"
-            64..70: cannot assign through `usize.&mut::<@a>.&raw`: writing needs a `.&raw mut` pointer
-        "#]],
+        expect![""],
     );
-    // Minting through the same pair, so the advice the diagnostic gives
-    // is the advice that works.
     check_diagnostics(
         "static f = fn::<@a>(pb: usize.&mut::<@a>.&raw) -> () \
          { unsafe { let c = pb.*.*.&mut; }; };",
-        expect![[r#"
-            72..83: cannot borrow `.&mut` through `usize.&mut::<@a>.&raw`: an exclusive borrow needs a `.&raw mut` parent
-        "#]],
-    );
-    check_diagnostics(
-        "static f = fn::<@a>(pb: usize.&mut::<@a>.&raw mut) -> () \
-         { unsafe { let c = pb.*.*.&mut; }; };",
-        expect![[r#""#]],
+        expect![""],
     );
     // And a non-`mut` binding holding a `.&mut` still writes: the root's
     // own mutability is a different rule, about reassigning the binding.
@@ -14237,11 +14133,11 @@ fn no_safe_borrow_can_be_minted_through_a_raw_pointer() {
     check_diagnostics(
         r#"
 static shared = fn (r: usize.&raw) -> () { let m = unsafe { r.*.& }; };
-static exclusive = fn (r: usize.&raw mut) -> () { let m = unsafe { r.*.&mut }; };
+static exclusive = fn (r: usize.&raw) -> () { let m = unsafe { r.*.&mut }; };
 "#,
         expect![[r#"
             61..66: cannot mint a safe borrow through `usize.&raw`: a raw pointer carries no region for the new borrow to be bounded by
-            140..148: cannot mint a safe borrow through `usize.&raw mut`: a raw pointer carries no region for the new borrow to be bounded by
+            136..144: cannot mint a safe borrow through `usize.&raw`: a raw pointer carries no region for the new borrow to be bounded by
         "#]],
     );
 }
@@ -15746,13 +15642,15 @@ fn an_extern_items_declared_type_carries_its_price() {
     // owns no syntax node (nothing here is that expression), so the type is
     // read where a reader can see it: at a mention.
     check_infer(
-        "unsafe extern static read: unsafe fn(u8.&raw mut, usize) -> i64;\n\
-         static held = fn() -> () { let f = read; };",
+        r#"
+unsafe extern static read: unsafe fn(u8.&raw, usize) -> i64;
+static held = fn() -> () { let f = read; };
+"#,
         expect![[r#"
-            79..107 'fn() -> () { let ...': fn()
-            90..107 '{ let f = read; }': ()
-            96..97 'f': unsafe fn(u8.&raw mut, usize) -> i64
-            100..104 'read': unsafe fn(u8.&raw mut, usize) -> i64
+            76..104 'fn() -> () { let ...': fn()
+            87..104 '{ let f = read; }': ()
+            93..94 'f': unsafe fn(u8.&raw, usize) -> i64
+            97..101 'read': unsafe fn(u8.&raw, usize) -> i64
         "#]],
     );
 }
@@ -15778,10 +15676,12 @@ fn an_extern_items_unwritten_return_type_is_unit() {
 #[test]
 fn calling_an_extern_item_outside_unsafe_is_rejected() {
     check_diagnostics(
-        "unsafe extern static read: unsafe fn(u8.&raw mut, usize) -> i64;\n\
-         static f = fn(p: u8.&raw mut) -> i64 { read(p, 1) };",
+        r#"
+unsafe extern static read: unsafe fn(u8.&raw, usize) -> i64;
+static f = fn(p: u8.&raw) -> i64 { read(p, 1) };
+"#,
         expect![[r#"
-            104..114: calling the `extern` item `read` requires an `unsafe { ... }` block; nothing on this side of the boundary can check what it does
+            97..107: calling the `extern` item `read` requires an `unsafe { ... }` block; nothing on this side of the boundary can check what it does
         "#]],
     );
 }
@@ -15794,14 +15694,14 @@ fn calling_an_extern_item_in_a_const_context_is_rejected() {
     // the missing host. Even an extern item with a safe type has none.
     check_diagnostics(
         r#"
-unsafe extern static read: unsafe fn(u8.&raw mut, usize) -> i64;
+unsafe extern static read: unsafe fn(u8.&raw, usize) -> i64;
 unsafe extern static now: fn() -> i64;
-static f = const fn(p: u8.&raw mut) -> i64 { unsafe { read(p, 1) } };
+static f = const fn(p: u8.&raw) -> i64 { unsafe { read(p, 1) } };
 static g = const fn() -> i64 { now() };
 "#,
         expect![[r#"
-            159..163: cannot call the `extern` item `read` in a const context; there is no host at compile time (this `const fn` is always a const context at 116..121)
-            206..209: cannot call the `extern` item `now` in a const context; there is no host at compile time (this `const fn` is always a const context at 186..191)
+            151..155: cannot call the `extern` item `read` in a const context; there is no host at compile time (this `const fn` is always a const context at 112..117)
+            198..201: cannot call the `extern` item `now` in a const context; there is no host at compile time (this `const fn` is always a const context at 178..183)
         "#]],
     );
 }
@@ -15815,13 +15715,15 @@ fn taking_an_extern_item_as_a_value_is_free_and_its_call_is_gated() {
     // one a reader of the call can act on. Binding, passing and returning
     // an `extern` item are now ordinary things to do.
     check_diagnostics(
-        "unsafe extern static read: unsafe fn(u8.&raw mut, usize) -> isize;\n\
-         static bound = fn() -> () { let f = read; };\n\
-         static loose = fn(p: u8.&raw mut) -> isize { let f = read; f(p, 1) };\n\
-         static vouched = fn(p: u8.&raw mut) -> isize { let f = read; unsafe { f(p, 1) } };\n\
-         static called = fn(p: u8.&raw mut) -> isize { unsafe { read(p, 1) } };",
+        r#"
+unsafe extern static read: unsafe fn(u8.&raw, usize) -> isize;
+static bound = fn() -> () { let f = read; };
+static loose = fn(p: u8.&raw) -> isize { let f = read; f(p, 1) };
+static vouched = fn(p: u8.&raw) -> isize { let f = read; unsafe { f(p, 1) } };
+static called = fn(p: u8.&raw) -> isize { unsafe { read(p, 1) } };
+"#,
         expect![[r#"
-            171..178: calling a value of `unsafe fn` type requires an `unsafe { ... }` block
+            164..171: calling a value of `unsafe fn` type requires an `unsafe { ... }` block
         "#]],
     );
 }
@@ -15833,8 +15735,10 @@ fn one_signature_two_spellings_is_one_type() {
     // at the syntax layer, so the two spellings must be the same type —
     // otherwise a signature would depend on whether someone wrote `buf`.
     check_diagnostics(
-        "unsafe extern static read: unsafe fn(u8.&raw mut, usize) -> isize;\n\
-         static held: unsafe fn(u8.&raw mut, usize) -> isize = read;",
+        r#"
+unsafe extern static read: unsafe fn(u8.&raw, usize) -> isize;
+static held: unsafe fn(u8.&raw, usize) -> isize = read;
+"#,
         expect![[""]],
     );
 }
@@ -15926,10 +15830,10 @@ fn a_safe_typed_extern_item_is_called_with_no_marker_at_all() {
 
 /// A safe function, an `extern` item (`unsafe fn`), and a higher-order
 /// function that takes either — the shapes every test below draws from.
-const UNSAFE_FN_PRELUDE: &str = "\
-unsafe extern static read: unsafe fn(u8.&raw mut, usize) -> isize;
-static safe_read = fn(buf: u8.&raw mut, len: usize) -> isize { 0 };
-";
+const UNSAFE_FN_PRELUDE: &str = r#"
+unsafe extern static read: unsafe fn(u8.&raw, usize) -> isize;
+static safe_read = fn(buf: u8.&raw, len: usize) -> isize { 0 };
+"#;
 
 /// Checks `body` after the prelude, and returns the whole text it checked.
 fn check_unsafe_fn(body: &str, expect: Expect) -> String {
@@ -15962,7 +15866,7 @@ fn a_safe_fn_coerces_to_an_unsafe_fn() {
     // welcome in a position willing to vouch. Nothing is converted at run
     // time — the position simply declines to use a permission it has.
     check_unsafe_fn(
-        "static f = fn() -> () { let g: unsafe fn(u8.&raw mut, usize) -> isize = safe_read; };",
+        "static f = fn() -> () { let g: unsafe fn(u8.&raw, usize) -> isize = safe_read; };",
         expect![[r#""#]],
     );
 }
@@ -15972,9 +15876,9 @@ fn an_unsafe_fn_does_not_coerce_to_a_safe_fn() {
     // The other direction is the unsound one, and the two rendered types
     // differ by the one token that is the whole story.
     check_unsafe_fn(
-        "static f = fn() -> () { let g: fn(u8.&raw mut, usize) -> isize = read; };",
+        "static f = fn() -> () { let g: fn(u8.&raw, usize) -> isize = read; };",
         expect![[r#"
-            200..204: type mismatch: expected `fn(u8.&raw mut, usize) -> isize`, found `unsafe fn(u8.&raw mut, usize) -> isize` (expected `fn(u8.&raw mut, usize) -> isize` because of this annotation at 166..197)
+            189..193: type mismatch: expected `fn(u8.&raw, usize) -> isize`, found `unsafe fn(u8.&raw, usize) -> isize` (expected `fn(u8.&raw, usize) -> isize` because of this annotation at 159..186)
         "#]],
     );
 }
@@ -15984,10 +15888,12 @@ fn calling_an_unsafe_fn_parameter_needs_the_marker() {
     // The parameter never saw a declaration: its TYPE is the whole reason
     // the marker is owed, which is the point of moving unsafety here.
     check_unsafe_fn(
-        "static apply = fn(g: unsafe fn(u8.&raw mut, usize) -> isize, p: u8.&raw mut) -> isize { g(p, 1) };\n\
-         static ok = fn(g: unsafe fn(u8.&raw mut, usize) -> isize, p: u8.&raw mut) -> isize { unsafe { g(p, 1) } };",
+        r#"
+static apply = fn(g: unsafe fn(u8.&raw, usize) -> isize, p: u8.&raw) -> isize { g(p, 1) };
+static ok = fn(g: unsafe fn(u8.&raw, usize) -> isize, p: u8.&raw) -> isize { unsafe { g(p, 1) } };
+"#,
         expect![[r#"
-            223..230: calling a value of `unsafe fn` type requires an `unsafe { ... }` block
+            209..216: calling a value of `unsafe fn` type requires an `unsafe { ... }` block
         "#]],
     );
 }
@@ -15995,10 +15901,12 @@ fn calling_an_unsafe_fn_parameter_needs_the_marker() {
 #[test]
 fn calling_an_unsafe_fn_returned_from_a_function_needs_the_marker() {
     check_unsafe_fn(
-        "static pick = fn() -> unsafe fn(u8.&raw mut, usize) -> isize { read };\n\
-         static f = fn(p: u8.&raw mut) -> isize { pick()(p, 1) };",
+        r#"
+static pick = fn() -> unsafe fn(u8.&raw, usize) -> isize { read };
+static f = fn(p: u8.&raw) -> isize { pick()(p, 1) };
+"#,
         expect![[r#"
-            247..259: calling a value of `unsafe fn` type requires an `unsafe { ... }` block
+            233..245: calling a value of `unsafe fn` type requires an `unsafe { ... }` block
         "#]],
     );
 }
@@ -16006,11 +15914,13 @@ fn calling_an_unsafe_fn_returned_from_a_function_needs_the_marker() {
 #[test]
 fn calling_an_unsafe_fn_out_of_a_record_field_needs_the_marker() {
     check_unsafe_fn(
-        "static f = fn(p: u8.&raw mut) -> isize { \
-             let h = struct { go = read }; h.go(p, 1) \
-         };",
+        r#"
+static f = fn(p: u8.&raw) -> isize {
+    let h = struct { go = read }; h.go(p, 1)
+};
+"#,
         expect![[r#"
-            206..216: calling a value of `unsafe fn` type requires an `unsafe { ... }` block
+            200..210: calling a value of `unsafe fn` type requires an `unsafe { ... }` block
         "#]],
     );
 }
@@ -16026,11 +15936,11 @@ fn an_unsafe_fn_parameter_carries_the_price_and_accepts_a_safe_fn() {
     // promises to vouch, so a function that needs no vouching still fits.
     check_unsafe_fn(
         r#"
-static apply = fn(g: unsafe fn(u8.&raw mut, usize) -> isize, p: u8.&raw mut) -> isize {
+static apply = fn(g: unsafe fn(u8.&raw, usize) -> isize, p: u8.&raw) -> isize {
     unsafe { g(p, 1) }
 };
-static f = fn(p: u8.&raw mut) -> isize { apply(read, p) };
-static coerced = fn(p: u8.&raw mut) -> isize { apply(safe_read, p) };
+static f = fn(p: u8.&raw) -> isize { apply(read, p) };
+static coerced = fn(p: u8.&raw) -> isize { apply(safe_read, p) };
 "#,
         expect![[r#""#]],
     );
@@ -16056,19 +15966,14 @@ fn the_conversion_is_shallow_but_a_literal_is_checked_per_part() {
     // by one against the annotation, so each field converts on its own and
     // no record ever converted at all.
     check_unsafe_fn(
-        "static built = fn() -> () { \
-             let r: struct { go: unsafe fn(u8.&raw mut, usize) -> isize } = \
-                 struct { go = safe_read }; \
-         };\n\
-         static formed = fn(v: struct { go: fn(u8.&raw mut, usize) -> isize }) -> () { \
-             let r: struct { go: unsafe fn(u8.&raw mut, usize) -> isize } = v; \
-         };\n\
-         static returned = fn(g: fn() -> fn(usize) -> usize) -> () { \
-             let h: fn() -> unsafe fn(usize) -> usize = g; \
-         };",
+        r#"
+static built = fn() -> () { let r: struct { go: unsafe fn(u8.&raw, usize) -> isize } = struct { go = safe_read }; };
+static formed = fn(v: struct { go: fn(u8.&raw, usize) -> isize }) -> () { let r: struct { go: unsafe fn(u8.&raw, usize) -> isize } = v; };
+static returned = fn(g: fn() -> fn(usize) -> usize) -> () { let h: fn() -> unsafe fn(usize) -> usize = g; };
+"#,
         expect![[r#"
-            397..398: type mismatch: expected `struct { go: unsafe fn(u8.&raw mut, usize) -> isize }`, found `struct { go: fn(u8.&raw mut, usize) -> isize }` (expected `struct { go: unsafe fn(u8.&raw mut, usize) -> isize }` because of this annotation at 341..394)
-            506..507: type mismatch: expected `fn() -> unsafe fn(usize) -> usize`, found `fn() -> fn(usize) -> usize` (expected `fn() -> unsafe fn(usize) -> usize` because of this annotation at 470..503)
+            379..380: type mismatch: expected `struct { go: unsafe fn(u8.&raw, usize) -> isize }`, found `struct { go: fn(u8.&raw, usize) -> isize }` (expected `struct { go: unsafe fn(u8.&raw, usize) -> isize }` because of this annotation at 327..376)
+            488..489: type mismatch: expected `fn() -> unsafe fn(usize) -> usize`, found `fn() -> fn(usize) -> usize` (expected `fn() -> unsafe fn(usize) -> usize` because of this annotation at 452..485)
         "#]],
     );
 }
@@ -16079,12 +15984,12 @@ fn a_safe_fn_parameter_refuses_an_unsafe_fn() {
     // a body that promised to call its argument WITHOUT a marker may not be
     // handed something that owes one. The refusal lands at the argument.
     check_unsafe_fn(
-        "static apply = fn(g: fn(u8.&raw mut, usize) -> isize, p: u8.&raw mut) -> isize { \
-             g(p, 1) \
-         };\n\
-         static f = fn(p: u8.&raw mut) -> isize { apply(read, p) };",
+        r#"
+static apply = fn(g: fn(u8.&raw, usize) -> isize, p: u8.&raw) -> isize { g(p, 1) };
+static f = fn(p: u8.&raw) -> isize { apply(read, p) };
+"#,
         expect![[r#"
-            274..278: type mismatch: expected `fn(u8.&raw mut, usize) -> isize`, found `unsafe fn(u8.&raw mut, usize) -> isize`
+            256..260: type mismatch: expected `fn(u8.&raw, usize) -> isize`, found `unsafe fn(u8.&raw, usize) -> isize`
         "#]],
     );
 }
@@ -16095,11 +16000,13 @@ fn a_generic_instantiated_at_an_unsafe_fn_keeps_the_price() {
     // makes a round trip through a generic body that knows nothing about
     // it, and the call on the other side still owes the marker.
     check_unsafe_fn(
-        "static id = fn::<T>(t: T) -> T { t };\n\
-         static f = fn(p: u8.&raw mut) -> isize { id(read)(p, 1) };\n\
-         static ok = fn(p: u8.&raw mut) -> isize { unsafe { id(read)(p, 1) } };",
+        r#"
+static id = fn::<T>(t: T) -> T { t };
+static f = fn(p: u8.&raw) -> isize { id(read)(p, 1) };
+static ok = fn(p: u8.&raw) -> isize { unsafe { id(read)(p, 1) } };
+"#,
         expect![[r#"
-            214..228: calling a value of `unsafe fn` type requires an `unsafe { ... }` block
+            204..218: calling a value of `unsafe fn` type requires an `unsafe { ... }` block
         "#]],
     );
 }
@@ -16110,10 +16017,10 @@ fn an_unsafe_fn_is_writable_as_an_explicit_generic_argument() {
     // reaches the same `type_core`, so `T` can be pinned at an `unsafe fn`
     // by hand and the instantiated signature keeps the marker.
     check_unsafe_fn(
-        "static id = fn::<T>(t: T) -> T { t };\n\
-         static f = fn(p: u8.&raw mut) -> isize { \
-             unsafe { id::<unsafe fn(u8.&raw mut, usize) -> isize>(read)(p, 1) } \
-         };",
+        r#"
+static id = fn::<T>(t: T) -> T { t };
+static f = fn(p: u8.&raw) -> isize { unsafe { id::<unsafe fn(u8.&raw, usize) -> isize>(read)(p, 1) } };
+"#,
         expect![[r#""#]],
     );
 }
@@ -16124,12 +16031,12 @@ fn an_unsafe_builtin_taken_as_a_value_carries_its_price() {
     // `dealloc_array` as a value used to launder the marker away entirely.
     // Its TYPE is an `unsafe fn` now, so the call answers for it.
     check_diagnostics(
-        "static f = fn(p: usize.&raw mut) -> () { let d = dealloc_array::<usize>; d(p, 1) };\n\
-         static ok = fn(p: usize.&raw mut) -> () { \
-             let d = dealloc_array::<usize>; unsafe { d(p, 1) } \
-         };",
+        r#"
+static f = fn(p: usize.&raw) -> () { let d = dealloc_array::<usize>; d(p, 1) };
+static ok = fn(p: usize.&raw) -> () { let d = dealloc_array::<usize>; unsafe { d(p, 1) } };
+"#,
         expect![[r#"
-            73..80: calling a value of `unsafe fn` type requires an `unsafe { ... }` block
+            70..77: calling a value of `unsafe fn` type requires an `unsafe { ... }` block
         "#]],
     );
 }
@@ -16159,10 +16066,12 @@ fn an_item_level_unsafe_fn_annotation_lowers_the_same() {
     // every binder), so it is checked separately: the marker must survive
     // there too, and the coercion must still apply.
     check_unsafe_fn(
-        "static vouching: unsafe fn(u8.&raw mut, usize) -> isize = safe_read;\n\
-         static f = fn(p: u8.&raw mut) -> isize { vouching(p, 1) };",
+        r#"
+static vouching: unsafe fn(u8.&raw, usize) -> isize = safe_read;
+static f = fn(p: u8.&raw) -> isize { vouching(p, 1) };
+"#,
         expect![[r#"
-            245..259: calling a value of `unsafe fn` type requires an `unsafe { ... }` block
+            231..245: calling a value of `unsafe fn` type requires an `unsafe { ... }` block
         "#]],
     );
 }
@@ -16174,10 +16083,12 @@ fn an_unsafe_fn_value_is_forgettable_like_any_signature() {
     // capability rules never look at the flag — bare, and inside a record
     // that is itself dropped on the floor.
     check_unsafe_fn(
-        "static f = fn() -> () { \
-             let g: unsafe fn(u8.&raw mut, usize) -> isize = read; \
-             let held = struct { go = g }; \
-         };",
+        r#"
+static f = fn() -> () {
+    let g: unsafe fn(u8.&raw, usize) -> isize = read;
+    let held = struct { go = g };
+};
+"#,
         expect![[r#""#]],
     );
 }
@@ -16190,14 +16101,14 @@ fn a_join_of_unsafe_fns_is_an_unsafe_fn_and_its_call_is_gated() {
     // value every branch produced, blaming `fn(...)`, a shape nothing in
     // the source asked for. The safety stays open, and the join decides it.
     check_unsafe_fn(
-        r#"static gated = fn(c: bool, p: u8.&raw mut, n: usize) -> isize {
+        r#"static gated = fn(c: bool, p: u8.&raw, n: usize) -> isize {
     let g = if c { read } else { read }; g(p, n)
 };
-static ok = fn(c: bool, p: u8.&raw mut, n: usize) -> isize {
+static ok = fn(c: bool, p: u8.&raw, n: usize) -> isize {
     let g = if c { read } else { read }; unsafe { g(p, n) }
 };"#,
         expect![[r#"
-            240..247: calling a value of `unsafe fn` type requires an `unsafe { ... }` block
+            229..236: calling a value of `unsafe fn` type requires an `unsafe { ... }` block
         "#]],
     );
 }
@@ -16209,8 +16120,8 @@ fn a_join_of_safe_functions_stays_safe_when_called() {
     // have made this the bug, in the direction that demands markers nobody
     // owes.)
     check_unsafe_fn(
-        r#"static other = fn(buf: u8.&raw mut, len: usize) -> isize { 1 };
-static f = fn(c: bool, p: u8.&raw mut, n: usize) -> isize {
+        r#"static other = fn(buf: u8.&raw, len: usize) -> isize { 1 };
+static f = fn(c: bool, p: u8.&raw, n: usize) -> isize {
     let g = if c { safe_read } else { other }; g(p, n)
 };"#,
         expect![[r#""#]],
@@ -16222,15 +16133,15 @@ fn a_match_join_and_a_loop_break_join_decide_safety_the_same_way() {
     // The sink is shared machinery: `match` arms and `break` values decide
     // the call's open safety by the same path.
     check_unsafe_fn(
-        r#"static by_match = fn(k: char, p: u8.&raw mut, len: usize) -> isize {
+        r#"static by_match = fn(k: char, p: u8.&raw, len: usize) -> isize {
     let g = match k { 'a' => read, _ => read }; g(p, len)
 };
-static by_break = fn(c: bool, p: u8.&raw mut, len: usize) -> isize {
+static by_break = fn(c: bool, p: u8.&raw, len: usize) -> isize {
     let g = loop { if c { break read; }; break read; }; g(p, len)
 };"#,
         expect![[r#"
-            252..261: calling a value of `unsafe fn` type requires an `unsafe { ... }` block
-            390..399: calling a value of `unsafe fn` type requires an `unsafe { ... }` block
+            241..250: calling a value of `unsafe fn` type requires an `unsafe { ... }` block
+            375..384: calling a value of `unsafe fn` type requires an `unsafe { ... }` block
         "#]],
     );
 }
@@ -16273,15 +16184,15 @@ fn a_hole_parameter_called_outside_unsafe_refuses_an_unsafe_argument() {
     // `read` with no block. In `vouched` the call is inside one, so the
     // caller is free to pass an `unsafe fn`.
     check_unsafe_fn(
-        r#"static p = fn(f, b: u8.&raw mut) -> () { let n: usize = 1; let x: isize = f(b, n); };
-static q = fn(b: u8.&raw mut) -> () { p(read, b); };
-static vouched = fn(f, b: u8.&raw mut) -> () {
+        r#"static p = fn(f, b: u8.&raw) -> () { let n: usize = 1; let x: isize = f(b, n); };
+static q = fn(b: u8.&raw) -> () { p(read, b); };
+static vouched = fn(f, b: u8.&raw) -> () {
     let n: usize = 1;
     let x: isize = unsafe { f(b, n) };
 };
-static r = fn(b: u8.&raw mut) -> () { vouched(read, b); };"#,
+static r = fn(b: u8.&raw) -> () { vouched(read, b); };"#,
         expect![[r#"
-            261..265: type mismatch: expected `fn(u8.&raw mut, usize) -> isize`, found `unsafe fn(u8.&raw mut, usize) -> isize`
+            246..250: type mismatch: expected `fn(u8.&raw, usize) -> isize`, found `unsafe fn(u8.&raw, usize) -> isize`
         "#]],
     );
 }
@@ -16294,9 +16205,9 @@ fn a_caller_checked_first_cannot_make_a_called_parameter_unsafe() {
     check_unsafe_fn(
         r#"
 static q = fn(b) -> () { p(read, b); };
-static p = fn(f, b: u8.&raw mut) -> () { let n: usize = 1; let x: isize = f(b, n); };"#,
+static p = fn(f, b: u8.&raw) -> () { let n: usize = 1; let x: isize = f(b, n); };"#,
         expect![[r#"
-            163..167: type mismatch: expected `fn(u8.&raw mut, usize) -> isize`, found `unsafe fn(u8.&raw mut, usize) -> isize`
+            156..160: type mismatch: expected `fn(u8.&raw, usize) -> isize`, found `unsafe fn(u8.&raw, usize) -> isize`
         "#]],
     );
 }
@@ -16307,19 +16218,19 @@ fn a_returned_alias_of_a_parameter_keeps_its_safety_across_bodies() {
     // `p`'s body, so they become equations there: when `q` passes `read`,
     // the function `p` returns is unsafe too, and calling it needs a block.
     check_unsafe_fn(
-        r#"static p = fn(f, b: u8.&raw mut) {
+        r#"static p = fn(f, b: u8.&raw) {
     let n: usize = 1;
     let x: isize = unsafe { f(b, n) };
     let g = f;
     g
 };
-static q = fn(b: u8.&raw mut) -> () {
+static q = fn(b: u8.&raw) -> () {
     let n: usize = 1;
     let k = p(read, b);
     let y: isize = k(b, n);
 };"#,
         expect![[r#"
-            358..365: calling a value of `unsafe fn` type requires an `unsafe { ... }` block
+            343..350: calling a value of `unsafe fn` type requires an `unsafe { ... }` block
         "#]],
     );
 }
@@ -16329,7 +16240,7 @@ fn a_hole_parameter_only_passed_on_takes_an_unsafe_argument() {
     // Nothing in `stash` calls `f`, so its safety stays open for its
     // callers to fill.
     check_unsafe_fn(
-        r#"static stash = fn(f) -> () { let g: unsafe fn(u8.&raw mut, usize) -> isize = f; };
+        r#"static stash = fn(f) -> () { let g: unsafe fn(u8.&raw, usize) -> isize = f; };
 static use_it = fn() -> () { stash(read) };"#,
         expect![[r#""#]],
     );
@@ -16341,13 +16252,13 @@ fn unsafety_does_not_flow_back_into_a_value_through_a_binding() {
     // it makes `m` unsafe and leaves `f` safe: the call on `f` needs no
     // block in either order.
     check_unsafe_fn(
-        r#"static before = fn(f, b: u8.&raw mut) -> () {
+        r#"static before = fn(f, b: u8.&raw) -> () {
     let n: usize = 1;
     let x: isize = f(b, n);
     let mut m = f;
     m = read;
 };
-static after = fn(f, b: u8.&raw mut) -> () {
+static after = fn(f, b: u8.&raw) -> () {
     let n: usize = 1;
     let mut m = read;
     m = f;
@@ -16362,13 +16273,13 @@ fn an_open_safety_decided_unsafe_is_refused_by_a_safe_parameter() {
     // The other direction: `g` is open until the join makes it unsafe, and
     // then a safe `fn` parameter refuses it.
     check_unsafe_fn(
-        r#"static takes_safe = fn(g: fn(u8.&raw mut, usize) -> isize) -> () { };
+        r#"static takes_safe = fn(g: fn(u8.&raw, usize) -> isize) -> () { };
 static f = fn(c: bool) -> () {
     let g = if c { read } else { safe_read };
     takes_safe(g)
 };"#,
         expect![[r#"
-            255..259: type mismatch: expected `fn(u8.&raw mut, usize) -> isize`, found `unsafe fn(u8.&raw mut, usize) -> isize` (this call requires `fn(u8.&raw mut, usize) -> isize` at 286..296) (this argument needs to be `fn(u8.&raw mut, usize) -> isize` at 297..298)
+            244..248: type mismatch: expected `fn(u8.&raw, usize) -> isize`, found `unsafe fn(u8.&raw, usize) -> isize` (this call requires `fn(u8.&raw, usize) -> isize` at 275..285) (this argument needs to be `fn(u8.&raw, usize) -> isize` at 286..287)
         "#]],
     );
 }
@@ -16381,14 +16292,12 @@ fn a_join_mixing_a_safe_fn_and_an_unsafe_fn_settles_on_the_unsafe_one() {
     // The call is gated, which is the honest answer: one of the two things
     // `g` may be needs vouching.
     check_unsafe_fn(
-        "static gated = fn(c: bool, p: u8.&raw mut, n: usize) -> isize { \
-             let g = if c { read } else { safe_read }; g(p, n) \
-         };\n\
-         static ok = fn(c: bool, p: u8.&raw mut, n: usize) -> isize { \
-             let g = if c { read } else { safe_read }; unsafe { g(p, n) } \
-         };",
+        r#"
+static gated = fn(c: bool, p: u8.&raw, n: usize) -> isize { let g = if c { read } else { safe_read }; g(p, n) };
+static ok = fn(c: bool, p: u8.&raw, n: usize) -> isize { let g = if c { read } else { safe_read }; unsafe { g(p, n) } };
+"#,
         expect![[r#"
-            241..248: calling a value of `unsafe fn` type requires an `unsafe { ... }` block
+            231..238: calling a value of `unsafe fn` type requires an `unsafe { ... }` block
         "#]],
     );
 }
@@ -16399,21 +16308,21 @@ fn a_chain_of_joins_decides_the_calls_open_safety_as_unsafe() {
     // called; the safety the call left open is decided once both joins
     // have.
     check_unsafe_fn(
-        r#"static gated = fn(c: bool, d: bool, p: u8.&raw mut, n: usize) -> isize {
+        r#"static gated = fn(c: bool, d: bool, p: u8.&raw, n: usize) -> isize {
     let h = if d { read } else { read };
     let g = if c { h } else { h }; g(p, n)
 };
-static mixed = fn(c: bool, d: bool, p: u8.&raw mut, n: usize) -> isize {
+static mixed = fn(c: bool, d: bool, p: u8.&raw, n: usize) -> isize {
     let h = if d { read } else { read };
     let g = if c { h } else { safe_read }; g(p, n)
 };
-static ok = fn(c: bool, d: bool, p: u8.&raw mut, n: usize) -> isize {
+static ok = fn(c: bool, d: bool, p: u8.&raw, n: usize) -> isize {
     let h = if d { read } else { read };
     let g = if c { h } else { h }; unsafe { g(p, n) }
 };"#,
         expect![[r#"
-            284..291: calling a value of `unsafe fn` type requires an `unsafe { ... }` block
-            452..459: calling a value of `unsafe fn` type requires an `unsafe { ... }` block
+            273..280: calling a value of `unsafe fn` type requires an `unsafe { ... }` block
+            437..444: calling a value of `unsafe fn` type requires an `unsafe { ... }` block
         "#]],
     );
 }
@@ -16456,8 +16365,8 @@ static f = fn(c: bool) -> () { let g = if c { read } else { safe_read }; };
         &text,
         "let g",
         expect![[r#"
-        171..172 'g': unsafe fn(u8.&raw mut, usize) -> isize
-    "#]],
+            164..165 'g': unsafe fn(u8.&raw, usize) -> isize
+        "#]],
     );
 }
 
@@ -16469,12 +16378,12 @@ fn a_join_converts_a_safe_branch_at_an_unsafe_fn_annotation() {
     // because each reaches the witness loop with a different axiom behind
     // the expectation: an annotation, an argument, a return type.
     check_unsafe_fn(
-        r#"static takes = fn(g: unsafe fn(u8.&raw mut, usize) -> isize) -> () { };
+        r#"static takes = fn(g: unsafe fn(u8.&raw, usize) -> isize) -> () { };
 static annotated = fn(c: bool) -> () {
-    let g: unsafe fn(u8.&raw mut, usize) -> isize = if c { read } else { safe_read };
+    let g: unsafe fn(u8.&raw, usize) -> isize = if c { read } else { safe_read };
 };
 static argument = fn(c: bool) -> () { takes(if c { read } else { safe_read }) };
-static returned = fn(c: bool) -> unsafe fn(u8.&raw mut, usize) -> isize {
+static returned = fn(c: bool) -> unsafe fn(u8.&raw, usize) -> isize {
     if c { read } else { safe_read }
 };"#,
         expect![[r#""#]],
@@ -16487,11 +16396,13 @@ fn a_join_still_refuses_an_unsafe_fn_where_a_safe_fn_is_demanded() {
     // owes a marker is the culprit, named on its own, and the safe branch
     // is not dragged in with it.
     check_unsafe_fn(
-        "static f = fn(c: bool) -> () { \
-             let g: fn(u8.&raw mut, usize) -> isize = if c { read } else { safe_read }; \
-         };",
+        r#"
+static f = fn(c: bool) -> () {
+    let g: fn(u8.&raw, usize) -> isize = if c { read } else { safe_read };
+};
+"#,
         expect![[r#"
-            214..218: type mismatch: expected `fn(u8.&raw mut, usize) -> isize`, found `unsafe fn(u8.&raw mut, usize) -> isize` (expected `fn(u8.&raw mut, usize) -> isize` because of this annotation at 173..204)
+            208..212: type mismatch: expected `fn(u8.&raw, usize) -> isize`, found `unsafe fn(u8.&raw, usize) -> isize` (expected `fn(u8.&raw, usize) -> isize` because of this annotation at 171..198)
         "#]],
     );
 }
@@ -16504,33 +16415,21 @@ fn both_blesses_require_unsafe_and_pin_their_pointee_to_u8() {
     // `len` readable bytes is the caller's unchecked claim, so "checked"
     // names only whether the bytes spell UTF-8. And the pointee is `u8`,
     // not `T`: this boundary is bytes-first, and a bless over some other
-    // element type would be a layout claim, not a text one. The first call
-    // is the clean one: `p` is a `u8.&raw`, so it also pins that either raw
-    // flavor is accepted — the reason neither bless is first-class.
+    // element type would be a layout claim, not a text one.
     check_diagnostics(
-        "static f = fn(p: u8.&raw, q: usize.&raw mut) -> () {\n\
-             unsafe { str_from_utf8(p, 1); };\n\
-             str_from_utf8(q, 1);\n\
-             str_from_utf8_unchecked(p, 1);\n\
-             unsafe { str_from_utf8_unchecked(q, 1); };\n\
-         };",
+        r#"
+static f = fn(p: u8.&raw, q: usize.&raw) -> () {
+    unsafe { str_from_utf8(p, 1); };
+    str_from_utf8(q, 1);
+    str_from_utf8_unchecked(p, 1);
+    unsafe { str_from_utf8_unchecked(q, 1); };
+};
+"#,
         expect![[r#"
-            86..105: calling `str_from_utf8` requires an `unsafe { ... }` block
-            100..101: type mismatch: expected `u8.&raw mut`, found `usize.&raw mut`
-            107..136: calling `str_from_utf8_unchecked` requires an `unsafe { ... }` block
-            171..172: type mismatch: expected `u8.&raw mut`, found `usize.&raw mut`
-        "#]],
-    );
-}
-
-#[test]
-fn a_bless_is_not_a_first_class_value() {
-    // Same reason `copy` is not: its pointer parameter accepts either raw
-    // flavor, which no one `fn` type says.
-    check_diagnostics(
-        "static f = fn() -> () { let g = str_from_utf8; };",
-        expect![[r#"
-            32..45: `str_from_utf8` must be called directly; its pointer parameter accepts both `T.&raw` and `T.&raw mut`, so it has no one function type to be a value at
+            91..110: calling `str_from_utf8` requires an `unsafe { ... }` block
+            105..106: type mismatch: expected `u8.&raw`, found `usize.&raw`
+            116..145: calling `str_from_utf8_unchecked` requires an `unsafe { ... }` block
+            184..185: type mismatch: expected `u8.&raw`, found `usize.&raw`
         "#]],
     );
 }
@@ -16555,16 +16454,18 @@ fn both_blesses_are_const_legal() {
 fn str_bytes_requires_unsafe_and_both_str_primitives_are_const_legal() {
     // `str_bytes` is the only one of the two that touches raw memory, and
     // it WRITES: that `dst` addresses `s.len()` writable bytes is the
-    // caller's unchecked claim, so it carries `copy`'s destination gate.
+    // caller's unchecked claim, so it needs `unsafe`.
     // `len` reads a value it was handed and carries none. Const-legality is
     // orthogonal to `unsafe` and is `next_char`'s reason for both: neither
     // observes anything outside its arguments.
     check_diagnostics(
-        "static f = fn(p: u8.&raw mut) -> () { str_bytes(\"hi\", p); };\n\
-         static n = const { \"hi\".len() };\n\
-         static z = const { unsafe { str_bytes(\"\", dangling::<u8>()) } };",
+        r#"
+static f = fn(p: u8.&raw) -> () { str_bytes("hi", p); };
+static n = const { "hi".len() };
+static z = const { unsafe { str_bytes("", dangling::<u8>()) } };
+"#,
         expect![[r#"
-            38..56: calling `str_bytes` requires an `unsafe { ... }` block
+            35..53: calling `str_bytes` requires an `unsafe { ... }` block
         "#]],
     );
 }
@@ -16826,7 +16727,7 @@ static f = fn () -> usize {
 }
 "#,
         expect![[r#"
-            48..49: raw borrows are spelled postfix: `x.&raw` / `x.&raw mut`
+            48..49: raw borrows are spelled postfix: `x.&raw`
             48..58: type mismatch: expected `{number}`, found `{number}.&raw` (`-` requires `{number}` operands at 63..64)
             63..64: this `-` continues the expression that ends with the `}` above, rather than starting a new statement; write `;` after that `}` to split them, or move the `-` up onto the same line (or parenthesize the whole expression) if one expression is what you meant
         "#]],
@@ -16857,7 +16758,7 @@ static f = fn () -> () {
 }
 "#,
         expect![[r#"
-            52..53: raw borrows are spelled postfix: `x.&raw` / `x.&raw mut`
+            52..53: raw borrows are spelled postfix: `x.&raw`
         "#]],
     );
 }
@@ -16877,7 +16778,7 @@ static f = fn () -> () {
 "#,
         expect![[r#"
             38..39: cannot infer the type of this number: it has no defining use — add a type annotation
-            64..65: raw borrows are spelled postfix: `x.&raw` / `x.&raw mut`
+            64..65: raw borrows are spelled postfix: `x.&raw`
         "#]],
     );
 }
@@ -17258,7 +17159,7 @@ static main = fn() -> usize {
 }
 
 /// `.&raw` of a temporary checks clean and marks the root, so
-/// `mkp().a.&raw mut` points into the temporary's own field.
+/// `mkp().a.&raw` points into the temporary's own field.
 #[test]
 fn a_temporary_is_materialized_under_raw_address_of_too() {
     let text = r#"
@@ -17267,7 +17168,7 @@ static mk = fn() -> usize { 7 };
 static mkp = fn() -> Pair { Pair(struct { a = 1, b = 2 }) };
 static main = fn() -> usize {
     let p = mk().&raw;
-    let q = mkp().a.&raw mut;
+    let q = mkp().a.&raw;
     unsafe { p.* + q.* }
 };
 "#;
@@ -17293,7 +17194,7 @@ static by_static = fn() -> () { let p = counter.&; };
 static by_const = fn() -> () { let p = limit.&mut; };
 static by_builtin = fn() -> () { let p = print.&; };
 static raw_param = fn::<const N: usize>() -> () { let p = N.&raw; };
-static raw_builtin = fn() -> () { let p = print.&raw mut; };
+static raw_builtin = fn() -> () { let p = print.&raw; };
 "#;
     check_diagnostics(
         text,
@@ -17302,7 +17203,7 @@ static raw_builtin = fn() -> () { let p = print.&raw mut; };
             207..212: cannot borrow a `const` as `.&mut`: a `const` is copied at every mention, so there is no one place to borrow (`limit` is defined here at 34..39)
             263..270: `.&` cannot borrow `print`: it is a builtin, not a value with storage
             333..339: `.&raw` cannot take the address of `N`: it is a const parameter, not a value with storage
-            386..400: `.&raw` cannot take the address of `print`: it is a builtin, not a value with storage
+            386..396: `.&raw` cannot take the address of `print`: it is a builtin, not a value with storage
         "#]],
     );
     check_temps(text, expect![""]);
@@ -17943,11 +17844,11 @@ fn a_safety_edge_out_of_a_cycle_reaches_the_callee_it_feeds() {
     // argument is refused at `p`.
     check_unsafe_fn(
         r#"
-static x = fn(f, ptr: u8.&raw mut, n: usize) -> () { let r: isize = f(ptr, n); };
-static y = fn(ptr: u8.&raw mut, n: usize) { p(ptr, n); read };
-static p = fn(ptr: u8.&raw mut, n: usize) -> () { x(y(ptr, n), ptr, n); };"#,
+static x = fn(f, ptr: u8.&raw, n: usize) -> () { let r: isize = f(ptr, n); };
+static y = fn(ptr: u8.&raw, n: usize) { p(ptr, n); read };
+static p = fn(ptr: u8.&raw, n: usize) -> () { x(y(ptr, n), ptr, n); };"#,
         expect![[r#"
-            333..342: type mismatch: expected `fn(u8.&raw mut, usize) -> isize`, found `unsafe fn(u8.&raw mut, usize) -> isize`
+            314..323: type mismatch: expected `fn(u8.&raw, usize) -> isize`, found `unsafe fn(u8.&raw, usize) -> isize`
         "#]],
     );
 }

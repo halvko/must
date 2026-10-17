@@ -38,7 +38,7 @@ type String = struct {
     // this is the dangling pointer — the empty string owns nothing, and
     // `alloc_array(0)` traps, so the empty case has to be real rather than
     // a zero-sized allocation.
-    ptr: u8.&raw mut,
+    ptr: u8.&raw,
     len: usize,
     cap: usize,
 } only move with {
@@ -139,15 +139,15 @@ static to_owned = fn::<@a>(s: str.&::<@a>) -> String {
 // `Reader` is `only move` here too, same as it is there, and `drop`
 // takes it apart the same way: the two copies agree.
 
-unsafe extern static read: unsafe fn(u8.&raw mut, usize) -> isize;
+unsafe extern static read: unsafe fn(u8.&raw, usize) -> isize;
 
 type Fill = enum {
-    More(u8.&raw mut),
+    More(u8.&raw),
     End,
     Failed,
 };
 
-static fill = fn(at: u8.&raw mut, room: usize) -> Fill {
+static fill = fn(at: u8.&raw, room: usize) -> Fill {
     if room == 0 {
         return Fill::Failed;
     }
@@ -164,11 +164,11 @@ static fill = fn(at: u8.&raw mut, room: usize) -> Fill {
 type Option = enum::<T> { Some(T), None };
 
 type Reader = struct {
-    buf: u8.&raw mut,
+    buf: u8.&raw,
     cap: usize,
-    start: u8.&raw mut,
-    cur: u8.&raw mut,
-    end: u8.&raw mut,
+    start: u8.&raw,
+    cur: u8.&raw,
+    end: u8.&raw,
     len: usize,
     eof: bool,
     line: str,
@@ -233,7 +233,7 @@ type Reader = struct {
     }
 };
 
-static bless = fn(at: u8.&raw mut, len: usize) -> str {
+static bless = fn(at: u8.&raw, len: usize) -> str {
     match unsafe { str_from_utf8(at, len) } {
         ::Ok(s) => s,
         ::Err => panic("string_lib: standard input is not valid UTF-8"),

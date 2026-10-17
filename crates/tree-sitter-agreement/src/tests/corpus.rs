@@ -166,15 +166,15 @@ static uses = fn () -> usize {
     (
         "postfix chains and unary minus",
         r#"
-type Cell = struct { n: isize, next: isize.&raw mut };
+type Cell = struct { n: isize, next: isize.&raw };
 static chain = fn (mut c: Cell, mut i: isize) -> isize {
-    let p = c.&raw mut;
+    let p = c.&raw;
     let q = c.&raw;
     let r = i.&mut;
     let s = i.&;
     unsafe {
         p.*.n = -1;
-        let t = p.*.next.*.&raw mut.*;
+        let t = p.*.next.*.&raw.*;
         let u = p.*.n.&raw.*;
     }
     let arr = [[1, 2], [3, 4]];
@@ -223,7 +223,7 @@ static closure = unsafe fn () { };
         "type declaration forms",
         r#"
 type Meters = usize;
-type Ptr = usize.&raw mut;
+type Ptr = usize.&raw;
 type Row = [usize; 4];
 type Opt = enum::<T> { Some(T), None };
 type OnlySome = Opt::<usize>;
@@ -234,11 +234,10 @@ type Callback = struct { run: fn(usize) -> usize };
     (
         "retired prefix borrows",
         r#"
-static old = fn (mut x: usize, r: &usize, m: &mut usize, p: &raw mut usize, q: &raw usize) -> () {
+static old = fn (mut x: usize, r: &usize, m: &mut usize, q: &raw usize) -> () {
     let a = &x;
     let b = &mut x;
     let c = &raw x;
-    let d = &raw mut x;
 };
 "#,
     ),
@@ -259,7 +258,7 @@ static old = fn (b: Boxed<usize>) -> usize { b.value };
         "malformed extern statics",
         r#"
 extern static valued: unsafe fn(usize) -> usize = fn (n: usize) -> usize { n };
-extern static live: unsafe fn(u8.&raw mut, usize) -> isize;
+extern static live: unsafe fn(u8.&raw, usize) -> isize;
 "#,
     ),
     (

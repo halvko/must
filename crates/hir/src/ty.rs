@@ -323,14 +323,12 @@ pub enum Ty {
     /// [`variant_payloads_for`], which substitute the args for the
     /// declaration's rigid params.
     Named(NamedTy),
-    /// `T.&raw` / `T.&raw mut`: a raw pointer. Unifies exactly and
-    /// equationally like everything else — same mutability, pointwise
-    /// pointee — with NO variance (there is no subtyping to be variant
-    /// over) and no implicit `T.&raw mut` → `T.&raw` conversion in v1
-    /// (held open as a future shallow [`widens_to`] arm, house style,
-    /// never subtyping).
+    /// `T.&raw`: a raw pointer. Unifies exactly and equationally like everything
+    /// else — pointwise pointee — with NO variance (there is no subtyping to be
+    /// variant over). It carries no write permission: whether a write through
+    /// it is allowed is the provenance of the place it was taken from, judged
+    /// by the abstract machine, not by the type.
     RawPtr {
-        mutable: bool,
         pointee: Arc<Ty>,
     },
     /// `T.&::<@a>` / `T.&mut::<@a>`: a SAFE borrow. Carries its referent,
@@ -749,9 +747,8 @@ impl Ty {
         }))
     }
 
-    pub fn raw_ptr(mutable: bool, pointee: Ty) -> Ty {
+    pub fn raw_ptr(pointee: Ty) -> Ty {
         Ty::RawPtr {
-            mutable,
             pointee: Arc::new(pointee),
         }
     }
@@ -775,7 +772,7 @@ impl Ty {
                 referent,
                 region: _,
             } => Ty::borrow(*mutable, Region::Erased, referent.erase_regions()),
-            Ty::RawPtr { mutable, pointee } => Ty::raw_ptr(*mutable, pointee.erase_regions()),
+            Ty::RawPtr { pointee } => Ty::raw_ptr(pointee.erase_regions()),
             Ty::Array { elem, len } => Ty::array(elem.erase_regions(), len.clone()),
             Ty::Fn(f) => f.rebuilt(
                 f.params.iter().map(Ty::erase_regions).collect(),
@@ -1212,12 +1209,11 @@ fn spell(ty: &Ty, how: Spelling<'_>) -> String {
                 ret => format!("{marker}fn({params}) -> {}", spell(ret, how)),
             }
         }
-        Ty::RawPtr { mutable, pointee } => {
+        Ty::RawPtr { pointee } => {
             if source.is_some() && !spells_before_postfix(pointee) {
                 return HOLE.to_owned();
             }
-            let m = if *mutable { " mut" } else { "" };
-            format!("{}.&raw{m}", spell(pointee, how))
+            format!("{}.&raw", spell(pointee, how))
         }
         // A non-generic signature can't name a region.
         Ty::Borrow { .. } if source.is_some() => HOLE.to_owned(),
@@ -1473,9 +1469,7 @@ pub(crate) fn lower_type_ref_in(
 
             Ty::fn_type_with(*unsafe_to_call, params, ret)
         }
-        TypeRef::RawPtr { mutable, inner } => {
-            Ty::raw_ptr(*mutable, lower_type_ref_in(db, file, inner, table, scope))
-        }
+        TypeRef::RawPtr { inner } => Ty::raw_ptr(lower_type_ref_in(db, file, inner, table, scope)),
         // `T.&::<@a>` — a safe borrow. The region is resolved against the
         // enclosing binder; a missing turbofish is `Region::Error` (no
         // elision at launch — the mirror pass names the omission), and a
@@ -2023,9 +2017,7 @@ fn map_table_vars(ty: &Ty, var: &mut impl FnMut(TyVar) -> Ty, numbers: bool) -> 
             };
             Ty::fn_type_safety(safety, params, ret)
         }
-        Ty::RawPtr { mutable, pointee } => {
-            Ty::raw_ptr(*mutable, map_table_vars(pointee, var, numbers))
-        }
+        Ty::RawPtr { pointee } => Ty::raw_ptr(map_table_vars(pointee, var, numbers)),
         Ty::Borrow {
             mutable,
             region,
@@ -2099,9 +2091,7 @@ pub fn substitute_args(ty: &Ty, decl: &ItemLoc, args: &[GenericArg]) -> Ty {
                 .collect(),
             substitute_args(&f.ret, decl, args),
         ),
-        Ty::RawPtr { mutable, pointee } => {
-            Ty::raw_ptr(*mutable, substitute_args(pointee, decl, args))
-        }
+        Ty::RawPtr { pointee } => Ty::raw_ptr(substitute_args(pointee, decl, args)),
         Ty::Borrow {
             mutable,
             region,

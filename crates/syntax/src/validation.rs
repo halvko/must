@@ -1752,7 +1752,7 @@ fn reject_stray_type_binder(
     });
 }
 
-/// `unsafe extern static read: unsafe fn(u8.&raw mut, usize) -> isize;`
+/// `unsafe extern static read: unsafe fn(u8.&raw, usize) -> isize;`
 fn validate_extern_static(item: &ast::StaticItem, errors: &mut Vec<SyntaxError>) {
     let Some(head) = item.head() else {
         return;

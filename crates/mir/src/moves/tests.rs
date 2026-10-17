@@ -444,7 +444,7 @@ static overwrite_referent = fn::<@a>(m: Res.&mut::<@a>) -> () { m.* = make(2); }
     // is the caller's word.
     check_linear(
         r#"
-static overwrite_raw = fn(p: Res.&raw mut) -> () { unsafe { p.* = make(2); }; };
+static overwrite_raw = fn(p: Res.&raw) -> () { unsafe { p.* = make(2); }; };
 "#,
         expect![[r#""#]],
     );
@@ -1486,7 +1486,7 @@ static take = fn(b: Box::<Res>) -> () {
 /// so the refusal cases below have nowhere to live except a copy.
 const STRING_PRELUDE: &str = r#"
 type String = struct {
-    ptr: u8.&raw mut,
+    ptr: u8.&raw,
     len: usize,
     cap: usize,
 } only move with {
@@ -1553,8 +1553,8 @@ static halve = fn(p: Pair) -> String {
 static half_only = fn(p: Pair) -> String { p.left };
 "#,
         expect![[r#"
-            1069..1072: cannot move out of a borrow: `String` cannot be copied
-            1230..1236: cannot copy a value that must be consumed out of a place; take the whole value apart instead (`let Name(struct { .. }) = value;`)
+            1065..1068: cannot move out of a borrow: `String` cannot be copied
+            1226..1232: cannot copy a value that must be consumed out of a place; take the whole value apart instead (`let Name(struct { .. }) = value;`)
         "#]],
     );
 }
@@ -1616,7 +1616,7 @@ static leaks_the_payload = fn(text: str) -> () {
 };
 "#,
         expect![[r#"
-            2276..2279: `s` is not consumed on this path; its type has no `forget` capability, so every path must consume it (`s` is born here and must be consumed at 2270..2271)
+            2272..2275: `s` is not consumed on this path; its type has no `forget` capability, so every path must consume it (`s` is born here and must be consumed at 2266..2267)
         "#]],
     );
 }
@@ -1711,7 +1711,7 @@ fn a_reader_drop_that_only_reads_a_field_is_refused() {
     check_diagnostics(
         r#"
 type Reader = struct {
-    buf: u8.&raw mut,
+    buf: u8.&raw,
     cap: usize,
 } only move with {
     impl Self {
@@ -1722,7 +1722,7 @@ type Reader = struct {
 };
 "#,
         expect![[r#"
-            130..194: `r` is not consumed on this path; its type has no `forget` capability, so every path must consume it (`r` is born here and must be consumed at 115..116)
+            126..190: `r` is not consumed on this path; its type has no `forget` capability, so every path must consume it (`r` is born here and must be consumed at 111..112)
         "#]],
     );
 }

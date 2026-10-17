@@ -1,5 +1,5 @@
-// Raw pointers: `T.&raw` / `T.&raw mut` types, taking an address
-// with `x.&raw` / `x.&raw mut`, and reading or writing through one with the
+// Raw pointers: the raw pointer type `T.&raw`, taking an address
+// with `x.&raw`, and reading or writing through one with the
 // postfix deref `p.*`. Address-of is postfix too — the dual of `.*` — so a
 // pointer op always trails its place. There is NO auto-deref by design: a
 // pointer is only ever followed when you write `.*`, and every deref must
@@ -20,10 +20,12 @@
 static S: usize = 7;
 const C: usize = 7;
 
-// `p.&raw mut` requires a `mut` root: you may only mint a mutating pointer
-// to something you could already assign to. `x.&raw` (shared) needs no
-// `mut`. Both are pure address-taking — no `unsafe` needed to *form* a
-// pointer, only to *follow* one.
+// `x.&raw` needs no `mut` root, but WRITING through it does: whether a
+// write is allowed is decided by the place the pointer came from, not by
+// its type. A write through a pointer to a non-`mut` local, a `static` or
+// a `const` is undefined behavior (the interpreter detects it). Taking an
+// address is pure — no `unsafe` needed to *form* a pointer, only to
+// *follow* one.
 
 static main = fn () -> () {
     // --- static = one address, const = a copy per mention ---
@@ -47,7 +49,7 @@ static main = fn () -> () {
     // through the pointer into `x`'s storage, so reading `x` afterward sees
     // 42. Both the write and any read are dereferences, hence `unsafe`.
     let mut x: usize = 1;
-    let p = x.&raw mut;
+    let p = x.&raw;
     unsafe { p.* = 42; }
     if x == 42 {
         print("write-through: p.* = 42 updated the local x to 42\n");
@@ -68,18 +70,18 @@ static main = fn () -> () {
 
     // --- a pointer to a field addresses just that element ---
     let mut r: struct { a: usize, b: usize } = struct { a = 1, b = 2 };
-    let pa = r.a.&raw mut;
+    let pa = r.a.&raw;
     unsafe { pa.* = 10; }
     if r.a + r.b == 12 {
-        print("field pointer: r.a.&raw mut wrote only r.a\n");
+        print("field pointer: r.a.&raw wrote only r.a\n");
     } else {
         print("field pointer: unexpected\n");
     }
 }
 
 // On the UB philosophy — this is the honest part. A pointer holds no
-// stable identity beyond the frame that owns its pointee: return `x.&raw
-// mut` past the `fn` that declared `x` and the local is gone, so a later
+// stable identity beyond the frame that owns its pointee: return `x.&raw`
+// past the `fn` that declared `x` and the local is gone, so a later
 // `p.*` dereferences a dangling pointer. The interpreter *detects* that and
 // traps deterministically with `error[UndefinedBehavior]: dangling pointer
 // — the local it pointed to no longer exists (its frame has returned)`. But
@@ -89,8 +91,8 @@ static main = fn () -> () {
 // teacher; they do not make the code correct.
 //
 // Writes through pointee fields (`p.*.x = ...`), pointers into array
-// elements (`a[i].&raw mut`), and address-of through a deref
-// (`unsafe { p.*.x.&raw mut }` — computing an address through a pointer is
+// elements (`a[i].&raw`), and address-of through a deref
+// (`unsafe { p.*.x.&raw }` — computing an address through a pointer is
 // itself a deref, so it needs `unsafe`) all work. `unsafe fn(...)` is a type
 // of its own too: calling a VALUE of one needs the marker wherever the call
 // is (see `docs/main.typ`, "Unsafety is part of a function's type"). The
