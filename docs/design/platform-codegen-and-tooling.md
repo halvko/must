@@ -45,6 +45,17 @@
   and decoded value. Dictionaries resolve away completely; overflow checks are emitted at
   every width; records and enums get an internal, unspecified layout. Unsupported constructs
   refuse by name, pointing at the source; the backend must never miscompile silently.
+  A safe borrow is the referent's byte address: a local whose place is borrowed lives in its
+  function's frame on a shadow stack in linear memory (a `stack_pointer` global past the
+  read-only data, grown on demand), and every other local stays in wasm locals. A borrowed
+  `static` is its baked value placed once in the read-only data, so every borrow of it is one
+  address. A frame holds a value in its slot layout, 8 bytes per slot (not the
+  natural-alignment, packed-field byte layout ruled in halvko/must#16); nothing can observe
+  the difference. There is no runtime aliasing check: the backend compiles safe borrows only
+  because every loan refusal plants a trap (`mir_checked`, M14), so a change that stops
+  planting one revisits P06, and because no borrow crosses to an `extern` item: a signature
+  holding one, at any depth, is refused by name. Raw pointers stay refused, since their
+  validity is the interpreter's runtime check.
   Monomorphization's own limits are refusals too: a body that recurs at an ever-new
   instantiation of itself is named after a fixed number of re-entries counted across the whole
   cycle (polymorphic recursion), and a call chain too deep to walk safely — even one with
@@ -179,9 +190,10 @@
 
 ## Re-evaluate when
 
-- **P07** The module is wasm32 while `usize` stays 64-bit. Sound only while the compiled
-  subset has no pointers. Rule it when pointers reach wasm: target-parameterized `usize`, or
-  fixed 64 with a separate address width.
+- **P07** The module is wasm32 while `usize` stays 64-bit; a borrow's address is 32 bits
+  carried in an `i64` slot. Sound while safe code cannot turn a pointer into an integer. The
+  ruling is already made (halvko/must#16): pointer width is platform-specific and `usize`
+  follows it. Implement it before a pointer can become an integer in compiled code.
 - **Closures land** — the backend needs a table, indirect calls and a real calling
   convention, and "dictionaries resolve away completely" ends. **P06**
 - **Name-only bound ambiguity bites in practice** — shape narrowing (picking the one bound
@@ -189,6 +201,10 @@
   that the refusal keeps naming both traits and their spellings. **P15**
 - **An LIR is built** — the wasm backend's re-derived type arguments get fixed there, and
   guaranteed optimizations live there instead of being hoped for. **P08**
+- **`extern` signatures can name regions** — today none can, so the wasm backend's refusal
+  of a borrow in one is unreachable from source. Before one can, decide what the `extern` side
+  may do with the address: keep it past the call, or hand back one the loan check never saw.
+  **P06**
 - **FFI is designed** — it owns the `extern` surface (`extern` data is reserved there), symbol
   mangling, export units, and whether Must can claim no-alias equivalents on a native backend.
   **P05**
