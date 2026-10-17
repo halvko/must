@@ -27,9 +27,11 @@ while the head has changes no reviewer has seen: past the round limit, say,
 or on a PR that edits the review workflow, which the reviewers cannot run on.
 It is yellow while a round is coming and on drafts. It never weighs how
 serious a finding is: settle each thread by fixing it or answering why not,
-then resolve it. GitHub sends no event when a thread is resolved, so the
-gate updates on the next push, reply or round; to update it sooner, re-run
-the PR's latest `Review gate` run, or run that workflow for the PR.
+then resolve it. A reviewer that finds its earlier finding still open in a
+later round replies in the thread and reopens it. GitHub sends no event when
+a thread is resolved, so the gate updates on the next push, reply or round;
+to update it sooner, re-run the PR's latest `Review gate` run, or run that
+workflow for the PR.
 
 - To teach a reviewer, edit its file: what to look for, what to ignore,
   examples of past mistakes. The whole file is its brief.
