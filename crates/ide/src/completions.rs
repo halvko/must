@@ -1127,9 +1127,8 @@ fn builtin_type_items(edit_range: TextRange) -> Vec<CompletionItem> {
 }
 
 /// The builtin functions (mirrors [`hir::scopes::Builtin`]'s name set and
-/// `hir::infer`'s signatures for them). The generic and
-/// flavor-polymorphic ones have no ONE `hir::Ty`; their detail strings
-/// spell the scheme by hand and a same-arity placeholder fn type drives
+/// `hir::infer`'s signatures for them). The generic ones have no ONE
+/// `hir::Ty`; their detail strings spell the scheme by hand and a same-arity placeholder fn type drives
 /// the call snippet (its `{error}` params never render — only the arity is
 /// consumed).
 fn builtin_fn_items(
@@ -1170,37 +1169,45 @@ fn builtin_fn_items(
         (
             "dealloc_array",
             placeholder_fn(2),
-            Some("unsafe fn::<T>(T.&raw mut, usize)"),
+            Some("unsafe fn::<T>(T.&raw, usize)"),
         ),
         (
             "add",
             placeholder_fn(2),
-            Some("unsafe fn(T.&raw [mut], usize) -> T.&raw [mut]"),
+            Some("unsafe fn::<T>(T.&raw, usize) -> T.&raw"),
         ),
         (
             "offset",
             placeholder_fn(2),
-            Some("unsafe fn(T.&raw [mut], isize) -> T.&raw [mut]"),
+            Some("unsafe fn::<T>(T.&raw, isize) -> T.&raw"),
         ),
         (
             "copy",
             placeholder_fn(3),
-            Some("unsafe fn(T.&raw [mut], T.&raw mut, usize)"),
+            Some("unsafe fn::<T>(T.&raw, T.&raw, usize)"),
         ),
-        (
-            "dangling",
-            placeholder_fn(0),
-            Some("fn::<T>() -> T.&raw mut"),
-        ),
+        ("dangling", placeholder_fn(0), Some("fn::<T>() -> T.&raw")),
         (
             "str_from_utf8",
-            placeholder_fn(2),
-            Some("unsafe fn(u8.&raw [mut], usize) -> Utf8Result"),
+            hir::Ty::unsafe_fn_type(
+                vec![
+                    hir::Ty::raw_ptr(hir::Ty::Int(hir::IntKind::U8)),
+                    hir::Ty::Int(hir::IntKind::Usize),
+                ],
+                hir::Ty::Named(hir::NamedTy::plain(hir::utf8_result_loc(db))),
+            ),
+            None,
         ),
         (
             "str_from_utf8_unchecked",
-            placeholder_fn(2),
-            Some("unsafe fn(u8.&raw [mut], usize) -> str"),
+            hir::Ty::unsafe_fn_type(
+                vec![
+                    hir::Ty::raw_ptr(hir::Ty::Int(hir::IntKind::U8)),
+                    hir::Ty::Int(hir::IntKind::Usize),
+                ],
+                hir::Ty::Str,
+            ),
+            None,
         ),
     ]
     .into_iter()

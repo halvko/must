@@ -170,9 +170,8 @@ pub enum TypeRef {
         /// `unsafe { ... }` block.
         unsafe_to_call: bool,
     },
-    /// `T.&raw` / `T.&raw mut` — a raw pointer type.
+    /// `T.&raw` — a raw pointer type.
     RawPtr {
-        mutable: bool,
         inner: Box<TypeRef>,
     },
     /// `T.&::<@a>` / `T.&mut::<@a>` — a SAFE borrow type. The region rides
@@ -310,7 +309,6 @@ impl TypeRef {
             },
             ast::Type::RawPtrType(it) => match it.ty() {
                 Some(inner) => TypeRef::RawPtr {
-                    mutable: it.is_mut(),
                     inner: Box::new(TypeRef::from_ast(inner)),
                 },
                 None => TypeRef::Error,

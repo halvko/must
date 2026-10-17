@@ -161,7 +161,7 @@ fn an_addressable_local_is_not_judged() {
         r#"
 static f = fn () -> usize {
     let mut x = 1;
-    let p = x.&raw mut;
+    let p = x.&raw;
     x = 2;
     unsafe { p.* }
 };

@@ -10,7 +10,7 @@ use hir::{Builtin, ConstLegality, ExprId, IntKind, ItemLoc, Ty};
 use la_arena::ArenaMap;
 use mir::{
     AggregateKind, BodyId, Const, LocalData, LocalId, MirBody, MirLowered, Operand, ProjElem,
-    Scope, StatementKind, TerminatorKind, ValueExpr,
+    ReadOnly, Scope, StatementKind, TerminatorKind, ValueExpr,
 };
 use rustc_hash::FxHashMap;
 
@@ -272,10 +272,9 @@ struct Allocation {
     /// `false` once the owning frame returned (a local) or the allocation
     /// was freed (`dealloc_array` on heap): any deref then is detected UB.
     live: bool,
-    /// `false` for statics: any write through a pointer into one is
-    /// detected UB (unreachable from well-typed code — statics only hand
-    /// out shared `.&raw` — but the memory model enforces it regardless).
-    writable: bool,
+    /// `Some` for read-only memory: any write through a pointer into it
+    /// is detected UB.
+    read_only: Option<ReadOnlyAlloc>,
     kind: AllocKind,
     /// The allocation's birth site — recorded for heap allocations (the
     /// `alloc_array` call), `None` for the rest. The blame currency of the
@@ -307,6 +306,23 @@ impl Allocation {
             })
             .unwrap_or_default()
     }
+}
+
+/// Why an allocation refuses writes through a pointer
+/// ([`Allocation::read_only`]); the message is rendered only when a write
+/// is refused.
+#[derive(Clone)]
+enum ReadOnlyAlloc {
+    /// A `static` item's one place.
+    Static,
+    /// A `const` use's own copy.
+    ConstCopy,
+    /// A promoted local bound without `mut`.
+    Binding {
+        loc: ItemLoc,
+        body: BodyId,
+        local: LocalId,
+    },
 }
 
 /// What an allocation backs — decides the UB message's wording.
@@ -1362,8 +1378,9 @@ impl<'db, M: Mode> Machine<'db, M> {
     }
 
     /// The writability judgement, and the only place it is spelled: a
-    /// `static`'s allocation is read-only, so a write through a pointer
-    /// into one is detected UB — whether the write is a single store
+    /// `static`'s allocation is read-only, and so is a promoted non-`mut`
+    /// local's or `const` copy's, so a write through a pointer into one is
+    /// detected UB — whether the write is a single store
     /// ([`Machine::write_through`]) or a whole range (judged by
     /// [`Machine::judge_write_range`] on `write_range`'s behalf). Answers
     /// the allocation itself: `write_through` passes and goes straight on
@@ -1381,23 +1398,30 @@ impl<'db, M: Mode> Machine<'db, M> {
     ) -> Result<&mut Allocation, EvalError> {
         let allocation = self
             .memory
-            .get_mut(&alloc)
+            .get(&alloc)
             .expect("liveness judged before the write");
-        // No test pins this message, and that is not an oversight: the
-        // verdict is UNREACHABLE from well-typed source today — statics
-        // hand out shared `.&raw` only (there is no `static mut`), and no
-        // pointer escapes const evaluation. It is the memory model's
-        // belt-and-braces until `static mut` (or an escape) makes it
-        // reachable; whoever lands one should pin it here.
-        if !allocation.writable {
+        if let Some(read_only) = allocation.read_only.clone() {
+            let what = match read_only {
+                ReadOnlyAlloc::Static => "a `static`".to_owned(),
+                ReadOnlyAlloc::ConstCopy => "a `const`'s copy".to_owned(),
+                ReadOnlyAlloc::Binding { loc, body, local } => {
+                    match &self.lowered(&loc).bodies[body].locals[local].name {
+                        Some(name) => format!("the local `{name}`, which is not declared `mut`"),
+                        None => "a local not declared `mut`".to_owned(),
+                    }
+                }
+            };
             return Err(EvalError {
                 kind: EvalErrorKind::UndefinedBehavior,
-                message: "write through a pointer into read-only memory (a `static`)".to_owned(),
+                message: format!("write through a pointer into read-only memory ({what})"),
                 origin: Some((loc.clone(), origin)),
                 notes: Vec::new(),
             });
         }
-        Ok(allocation)
+        Ok(self
+            .memory
+            .get_mut(&alloc)
+            .expect("liveness judged before the write"))
     }
 
     /// Navigate a pointer's stored path inside a (live) allocation's
@@ -1764,11 +1788,11 @@ impl<'db, M: Mode> Machine<'db, M> {
                     other => Err(self.ill_typed("a record or payload value", &other, loc, origin)),
                 }
             }
-            // `place.&raw [mut]`: resolve the place to `(allocation,
+            // `place.&raw`: resolve the place to `(allocation,
             // path)` and mint the pointer — an (AllocId, path) pair, never
             // a number. A plain local root is promoted into abstract
             // memory (first address-taking only; after that the allocation
-            // IS the local); a deref-rooted place (`p.*.x.&raw mut`)
+            // IS the local); a deref-rooted place (`p.*.x.&raw`)
             // instead reads the pointer and extends its path — the
             // ORIGINAL allocation's identity, no intermediate
             // materialization, no promotion. Element steps are NOT
@@ -1788,7 +1812,7 @@ impl<'db, M: Mode> Machine<'db, M> {
                 // The raw pointer INHERITS the node it was minted through
                 // rather than getting one of its own — the mechanism
                 // behind the ruling that `.&raw` is deliberately not a
-                // decayed safe borrow. `x.*.&raw mut` therefore points at
+                // decayed safe borrow. `x.*.&raw` therefore points at
                 // the referent under `x`'s node: the two interleave
                 // freely and die together.
                 Ok(Value::Ptr { alloc, path, tag })
@@ -1823,7 +1847,7 @@ impl<'db, M: Mode> Machine<'db, M> {
                         let alloc = self.fresh_alloc(Allocation {
                             value,
                             live: true,
-                            writable: false,
+                            read_only: Some(ReadOnlyAlloc::Static),
                             kind: AllocKind::Static,
                             origin: None,
                             ended: None,
@@ -1872,7 +1896,9 @@ impl<'db, M: Mode> Machine<'db, M> {
 
     /// The allocation backing `local`, promoting it into abstract memory on
     /// the first address-taking: the current value moves out of the frame's
-    /// plain map into a live, writable allocation; every later read/write
+    /// plain map into a live allocation — read-only to pointer writes for
+    /// a non-`mut` binding or a `const` copy ([`LocalData::read_only`]),
+    /// writable otherwise; every later read/write
     /// of the local goes through it (see `write_place`/`eval_operand`).
     fn promote_local(
         &mut self,
@@ -1888,10 +1914,18 @@ impl<'db, M: Mode> Machine<'db, M> {
         let Some(value) = frame.locals.remove(local) else {
             return Err(self.unwritten_local(body, local, "address of", loc, origin));
         };
+        let read_only = body.locals[local].read_only.map(|why| match why {
+            ReadOnly::ConstCopy => ReadOnlyAlloc::ConstCopy,
+            ReadOnly::Binding => ReadOnlyAlloc::Binding {
+                loc: loc.clone(),
+                body: frame.body,
+                local,
+            },
+        });
         let alloc = self.fresh_alloc(Allocation {
             value,
             live: true,
-            writable: true,
+            read_only,
             kind: AllocKind::Local,
             origin: None,
             ended: None,
@@ -2323,7 +2357,7 @@ impl<'db, M: Mode> Machine<'db, M> {
         }
     }
 
-    /// `read(buf: u8.&raw mut, len: usize) -> isize` — the one host
+    /// `read(buf: u8.&raw, len: usize) -> isize` — the one host
     /// primitive the interpreter provides, and the only place stdin enters
     /// the language below `read_line`.
     ///
@@ -2340,7 +2374,7 @@ impl<'db, M: Mode> Machine<'db, M> {
         loc: &ItemLoc,
         origin: ExprId,
     ) -> Result<Value, EvalError> {
-        const SHAPE: &str = "unsafe fn(buf: u8.&raw mut, len: usize) -> isize";
+        const SHAPE: &str = "unsafe fn(buf: u8.&raw, len: usize) -> isize";
         // THE DECLARATION IS WHAT IS JUDGED, in full, before anything is
         // read or written.
         //
@@ -2359,13 +2393,14 @@ impl<'db, M: Mode> Machine<'db, M> {
         if !sig.unsafe_to_call {
             return Err(self.host_signature_error("read", SHAPE, loc, origin));
         }
-        // A MUTABLE raw pointer to `u8`: `read` writes bytes, so a shared
-        // pointer is as wrong as a non-byte one, and a non-pointer buffer is
-        // refused here rather than reaching the value check below (which
-        // would blame the compiler for what the declaration said).
+        // A raw pointer to `u8`: a non-byte pointee or a non-pointer
+        // buffer is refused here rather than reaching the value check
+        // below (which would blame the compiler for what the declaration
+        // said). Whether the buffer may be WRITTEN is its provenance,
+        // judged by the write itself (#183).
         let byte_buffer = matches!(
             buf_ty,
-            Ty::RawPtr { mutable: true, pointee } if matches!(**pointee, Ty::Int(IntKind::U8))
+            Ty::RawPtr { pointee } if matches!(**pointee, Ty::Int(IntKind::U8))
         );
         if !byte_buffer || !matches!(len_ty, Ty::Int(IntKind::Usize)) {
             return Err(self.host_signature_error("read", SHAPE, loc, origin));
@@ -2750,7 +2785,7 @@ impl<'db, M: Mode> Machine<'db, M> {
         let alloc = self.fresh_alloc(Allocation {
             value: Value::Array(vec![Value::Uninit; n]),
             live: true,
-            writable: true,
+            read_only: None,
             kind: AllocKind::Heap,
             // The birth site: the blame the heap-UB notes point back at.
             origin: Some((loc.clone(), origin)),
@@ -2866,7 +2901,7 @@ impl<'db, M: Mode> Machine<'db, M> {
     /// `add(p, i)`: pointer to element (head-index + i) of the same
     /// allocation. Minting is UNCHECKED per the shipped rule — no bounds
     /// judgement here; an out-of-range result is detected UB at its first
-    /// deref, exactly like `a[i].&raw mut` past the end. The one shape the
+    /// deref, exactly like `a[i].&raw` past the end. The one shape the
     /// abstract machine cannot represent — advancing a pointer that does
     /// not address an array element (a lone local, a record field) — is
     /// refused as detected UB at the call (with `i == 0` as the harmless
@@ -3301,7 +3336,8 @@ impl<'db, M: Mode> Machine<'db, M> {
                 let alloc = self.fresh_alloc(Allocation {
                     value: Value::Array(Vec::new()),
                     live: false,
-                    writable: false,
+                    // Never live, so never reached by the write gate.
+                    read_only: None,
                     kind: AllocKind::Dangling,
                     origin: None,
                     ended: None,
@@ -3723,7 +3759,7 @@ fn root_origin(db: &dyn Db, loc: &ItemLoc) -> Option<(ItemLoc, ExprId)> {
 // Scope: a raw pointer minted through a deref inherits the node its
 // parent pointer speaks through, per the ruling that `.&raw` is not a
 // decayed safe borrow. A raw pointer minted straight off a bare local's
-// name (`n.&raw mut`) carries the untracked marker (`Provenance(None)`)
+// name (`n.&raw`) carries the untracked marker (`Provenance(None)`)
 // until it is resolved against an access, at which point it inherits
 // that local's ROOT if one already exists — the root IS the local's own
 // storage, so the two must be the same node. Only an allocation no safe
@@ -3892,7 +3928,7 @@ impl<M> Machine<'_, M> {
             Provenance(Some(tag)) => tag,
             // A raw pointer minted directly from a bare local's own name
             // (never through a safe borrow) inherits that local's ROOT —
-            // once one exists. `n.&raw mut` and `n`'s own name are the
+            // once one exists. `n.&raw` and `n`'s own name are the
             // SAME storage, so they must be the same node: if a safe
             // borrow has already covered `n` (creating its root), a raw
             // write here is exactly as foreign to that borrow as a plain

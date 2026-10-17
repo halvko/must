@@ -602,7 +602,7 @@ impl Constraints {
                 let region = self.fresh_region();
                 Ty::borrow(*mutable, region, self.freshen_regions(referent))
             }
-            Ty::RawPtr { mutable, pointee } => Ty::raw_ptr(*mutable, self.freshen_regions(pointee)),
+            Ty::RawPtr { pointee } => Ty::raw_ptr(self.freshen_regions(pointee)),
             Ty::Array { elem, len } => Ty::array(self.freshen_regions(elem), len.clone()),
             Ty::Record(rec) => Ty::record(
                 rec.fields
@@ -881,20 +881,11 @@ impl Constraints {
                     params_ok && self.unify(table, &f1.ret, &f2.ret, cause)
                 }
             }
-            // Exact and equational: same mutability, pointwise pointee. No
-            // variance (nothing to be variant over without subtyping), and
-            // `T.&raw mut` vs `T.&raw` is FALSE — a future relaxation would
-            // be a shallow `widens_to` conversion, never unification.
-            (
-                Ty::RawPtr {
-                    mutable: m1,
-                    pointee: p1,
-                },
-                Ty::RawPtr {
-                    mutable: m2,
-                    pointee: p2,
-                },
-            ) => m1 == m2 && self.unify(table, &p1, &p2, cause),
+            // Exact and equational: pointwise pointee. No variance
+            // (nothing to be variant over without subtyping).
+            (Ty::RawPtr { pointee: p1 }, Ty::RawPtr { pointee: p2 }) => {
+                self.unify(table, &p1, &p2, cause)
+            }
             // A safe borrow: same mutability, referent pointwise, and the
             // REGIONS ARE NOT COMPARED HERE. Unification decides type
             // IDENTITY; the outlives relation between two related regions
@@ -1467,7 +1458,7 @@ pub(crate) fn resolve_fully(table: &mut InPlaceUnificationTable<TyVar>, ty: &Ty)
             let ret = resolve_fully(table, &f.ret);
             f.rebuilt(params, ret)
         }
-        Ty::RawPtr { mutable, pointee } => Ty::raw_ptr(*mutable, resolve_fully(table, pointee)),
+        Ty::RawPtr { pointee } => Ty::raw_ptr(resolve_fully(table, pointee)),
         // The REGION is carried through untouched: it is not this table's
         // to resolve — regions are solved by the outlives module, over
         // constraints, not by unification.
@@ -1525,9 +1516,7 @@ fn render_unresolved_numbers(table: &mut InPlaceUnificationTable<TyVar>, ty: &Ty
             region.clone(),
             render_unresolved_numbers(table, referent),
         ),
-        Ty::RawPtr { mutable, pointee } => {
-            Ty::raw_ptr(*mutable, render_unresolved_numbers(table, pointee))
-        }
+        Ty::RawPtr { pointee } => Ty::raw_ptr(render_unresolved_numbers(table, pointee)),
         Ty::Array { elem, len } => Ty::array(render_unresolved_numbers(table, elem), len.clone()),
         Ty::Record(rec) => Ty::record(
             rec.fields

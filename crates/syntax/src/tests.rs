@@ -8797,10 +8797,10 @@ fn construction_turbofish_expr() {
 #[test]
 fn raw_pointer_types_parse() {
     check(
-        "static f = fn(p: usize.&raw, q: usize.&raw mut) -> usize.&raw mut { q };",
+        "static f = fn(p: usize.&raw, q: usize.&raw) -> usize.&raw { q };",
         expect![[r#"
-            SOURCE_FILE@0..72
-              STATIC_ITEM@0..72
+            SOURCE_FILE@0..64
+              STATIC_ITEM@0..64
                 ITEM_HEAD@0..6
                   STATIC_KW@0..6 "static"
                 WHITESPACE@6..7 " "
@@ -8809,9 +8809,9 @@ fn raw_pointer_types_parse() {
                 WHITESPACE@8..9 " "
                 EQ@9..10 "="
                 WHITESPACE@10..11 " "
-                FN_LITERAL@11..71
+                FN_LITERAL@11..63
                   FN_KW@11..13 "fn"
-                  PARAM_LIST@13..47
+                  PARAM_LIST@13..43
                     L_PAREN@13..14 "("
                     PARAM@14..27
                       BIND_PAT@14..15
@@ -8828,45 +8828,41 @@ fn raw_pointer_types_parse() {
                         RAW_KW@24..27 "raw"
                     COMMA@27..28 ","
                     WHITESPACE@28..29 " "
-                    PARAM@29..46
+                    PARAM@29..42
                       BIND_PAT@29..30
                         NAME@29..30
                           IDENT@29..30 "q"
                       COLON@30..31 ":"
                       WHITESPACE@31..32 " "
-                      RAW_PTR_TYPE@32..46
+                      RAW_PTR_TYPE@32..42
                         PATH_TYPE@32..37
                           NAME_REF@32..37
                             IDENT@32..37 "usize"
                         DOT@37..38 "."
                         AMP@38..39 "&"
                         RAW_KW@39..42 "raw"
-                        WHITESPACE@42..43 " "
-                        MUT_KW@43..46 "mut"
-                    R_PAREN@46..47 ")"
-                  WHITESPACE@47..48 " "
-                  RET_TYPE@48..65
-                    THIN_ARROW@48..50 "->"
-                    WHITESPACE@50..51 " "
-                    RAW_PTR_TYPE@51..65
-                      PATH_TYPE@51..56
-                        NAME_REF@51..56
-                          IDENT@51..56 "usize"
-                      DOT@56..57 "."
-                      AMP@57..58 "&"
-                      RAW_KW@58..61 "raw"
-                      WHITESPACE@61..62 " "
-                      MUT_KW@62..65 "mut"
-                  WHITESPACE@65..66 " "
-                  BLOCK_EXPR@66..71
-                    L_BRACE@66..67 "{"
-                    WHITESPACE@67..68 " "
-                    PATH_EXPR@68..69
-                      NAME_REF@68..69
-                        IDENT@68..69 "q"
-                    WHITESPACE@69..70 " "
-                    R_BRACE@70..71 "}"
-                SEMICOLON@71..72 ";"
+                    R_PAREN@42..43 ")"
+                  WHITESPACE@43..44 " "
+                  RET_TYPE@44..57
+                    THIN_ARROW@44..46 "->"
+                    WHITESPACE@46..47 " "
+                    RAW_PTR_TYPE@47..57
+                      PATH_TYPE@47..52
+                        NAME_REF@47..52
+                          IDENT@47..52 "usize"
+                      DOT@52..53 "."
+                      AMP@53..54 "&"
+                      RAW_KW@54..57 "raw"
+                  WHITESPACE@57..58 " "
+                  BLOCK_EXPR@58..63
+                    L_BRACE@58..59 "{"
+                    WHITESPACE@59..60 " "
+                    PATH_EXPR@60..61
+                      NAME_REF@60..61
+                        IDENT@60..61 "q"
+                    WHITESPACE@61..62 " "
+                    R_BRACE@62..63 "}"
+                SEMICOLON@63..64 ";"
         "#]],
     );
 }
@@ -8874,10 +8870,10 @@ fn raw_pointer_types_parse() {
 #[test]
 fn raw_pointer_type_in_generic_argument_parses() {
     check(
-        "static x: Pair::<usize.&raw mut> = y;",
+        "static x: Pair::<usize.&raw> = y;",
         expect![[r#"
-            SOURCE_FILE@0..37
-              STATIC_ITEM@0..37
+            SOURCE_FILE@0..33
+              STATIC_ITEM@0..33
                 ITEM_HEAD@0..6
                   STATIC_KW@0..6 "static"
                 WHITESPACE@6..7 " "
@@ -8885,30 +8881,28 @@ fn raw_pointer_type_in_generic_argument_parses() {
                   IDENT@7..8 "x"
                 COLON@8..9 ":"
                 WHITESPACE@9..10 " "
-                PATH_TYPE@10..32
+                PATH_TYPE@10..28
                   NAME_REF@10..14
                     IDENT@10..14 "Pair"
                   COLON2@14..16 "::"
-                  GENERIC_ARG_LIST@16..32
+                  GENERIC_ARG_LIST@16..28
                     L_ANGLE@16..17 "<"
-                    TYPE_ARG@17..31
-                      RAW_PTR_TYPE@17..31
+                    TYPE_ARG@17..27
+                      RAW_PTR_TYPE@17..27
                         PATH_TYPE@17..22
                           NAME_REF@17..22
                             IDENT@17..22 "usize"
                         DOT@22..23 "."
                         AMP@23..24 "&"
                         RAW_KW@24..27 "raw"
-                        WHITESPACE@27..28 " "
-                        MUT_KW@28..31 "mut"
-                    R_ANGLE@31..32 ">"
-                WHITESPACE@32..33 " "
-                EQ@33..34 "="
-                WHITESPACE@34..35 " "
-                PATH_EXPR@35..36
-                  NAME_REF@35..36
-                    IDENT@35..36 "y"
-                SEMICOLON@36..37 ";"
+                    R_ANGLE@27..28 ">"
+                WHITESPACE@28..29 " "
+                EQ@29..30 "="
+                WHITESPACE@30..31 " "
+                PATH_EXPR@31..32
+                  NAME_REF@31..32
+                    IDENT@31..32 "y"
+                SEMICOLON@32..33 ";"
         "#]],
     );
 }
@@ -8916,10 +8910,10 @@ fn raw_pointer_type_in_generic_argument_parses() {
 #[test]
 fn raw_pointer_type_in_array_element_parses() {
     check(
-        "static x: [usize.&raw mut; 2] = y;",
+        "static x: [usize.&raw; 2] = y;",
         expect![[r#"
-            SOURCE_FILE@0..34
-              STATIC_ITEM@0..34
+            SOURCE_FILE@0..30
+              STATIC_ITEM@0..30
                 ITEM_HEAD@0..6
                   STATIC_KW@0..6 "static"
                 WHITESPACE@6..7 " "
@@ -8927,41 +8921,39 @@ fn raw_pointer_type_in_array_element_parses() {
                   IDENT@7..8 "x"
                 COLON@8..9 ":"
                 WHITESPACE@9..10 " "
-                ARRAY_TYPE@10..29
+                ARRAY_TYPE@10..25
                   L_BRACKET@10..11 "["
-                  RAW_PTR_TYPE@11..25
+                  RAW_PTR_TYPE@11..21
                     PATH_TYPE@11..16
                       NAME_REF@11..16
                         IDENT@11..16 "usize"
                     DOT@16..17 "."
                     AMP@17..18 "&"
                     RAW_KW@18..21 "raw"
-                    WHITESPACE@21..22 " "
-                    MUT_KW@22..25 "mut"
-                  SEMICOLON@25..26 ";"
-                  WHITESPACE@26..27 " "
-                  CONST_ARG@27..28
-                    LITERAL@27..28
-                      INT_NUMBER@27..28 "2"
-                  R_BRACKET@28..29 "]"
-                WHITESPACE@29..30 " "
-                EQ@30..31 "="
-                WHITESPACE@31..32 " "
-                PATH_EXPR@32..33
-                  NAME_REF@32..33
-                    IDENT@32..33 "y"
-                SEMICOLON@33..34 ";"
+                  SEMICOLON@21..22 ";"
+                  WHITESPACE@22..23 " "
+                  CONST_ARG@23..24
+                    LITERAL@23..24
+                      INT_NUMBER@23..24 "2"
+                  R_BRACKET@24..25 "]"
+                WHITESPACE@25..26 " "
+                EQ@26..27 "="
+                WHITESPACE@27..28 " "
+                PATH_EXPR@28..29
+                  NAME_REF@28..29
+                    IDENT@28..29 "y"
+                SEMICOLON@29..30 ";"
         "#]],
     );
 }
 
 #[test]
-fn addr_of_both_flavors_parse() {
+fn addr_of_names_and_fields_parse() {
     check(
-        "static f = fn { let a = x.&raw; let b = y.z.&raw mut; };",
+        "static f = fn { let a = x.&raw; let b = y.z.&raw; };",
         expect![[r#"
-            SOURCE_FILE@0..56
-              STATIC_ITEM@0..56
+            SOURCE_FILE@0..52
+              STATIC_ITEM@0..52
                 ITEM_HEAD@0..6
                   STATIC_KW@0..6 "static"
                 WHITESPACE@6..7 " "
@@ -8970,10 +8962,10 @@ fn addr_of_both_flavors_parse() {
                 WHITESPACE@8..9 " "
                 EQ@9..10 "="
                 WHITESPACE@10..11 " "
-                FN_LITERAL@11..55
+                FN_LITERAL@11..51
                   FN_KW@11..13 "fn"
                   WHITESPACE@13..14 " "
-                  BLOCK_EXPR@14..55
+                  BLOCK_EXPR@14..51
                     L_BRACE@14..15 "{"
                     WHITESPACE@15..16 " "
                     LET_STMT@16..31
@@ -8994,7 +8986,7 @@ fn addr_of_both_flavors_parse() {
                         RAW_KW@27..30 "raw"
                       SEMICOLON@30..31 ";"
                     WHITESPACE@31..32 " "
-                    LET_STMT@32..53
+                    LET_STMT@32..49
                       LET_KW@32..35 "let"
                       WHITESPACE@35..36 " "
                       BIND_PAT@36..37
@@ -9003,7 +8995,7 @@ fn addr_of_both_flavors_parse() {
                       WHITESPACE@37..38 " "
                       EQ@38..39 "="
                       WHITESPACE@39..40 " "
-                      ADDR_OF_EXPR@40..52
+                      ADDR_OF_EXPR@40..48
                         FIELD_EXPR@40..43
                           PATH_EXPR@40..41
                             NAME_REF@40..41
@@ -9014,12 +9006,10 @@ fn addr_of_both_flavors_parse() {
                         DOT@43..44 "."
                         AMP@44..45 "&"
                         RAW_KW@45..48 "raw"
-                        WHITESPACE@48..49 " "
-                        MUT_KW@49..52 "mut"
-                      SEMICOLON@52..53 ";"
-                    WHITESPACE@53..54 " "
-                    R_BRACE@54..55 "}"
-                SEMICOLON@55..56 ";"
+                      SEMICOLON@48..49 ";"
+                    WHITESPACE@49..50 " "
+                    R_BRACE@50..51 "}"
+                SEMICOLON@51..52 ";"
         "#]],
     );
 }
@@ -9214,10 +9204,10 @@ fn deref_projected_write_target_parses() {
 #[test]
 fn addr_of_element_and_through_deref_places_parse() {
     check(
-        "static f = fn { a[0].&raw mut == p.*.x.&raw mut };",
+        "static f = fn { a[0].&raw == p.*.x.&raw };",
         expect![[r#"
-            SOURCE_FILE@0..50
-              STATIC_ITEM@0..50
+            SOURCE_FILE@0..42
+              STATIC_ITEM@0..42
                 ITEM_HEAD@0..6
                   STATIC_KW@0..6 "static"
                 WHITESPACE@6..7 " "
@@ -9226,14 +9216,14 @@ fn addr_of_element_and_through_deref_places_parse() {
                 WHITESPACE@8..9 " "
                 EQ@9..10 "="
                 WHITESPACE@10..11 " "
-                FN_LITERAL@11..49
+                FN_LITERAL@11..41
                   FN_KW@11..13 "fn"
                   WHITESPACE@13..14 " "
-                  BLOCK_EXPR@14..49
+                  BLOCK_EXPR@14..41
                     L_BRACE@14..15 "{"
                     WHITESPACE@15..16 " "
-                    BIN_EXPR@16..47
-                      ADDR_OF_EXPR@16..29
+                    BIN_EXPR@16..39
+                      ADDR_OF_EXPR@16..25
                         INDEX_EXPR@16..20
                           PATH_EXPR@16..17
                             NAME_REF@16..17
@@ -9245,39 +9235,35 @@ fn addr_of_element_and_through_deref_places_parse() {
                         DOT@20..21 "."
                         AMP@21..22 "&"
                         RAW_KW@22..25 "raw"
-                        WHITESPACE@25..26 " "
-                        MUT_KW@26..29 "mut"
-                      WHITESPACE@29..30 " "
-                      EQ2@30..32 "=="
-                      WHITESPACE@32..33 " "
-                      ADDR_OF_EXPR@33..47
-                        FIELD_EXPR@33..38
-                          DEREF_EXPR@33..36
-                            PATH_EXPR@33..34
-                              NAME_REF@33..34
-                                IDENT@33..34 "p"
-                            DOT@34..35 "."
-                            STAR@35..36 "*"
-                          DOT@36..37 "."
-                          NAME_REF@37..38
-                            IDENT@37..38 "x"
-                        DOT@38..39 "."
-                        AMP@39..40 "&"
-                        RAW_KW@40..43 "raw"
-                        WHITESPACE@43..44 " "
-                        MUT_KW@44..47 "mut"
-                    WHITESPACE@47..48 " "
-                    R_BRACE@48..49 "}"
-                SEMICOLON@49..50 ";"
+                      WHITESPACE@25..26 " "
+                      EQ2@26..28 "=="
+                      WHITESPACE@28..29 " "
+                      ADDR_OF_EXPR@29..39
+                        FIELD_EXPR@29..34
+                          DEREF_EXPR@29..32
+                            PATH_EXPR@29..30
+                              NAME_REF@29..30
+                                IDENT@29..30 "p"
+                            DOT@30..31 "."
+                            STAR@31..32 "*"
+                          DOT@32..33 "."
+                          NAME_REF@33..34
+                            IDENT@33..34 "x"
+                        DOT@34..35 "."
+                        AMP@35..36 "&"
+                        RAW_KW@36..39 "raw"
+                    WHITESPACE@39..40 " "
+                    R_BRACE@40..41 "}"
+                SEMICOLON@41..42 ";"
         "#]],
     );
 }
 
 #[test]
 fn postfix_raw_borrow_chains_through_deref() {
-    // Expression-first greedy postfix: `x.&raw mut.*` chains the deref onto
+    // Expression-first greedy postfix: `x.&raw.*` chains the deref onto
     // the address-of (the pointer is formed, then immediately followed), and
-    // `p.*.&raw mut` takes the address through a deref — both single postfix
+    // `p.*.&raw` takes the address through a deref — both single postfix
     // chains, the spaced `mut` never shattering the chain (the whole point of
     // moving raw borrows postfix). The `= 9` then meets the unchanged
     // assign-target rule: the deref's receiver is an address-of, not a
@@ -9285,10 +9271,10 @@ fn postfix_raw_borrow_chains_through_deref() {
     // even spell this inline, so it is new territory — a future deref-of-
     // address-of cancellation is a borrow-round call, not this migration's).
     check(
-        "static f = fn { x.&raw mut.* = 9; p.*.&raw mut };",
+        "static f = fn { x.&raw.* = 9; p.*.&raw };",
         expect![[r#"
-            SOURCE_FILE@0..49
-              STATIC_ITEM@0..49
+            SOURCE_FILE@0..41
+              STATIC_ITEM@0..41
                 ITEM_HEAD@0..6
                   STATIC_KW@0..6 "static"
                 WHITESPACE@6..7 " "
@@ -9297,48 +9283,44 @@ fn postfix_raw_borrow_chains_through_deref() {
                 WHITESPACE@8..9 " "
                 EQ@9..10 "="
                 WHITESPACE@10..11 " "
-                FN_LITERAL@11..48
+                FN_LITERAL@11..40
                   FN_KW@11..13 "fn"
                   WHITESPACE@13..14 " "
-                  BLOCK_EXPR@14..48
+                  BLOCK_EXPR@14..40
                     L_BRACE@14..15 "{"
                     WHITESPACE@15..16 " "
-                    ASSIGN_STMT@16..33
-                      DEREF_EXPR@16..28
-                        ADDR_OF_EXPR@16..26
+                    ASSIGN_STMT@16..29
+                      DEREF_EXPR@16..24
+                        ADDR_OF_EXPR@16..22
                           PATH_EXPR@16..17
                             NAME_REF@16..17
                               IDENT@16..17 "x"
                           DOT@17..18 "."
                           AMP@18..19 "&"
                           RAW_KW@19..22 "raw"
-                          WHITESPACE@22..23 " "
-                          MUT_KW@23..26 "mut"
-                        DOT@26..27 "."
-                        STAR@27..28 "*"
-                      WHITESPACE@28..29 " "
-                      EQ@29..30 "="
-                      WHITESPACE@30..31 " "
-                      LITERAL@31..32
-                        INT_NUMBER@31..32 "9"
-                      SEMICOLON@32..33 ";"
-                    WHITESPACE@33..34 " "
-                    ADDR_OF_EXPR@34..46
-                      DEREF_EXPR@34..37
-                        PATH_EXPR@34..35
-                          NAME_REF@34..35
-                            IDENT@34..35 "p"
-                        DOT@35..36 "."
-                        STAR@36..37 "*"
-                      DOT@37..38 "."
-                      AMP@38..39 "&"
-                      RAW_KW@39..42 "raw"
-                      WHITESPACE@42..43 " "
-                      MUT_KW@43..46 "mut"
-                    WHITESPACE@46..47 " "
-                    R_BRACE@47..48 "}"
-                SEMICOLON@48..49 ";"
-            error 16..28: can only assign to a variable or its fields
+                        DOT@22..23 "."
+                        STAR@23..24 "*"
+                      WHITESPACE@24..25 " "
+                      EQ@25..26 "="
+                      WHITESPACE@26..27 " "
+                      LITERAL@27..28
+                        INT_NUMBER@27..28 "9"
+                      SEMICOLON@28..29 ";"
+                    WHITESPACE@29..30 " "
+                    ADDR_OF_EXPR@30..38
+                      DEREF_EXPR@30..33
+                        PATH_EXPR@30..31
+                          NAME_REF@30..31
+                            IDENT@30..31 "p"
+                        DOT@31..32 "."
+                        STAR@32..33 "*"
+                      DOT@33..34 "."
+                      AMP@34..35 "&"
+                      RAW_KW@35..38 "raw"
+                    WHITESPACE@38..39 " "
+                    R_BRACE@39..40 "}"
+                SEMICOLON@40..41 ";"
+            error 16..24: can only assign to a variable or its fields
         "#]],
     );
 }
@@ -9388,10 +9370,10 @@ fn retired_prefix_raw_borrow_expr_migration() {
     // The retired prefix spelling superset-parses into the same node with a
     // targeted migration diagnostic (never a silent reinterpretation).
     check(
-        "static f = fn { let a = &raw x; let b = &raw mut y.z; };",
+        "static f = fn { let a = &raw x; let b = &raw y.z; };",
         expect![[r#"
-            SOURCE_FILE@0..56
-              STATIC_ITEM@0..56
+            SOURCE_FILE@0..52
+              STATIC_ITEM@0..52
                 ITEM_HEAD@0..6
                   STATIC_KW@0..6 "static"
                 WHITESPACE@6..7 " "
@@ -9400,10 +9382,10 @@ fn retired_prefix_raw_borrow_expr_migration() {
                 WHITESPACE@8..9 " "
                 EQ@9..10 "="
                 WHITESPACE@10..11 " "
-                FN_LITERAL@11..55
+                FN_LITERAL@11..51
                   FN_KW@11..13 "fn"
                   WHITESPACE@13..14 " "
-                  BLOCK_EXPR@14..55
+                  BLOCK_EXPR@14..51
                     L_BRACE@14..15 "{"
                     WHITESPACE@15..16 " "
                     LET_STMT@16..31
@@ -9424,7 +9406,7 @@ fn retired_prefix_raw_borrow_expr_migration() {
                             IDENT@29..30 "x"
                       SEMICOLON@30..31 ";"
                     WHITESPACE@31..32 " "
-                    LET_STMT@32..53
+                    LET_STMT@32..49
                       LET_KW@32..35 "let"
                       WHITESPACE@35..36 " "
                       BIND_PAT@36..37
@@ -9433,25 +9415,23 @@ fn retired_prefix_raw_borrow_expr_migration() {
                       WHITESPACE@37..38 " "
                       EQ@38..39 "="
                       WHITESPACE@39..40 " "
-                      ADDR_OF_EXPR@40..52
+                      ADDR_OF_EXPR@40..48
                         AMP@40..41 "&"
                         RAW_KW@41..44 "raw"
                         WHITESPACE@44..45 " "
-                        MUT_KW@45..48 "mut"
-                        WHITESPACE@48..49 " "
-                        FIELD_EXPR@49..52
-                          PATH_EXPR@49..50
-                            NAME_REF@49..50
-                              IDENT@49..50 "y"
-                          DOT@50..51 "."
-                          NAME_REF@51..52
-                            IDENT@51..52 "z"
-                      SEMICOLON@52..53 ";"
-                    WHITESPACE@53..54 " "
-                    R_BRACE@54..55 "}"
-                SEMICOLON@55..56 ";"
-            error 24..25: raw borrows are spelled postfix: `x.&raw` / `x.&raw mut`
-            error 40..41: raw borrows are spelled postfix: `x.&raw` / `x.&raw mut`
+                        FIELD_EXPR@45..48
+                          PATH_EXPR@45..46
+                            NAME_REF@45..46
+                              IDENT@45..46 "y"
+                          DOT@46..47 "."
+                          NAME_REF@47..48
+                            IDENT@47..48 "z"
+                      SEMICOLON@48..49 ";"
+                    WHITESPACE@49..50 " "
+                    R_BRACE@50..51 "}"
+                SEMICOLON@51..52 ";"
+            error 24..25: raw borrows are spelled postfix: `x.&raw`
+            error 40..41: raw borrows are spelled postfix: `x.&raw`
         "#]],
     );
 }
@@ -9459,10 +9439,10 @@ fn retired_prefix_raw_borrow_expr_migration() {
 #[test]
 fn retired_prefix_raw_ptr_type_migration() {
     check(
-        "static f = fn(p: &raw mut usize) -> () { };",
+        "static f = fn(p: &raw usize) -> () { };",
         expect![[r#"
-            SOURCE_FILE@0..43
-              STATIC_ITEM@0..43
+            SOURCE_FILE@0..39
+              STATIC_ITEM@0..39
                 ITEM_HEAD@0..6
                   STATIC_KW@0..6 "static"
                 WHITESPACE@6..7 " "
@@ -9471,41 +9451,102 @@ fn retired_prefix_raw_ptr_type_migration() {
                 WHITESPACE@8..9 " "
                 EQ@9..10 "="
                 WHITESPACE@10..11 " "
-                FN_LITERAL@11..42
+                FN_LITERAL@11..38
                   FN_KW@11..13 "fn"
-                  PARAM_LIST@13..32
+                  PARAM_LIST@13..28
                     L_PAREN@13..14 "("
-                    PARAM@14..31
+                    PARAM@14..27
                       BIND_PAT@14..15
                         NAME@14..15
                           IDENT@14..15 "p"
                       COLON@15..16 ":"
                       WHITESPACE@16..17 " "
-                      RAW_PTR_TYPE@17..31
+                      RAW_PTR_TYPE@17..27
                         AMP@17..18 "&"
                         RAW_KW@18..21 "raw"
                         WHITESPACE@21..22 " "
-                        MUT_KW@22..25 "mut"
-                        WHITESPACE@25..26 " "
-                        PATH_TYPE@26..31
-                          NAME_REF@26..31
-                            IDENT@26..31 "usize"
-                    R_PAREN@31..32 ")"
-                  WHITESPACE@32..33 " "
-                  RET_TYPE@33..38
-                    THIN_ARROW@33..35 "->"
-                    WHITESPACE@35..36 " "
-                    UNIT_TYPE@36..38
-                      L_PAREN@36..37 "("
-                      R_PAREN@37..38 ")"
-                  WHITESPACE@38..39 " "
-                  BLOCK_EXPR@39..42
-                    L_BRACE@39..40 "{"
-                    WHITESPACE@40..41 " "
-                    R_BRACE@41..42 "}"
-                SEMICOLON@42..43 ";"
-            error 17..18: raw pointer types are spelled postfix: `T.&raw` / `T.&raw mut`
+                        PATH_TYPE@22..27
+                          NAME_REF@22..27
+                            IDENT@22..27 "usize"
+                    R_PAREN@27..28 ")"
+                  WHITESPACE@28..29 " "
+                  RET_TYPE@29..34
+                    THIN_ARROW@29..31 "->"
+                    WHITESPACE@31..32 " "
+                    UNIT_TYPE@32..34
+                      L_PAREN@32..33 "("
+                      R_PAREN@33..34 ")"
+                  WHITESPACE@34..35 " "
+                  BLOCK_EXPR@35..38
+                    L_BRACE@35..36 "{"
+                    WHITESPACE@36..37 " "
+                    R_BRACE@37..38 "}"
+                SEMICOLON@38..39 ";"
+            error 17..18: raw pointer types are spelled postfix: `T.&raw`
         "#]],
+    );
+}
+
+#[test]
+fn retired_raw_mut_is_a_migration_with_a_fix() {
+    // One raw pointer kind (#183): `.&raw mut` still parses into the one
+    // node, and gets a migration diagnostic on the `mut` whose fix deletes
+    // it — in an expression, in a type, and nested in either.
+    const MESSAGE: &str = "`.&raw mut` is spelled `.&raw`: there is one raw pointer kind, \
+                           and whether a write through it is allowed depends on the place it \
+                           was taken from";
+    for (source, fixed) in [
+        (
+            "static f = fn { let mut x = 1; let p = x.&raw mut; };",
+            "static f = fn { let mut x = 1; let p = x.&raw; };",
+        ),
+        (
+            "static f = fn(p: usize.&raw mut) {};",
+            "static f = fn(p: usize.&raw) {};",
+        ),
+        (
+            "static f = fn { p.*.x.&raw  mut.* };",
+            "static f = fn { p.*.x.&raw.* };",
+        ),
+        (
+            "static x: [Pair::<u8.&raw mut>; 2] = y;",
+            "static x: [Pair::<u8.&raw>; 2] = y;",
+        ),
+    ] {
+        let parse = crate::parse(source);
+        let [err] = parse.errors() else {
+            panic!(
+                "expected exactly one error for `{source}`, got {:?}",
+                parse.errors()
+            );
+        };
+        assert_eq!(err.message, MESSAGE, "for `{source}`");
+        assert_eq!(
+            &source[err.range.start().into()..err.range.end().into()],
+            "mut",
+            "the squiggle sits on the `mut` in `{source}`"
+        );
+        let fix = err.fix.as_ref().expect("the migration has a fix");
+        assert_eq!(fix.label, "Remove `mut`");
+        let applied = apply_fix(source, fix);
+        assert_eq!(applied, fixed);
+        assert_eq!(crate::parse(&applied).errors(), &[]);
+    }
+}
+
+#[test]
+fn retired_prefix_raw_mut_gets_both_migrations() {
+    // `&raw mut x` is retired twice over: the prefix spelling and the
+    // second flavor. Both are reported; neither hides the other.
+    let parse = crate::parse("static f = fn { let p = &raw mut x; };");
+    let messages: Vec<&str> = parse.errors().iter().map(|e| e.message.as_str()).collect();
+    assert_eq!(
+        messages,
+        [
+            "raw borrows are spelled postfix: `x.&raw`",
+            "`.&raw mut` is spelled `.&raw`: there is one raw pointer kind, and whether a \
+             write through it is allowed depends on the place it was taken from",
+        ]
     );
 }
 
@@ -16755,10 +16796,10 @@ fn an_extern_item_is_a_declaration_with_no_initializer() {
     // no `=` at all, and the signature is an ordinary `unsafe fn` TYPE in
     // annotation position (named parameters and all).
     check(
-        "extern static read: unsafe fn(u8.&raw mut, usize) -> isize;",
+        "extern static read: unsafe fn(u8.&raw, usize) -> isize;",
         expect![[r#"
-            SOURCE_FILE@0..59
-              STATIC_ITEM@0..59
+            SOURCE_FILE@0..55
+              STATIC_ITEM@0..55
                 ITEM_HEAD@0..13
                   EXTERN_KW@0..6 "extern"
                   WHITESPACE@6..7 " "
@@ -16768,37 +16809,35 @@ fn an_extern_item_is_a_declaration_with_no_initializer() {
                   IDENT@14..18 "read"
                 COLON@18..19 ":"
                 WHITESPACE@19..20 " "
-                FN_TYPE@20..58
+                FN_TYPE@20..54
                   UNSAFE_KW@20..26 "unsafe"
                   WHITESPACE@26..27 " "
                   FN_KW@27..29 "fn"
-                  PARAM_LIST@29..49
+                  PARAM_LIST@29..45
                     L_PAREN@29..30 "("
-                    PARAM@30..41
-                      RAW_PTR_TYPE@30..41
+                    PARAM@30..37
+                      RAW_PTR_TYPE@30..37
                         PATH_TYPE@30..32
                           NAME_REF@30..32
                             IDENT@30..32 "u8"
                         DOT@32..33 "."
                         AMP@33..34 "&"
                         RAW_KW@34..37 "raw"
-                        WHITESPACE@37..38 " "
-                        MUT_KW@38..41 "mut"
-                    COMMA@41..42 ","
-                    WHITESPACE@42..43 " "
-                    PARAM@43..48
-                      PATH_TYPE@43..48
-                        NAME_REF@43..48
-                          IDENT@43..48 "usize"
-                    R_PAREN@48..49 ")"
-                  WHITESPACE@49..50 " "
-                  RET_TYPE@50..58
-                    THIN_ARROW@50..52 "->"
-                    WHITESPACE@52..53 " "
-                    PATH_TYPE@53..58
-                      NAME_REF@53..58
-                        IDENT@53..58 "isize"
-                SEMICOLON@58..59 ";"
+                    COMMA@37..38 ","
+                    WHITESPACE@38..39 " "
+                    PARAM@39..44
+                      PATH_TYPE@39..44
+                        NAME_REF@39..44
+                          IDENT@39..44 "usize"
+                    R_PAREN@44..45 ")"
+                  WHITESPACE@45..46 " "
+                  RET_TYPE@46..54
+                    THIN_ARROW@46..48 "->"
+                    WHITESPACE@48..49 " "
+                    PATH_TYPE@49..54
+                      NAME_REF@49..54
+                        IDENT@49..54 "isize"
+                SEMICOLON@54..55 ";"
             error 0..6: declaring an `extern` item is a VOUCH: write `unsafe extern static`
         "#]],
     );
@@ -16910,7 +16949,7 @@ fn a_vouched_extern_item_may_be_declared_safe_to_call() {
     // A plain `fn` type is accepted: the item vouches, the type says calls are safe.
     for source in [
         "unsafe extern static now: fn() -> i64;",
-        "unsafe extern static read: unsafe fn(u8.&raw mut, usize) -> isize;",
+        "unsafe extern static read: unsafe fn(u8.&raw, usize) -> isize;",
         "unsafe extern static tick: fn() -> ();",
     ] {
         assert_eq!(
@@ -16924,7 +16963,7 @@ fn a_vouched_extern_item_may_be_declared_safe_to_call() {
 #[test]
 fn an_unmarked_extern_item_names_the_vouch_and_offers_it() {
     // Missing `unsafe` is reported with a fix, never inserted silently.
-    let source = "extern static read: unsafe fn(u8.&raw mut, usize) -> isize;";
+    let source = "extern static read: unsafe fn(u8.&raw, usize) -> isize;";
     let parse = crate::parse(source);
     let [err] = parse.errors() else {
         panic!("expected exactly one error, got {:?}", parse.errors());
@@ -16937,7 +16976,7 @@ fn an_unmarked_extern_item_names_the_vouch_and_offers_it() {
     let fixed = apply_fix(source, fix);
     assert_eq!(
         fixed,
-        "unsafe extern static read: unsafe fn(u8.&raw mut, usize) -> isize;"
+        "unsafe extern static read: unsafe fn(u8.&raw, usize) -> isize;"
     );
     assert_eq!(crate::parse(&fixed).errors(), &[]);
 }
@@ -17178,7 +17217,7 @@ fn removing_an_extern_statics_initializer_keeps_the_declaration() {
     // The fix cuts the VALUE, not the contract: an `extern` item with its type
     // taken away would be a second error where there was one, and the type
     // is the whole of what the declaration says.
-    let source = "unsafe extern static read: unsafe fn(u8.&raw mut, usize) -> isize = f;";
+    let source = "unsafe extern static read: unsafe fn(u8.&raw, usize) -> isize = f;";
     let parse = crate::parse(source);
     let err = parse
         .errors()
@@ -17192,7 +17231,7 @@ fn removing_an_extern_statics_initializer_keeps_the_declaration() {
     let fixed = apply_fix(source, fix);
     assert_eq!(
         fixed,
-        "unsafe extern static read: unsafe fn(u8.&raw mut, usize) -> isize;"
+        "unsafe extern static read: unsafe fn(u8.&raw, usize) -> isize;"
     );
     assert_eq!(crate::parse(&fixed).errors(), &[]);
 }

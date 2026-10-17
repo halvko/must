@@ -424,11 +424,13 @@ fn an_extern_item_whose_signature_has_no_wasm_shape_is_refused_by_name() {
     // names the ITEM — which boundary is unavailable is the useful half.
     let message = harness::on_budget(|| {
         let db = RootDatabase::default();
-        let source = "unsafe extern static read: unsafe fn(u8.&raw mut, usize) -> i64;\n\
-                      static main = fn () -> i64 {\n\
-                          let mut b: u8 = 0;\n\
-                          unsafe { read(b.&raw mut, 1) }\n\
-                      };";
+        let source = r#"
+unsafe extern static read: unsafe fn(u8.&raw, usize) -> i64;
+static main = fn () -> i64 {
+    let mut b: u8 = 0;
+    unsafe { read(b.&raw, 1) }
+};
+"#;
         let loc = harness::prepare(&db, source, "main()");
         let Err(codegen_wasm::CompileError::Unsupported(refusal)) =
             codegen_wasm::compile(&db, &loc)

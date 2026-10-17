@@ -29,9 +29,11 @@
   `t.0` is rejected on the float token-splitting hazard.
 - **G08** Deref is postfix: `p.*`, chaining with `.field` and call parens without
   parentheses, which removes the wrong spelling: `p.*.hp = 0` is the only way to write it.
-  Address-of is postfix too: `x.&raw` / `x.&raw mut`, with the type twins `T.&raw` /
-  `T.&raw mut` — no prefix place adaptor (deref, address-of) exists in the grammar. The
-  retired prefix `&raw x` / `&raw mut x` (and the type twins) superset-parse into the same
+  Address-of is postfix too: `x.&raw`, with the type twin `T.&raw` — no prefix place
+  adaptor (deref, address-of) exists in the grammar. There is one raw pointer kind (M23):
+  the retired `x.&raw mut` / `T.&raw mut` parse into the same nodes with a migration
+  diagnostic whose fix deletes the `mut`. The retired prefix `&raw x` (and the type twin)
+  superset-parse into the same
   nodes with a targeted migration diagnostic, never a silent reinterpretation, and the
   retired prefix safe borrows `&x`/`&mut x`, `&T`/`&mut T` migrate the same way (G26).
   Plain `x.&` / `x.&mut` and the type twins `T.&` / `T.&mut`, with no `raw`, are the SAFE
@@ -104,7 +106,7 @@
   exception: the compiler may insert a safe borrow of `x.*` where `x` is already a borrow;
   never a borrow of `x` itself; never a raw borrow. The first clause licenses implicit
   reborrow and degradation (M07); the second separates reborrow from auto-ref; the third
-  stops a call site minting `x.*.&raw mut` and laundering a region (M08).
+  stops a call site minting `x.*.&raw` and laundering a region (M08).
 - **G25** A bare pattern name never reinterprets as a variant: it binds fresh with a
   shadowing warning, and `::Circle` is the variant spelling. The sigil also works in
   expression position as reject-only sugar: it reads the position's expected type (T05) and
@@ -177,7 +179,7 @@
   fn LITERAL: the value's type carries the fact, so that spelling could only sugar an
   annotation.
 - **G22** An `extern` item is a declaration:
-  `unsafe extern static read: unsafe fn(u8.&raw mut, usize) -> isize;`. A type in
+  `unsafe extern static read: unsafe fn(u8.&raw, usize) -> isize;`. A type in
   annotation position, no `=`, no value, because nothing is being set to anything. TWO
   markers lead the item, one obligation each: `extern` says the name comes from outside,
   `unsafe` VOUCHES that the signature written here is what the host really provides — a
