@@ -107,7 +107,9 @@
   at the obligation's own origin, and the loan is live through the universal from there on — not
   in a sibling arm (the conditional-return case, `get_or_default`, is accepted). Forward scope
   from the mint is what keeps a mint that returns from reaching the access beside it; no branch,
-  loop or departure rule exists, because reachability answers all of it.
+  loop or departure rule exists, because reachability answers all of it. Every refusal plants
+  a trap where it blames (`mir::mir_checked`), so a refused access never runs; the wasm
+  backend compiles safe borrows with no runtime check on the strength of that (P06).
 - **M15** A move is an invalidation event exactly as a write is: the storage no longer holds
   what the borrow was taken of. It is one MIR operand produced from the type alone — a linear
   cannot be duplicated, so a read of one is always the last read — and the static rule reads
@@ -281,9 +283,6 @@
   **M14 M19**
 - **An immutable deferred `let x;` is wanted** — reserved (X12); granting it means the walk
   also proves "assigned at most once", which a second fact per binding would carry. **M21**
-- **A loan refusal plants no trap**, so a program the loan check refuses still runs past the
-  refused borrow. Outlives and linearity refusals trap where they blame; loan refusals come
-  from MIR itself, so trapping them needs a second pass (halvko/must#52). **M14**
 - **A borrowed `str` representation lands** — copying one out of a borrow stops being a copy,
   and the model needs a byte-range path element it deliberately lacks (T17). **M11**
 - **A borrowed scrutinee whose referent is unknown where the match is checked** — the lift is
