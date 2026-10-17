@@ -44,17 +44,17 @@ jobs:
           DEFAULT: ${{ github.event.repository.default_branch }}
           HEAD_SHA: ${{ github.event.pull_request.head.sha }}
         run: |
-          file=.github/workflows/review.yml
+          . .github/scripts/review-seen.sh
           git cat-file -e "origin/$DEFAULT^{commit}"
           git cat-file -e "$HEAD_SHA^{commit}"
-          git diff --quiet "origin/$DEFAULT" -- "$file" && exit 0
-          base=$(git merge-base "origin/$DEFAULT" "$HEAD_SHA")
-          if git diff --quiet "$base" "$HEAD_SHA" -- "$file"; then
-            echo "::error file=$file::This run's copy of the review workflow is older than $DEFAULT's, so the reviewers would not run. Rebase the PR onto $DEFAULT and push to get a review."
-            exit 1
-          fi
-          echo "::warning file=$file::This PR edits the review workflow, which the reviewers can only run once it is on $DEFAULT."
-          echo "skip=true" >> "$GITHUB_OUTPUT"
+          case $(workflow_verdict "origin/$DEFAULT" HEAD) in
+            stale)
+              echo "::error file=$review_workflow::This run's copy of the review workflow is older than $DEFAULT's, so the reviewers would not run. Rebase the PR onto $DEFAULT and push to get a review."
+              exit 1 ;;
+            edited)
+              echo "::warning file=$review_workflow::This PR or its base edits the review workflow, which the reviewers can only run once it is on $DEFAULT."
+              echo "skip=true" >> "$GITHUB_OUTPUT" ;;
+          esac
       # Opening the PR, marking it ready and the `review` label always start a
       # round; pushes and reopening are gated. The summary comment carries a
       # marker per reviewer and round, naming the head it reviewed and what
@@ -72,10 +72,8 @@ jobs:
           PR: ${{ github.event.pull_request.number }}
           REPO: ${{ github.repository }}
         run: |
-          comments=$(gh api --paginate "repos/$REPO/issues/$PR/comments" \
-            --jq '.[] | select(.user.type == "Bot") | .body')
-          markers=$(printf '%s\n' "$comments" \
-            | { grep -E '^<!-- review-round: [^ ]+ [0-9a-f]{40} (label|auto)( findings)? -->$' || true; })
+          . .github/scripts/review-seen.sh
+          markers=$(review_markers "$REPO" "$PR")
           # A labelled round starts a fresh budget for every reviewer, including
           # one that wrote no summary in it, and counts as its first round.
           rounds=$(printf '%s\n' "$markers" | awk '
@@ -84,17 +82,12 @@ jobs:
             NF { prev = $5 " " $4 }
             END { m = 0; for (r in n) if (n[r] > m) m = n[r]; print m }')
           # A change that keeps the patch last reviewed (a rebase) gets no round.
-          reviewed=$(printf '%s\n' "$markers" | awk 'NF { s = $4 } END { print s }')
+          reviewed=$(printf '%s\n' "$markers" | last_reviewed)
           if [ -n "$reviewed" ] \
-            && git fetch -q origin "$reviewed" "$AFTER" "$BASE_REF" 2>/dev/null; then
-            patch() {
-              git diff "$(git merge-base "origin/$BASE_REF" "$1")" "$1" \
-                | git patch-id --stable | cut -d' ' -f1
-            }
-            if [ "$(patch "$reviewed")" = "$(patch "$AFTER")" ]; then
-              echo "skip=true" >> "$GITHUB_OUTPUT"
-              exit 0
-            fi
+            && git fetch -q origin "$reviewed" "$AFTER" "$BASE_REF" 2>/dev/null \
+            && same_patch "origin/$BASE_REF" "$reviewed" "$AFTER"; then
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+            exit 0
           fi
           if [ "$rounds" -ge "$MAX_ROUNDS" ]; then
             # A reviewer whose latest round raised findings still reviews the
@@ -189,11 +182,9 @@ jobs:
           BASE: ${{ github.event.pull_request.base.sha }}
           HEAD: ${{ github.event.pull_request.head.sha }}
         run: |
-          comments=$(gh api --paginate "repos/$REPO/issues/$PR/comments" \
-            --jq '.[] | select(.user.type == "Bot") | .body')
-          last=$(printf '%s\n' "$comments" | awk -v r="$ROLE" '
-            $1 == "<!--" && $2 == "review-round:" && $3 == r && $4 ~ /^[0-9a-f]{40}$/ { s = $4 }
-            END { print s }')
+          . .github/scripts/review-seen.sh
+          markers=$(review_markers "$REPO" "$PR")
+          last=$(printf '%s\n' "$markers" | awk -v r="$ROLE" '$3 == r' | last_reviewed)
           [ -n "$last" ] || exit 0
           # A rebase or force-push can leave the reviewed commit on no branch.
           since=""
@@ -236,8 +227,9 @@ jobs:
             | jq -cs --arg role "$ROLE" 'group_by(.in_reply_to_id // .id)[]
               | sort_by(.id) | .[0] as $root
               | {id: $root.id, own: ($root.body | startswith("**\($role):**")),
-                 where: ("\($root.path):" + (if $root.line then "\($root.line)"
-                   else "\($root.original_line) (outdated)" end)),
+                 where: ($root.path + (if $root.line then ":\($root.line)"
+                   elif $root.original_line then ":\($root.original_line) (outdated)"
+                   else " (file)" end)),
                  opener: ($root.body | capture("^\\*\\*(?<r>[a-z-]+):\\*\\*").r // $root.user),
                  first: ($root.body | sub("^(\\*\\*[a-z-]+:\\*\\* *)+"; "") | split("\n")[0] | .[:120]),
                  replies: (length - 1),
@@ -501,11 +493,24 @@ jobs:
             event: "COMMENT", body: "Findings on \($sha[:7]).", comments: $c}' > "$review"
           if ! gh api -X POST "repos/$REPO/pulls/$PR/reviews" --input "$review" > /dev/null; then
             # One finding on a line outside the diff fails the whole review, so
-            # list them all in its body instead.
-            jq -n --arg sha "$SHA" --argjson c "$findings" '{commit_id: $sha,
-              event: "COMMENT", body: ("Findings on \($sha[:7]):\n\n"
-                + ([$c[] | "- `\(.path):\(.line)`: \(.body)"] | join("\n")))}' > "$review"
-            gh api -X POST "repos/$REPO/pulls/$PR/reviews" --input "$review" > /dev/null
+            # each is posted on its own, on its file when its line is outside
+            # the diff, and still gets a thread to resolve. Only one on a file
+            # outside the diff goes in a review's body.
+            rest=$(jq -c '.[]' <<< "$findings" | while read -r c; do
+              path=$(jq -r .path <<< "$c")
+              line=$(jq -r .line <<< "$c")
+              gh api -X POST "repos/$REPO/pulls/$PR/comments" -f commit_id="$SHA" \
+                -f path="$path" -F line="$line" -f side=RIGHT -f body="$(jq -r .body <<< "$c")" > /dev/null 2>&1 \
+                || gh api -X POST "repos/$REPO/pulls/$PR/comments" -f commit_id="$SHA" \
+                  -f path="$path" -f subject_type=file \
+                  -f body="$(jq -r '.line as $l | .body | sub("^(?<r>\\*\\*[a-z-]+:\\*\\*) *"; "\(.r) Line \($l): ")' <<< "$c")" > /dev/null 2>&1 \
+                || jq -r '"- `\(.path):\(.line)`: \(.body)"' <<< "$c"
+            done)
+            if [ -n "$rest" ]; then
+              jq -n --arg sha "$SHA" --arg rest "$rest" '{commit_id: $sha,
+                event: "COMMENT", body: "Findings on \($sha[:7]) outside the diff:\n\n\($rest)"}' > "$review"
+              gh api -X POST "repos/$REPO/pulls/$PR/reviews" --input "$review" > /dev/null
+            fi
           fi
 
   # Takes the `review` label off once the round ends, so adding it again asks for another.

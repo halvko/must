@@ -25,23 +25,18 @@ if [ "$(jq -r .draft <<< "$pull")" = true ]; then
   exit 0
 fi
 
-# The last head any reviewer finished a round on, from the summary markers.
-reviewed=$(gh api --paginate "repos/$REPO/issues/$PR/comments" \
-  --jq '.[] | select(.user.type == "Bot") | .body' \
-  | { grep -E '^<!-- review-round: [^ ]+ [0-9a-f]{40} (label|auto)( findings)? -->$' || true; } \
-  | awk 'NF { s = $4 } END { print s }')
+. "$(dirname "$0")/review-seen.sh"
+markers=$(review_markers "$REPO" "$PR")
+reviewed=$(printf '%s\n' "$markers" | last_reviewed)
 git fetch -q origin "refs/pull/$PR/head" "$base_ref" "$default"
+# A change that keeps the reviewed patch (a rebase) gets no round, so it
+# counts as seen.
 seen=false
 if [ "$reviewed" = "$sha" ]; then
   seen=true
-elif [ -n "$reviewed" ] && git fetch -q origin "$reviewed" 2>/dev/null; then
-  # A change that keeps the reviewed patch (a rebase) gets no round, so it
-  # counts as seen.
-  patch() {
-    git diff "$(git merge-base "origin/$base_ref" "$1")" "$1" \
-      | git patch-id --stable | cut -d' ' -f1
-  }
-  [ "$(patch "$reviewed")" = "$(patch "$sha")" ] && seen=true
+elif [ -n "$reviewed" ] && git fetch -q origin "$reviewed" 2>/dev/null \
+  && same_patch "origin/$base_ref" "$reviewed" "$sha"; then
+  seen=true
 fi
 
 # Unresolved inline threads a reviewer opened; outdated ones count too, since
@@ -72,21 +67,23 @@ parts=()
 if [ "$seen" = false ]; then
   running=$(gh api "repos/$REPO/actions/workflows/review.yml/runs?head_sha=$sha" \
     --jq '[.workflow_runs[] | select(.status != "completed")] | length')
-  file=.github/workflows/review.yml
+  state=failure
   # The Review run's end sets this status again.
   if [ "$running" -gt 0 ]; then
     state=pending
     parts+=("The reviewers have not finished with $short.")
-  elif ! git diff --quiet "origin/$default" "$sha" -- "$file"; then
-    state=failure
-    if git diff --quiet "$(git merge-base "origin/$default" "$sha")" "$sha" -- "$file"; then
-      parts+=("$file here is older than $default's, so no reviewer can run; rebase onto $default.")
-    else
-      parts+=("This PR edits the review workflow, so no reviewer can run on it; it needs a human review.")
-    fi
+  # GitHub runs no pull_request workflow on a PR that does not merge.
+  elif [ "$(jq -r .mergeable <<< "$pull")" = false ]; then
+    parts+=("The PR conflicts with $base_ref, so no reviewer can run; resolve the conflict.")
   else
-    state=failure
-    parts+=("No reviewer has seen $short; add the \`review\` label for a round.")
+    # A Review run checks out the PR merged into its base.
+    running_copy=$sha
+    git fetch -q origin "refs/pull/$PR/merge" 2>/dev/null && running_copy=$(git rev-parse FETCH_HEAD)
+    case $(workflow_verdict "origin/$default" "$running_copy") in
+      stale) parts+=("The review workflow here is older than $default's, so no reviewer can run; rebase onto $default.") ;;
+      edited) parts+=("This PR or its base edits the review workflow, so no reviewer can run on it; it needs a human review.") ;;
+      *) parts+=("No reviewer has seen $short; add the \`review\` label for a round.") ;;
+    esac
   fi
 fi
 if [ "$threads" -gt 0 ]; then
