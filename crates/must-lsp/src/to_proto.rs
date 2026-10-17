@@ -154,6 +154,9 @@ pub(crate) fn completion_item(
         sort_text: Some(item.sort_text),
         filter_text: Some(item.filter_text),
         insert_text_format,
+        tags: item
+            .refused
+            .then(|| vec![lsp_types::CompletionItemTag::DEPRECATED]),
         text_edit: Some(lsp_types::CompletionTextEdit::Edit(lsp_types::TextEdit {
             range: range(line_index, item.text_edit.range),
             new_text,

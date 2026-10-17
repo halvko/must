@@ -135,9 +135,14 @@
   dot also offers members and requirements taking `Self.&` / `Self.&mut`, and accepting one
   rewrites the dot as `.&.` / `.&mut.`, so the user lands on the licensed borrow-receiver
   call rather than the no-auto-ref refusal. The edit starts at the dot, and clients filter on
-  the text from the edit's start, so its filter text is `.name`. A `.&mut.` the checker would
-  refuse (an immutable root, a `static`, a shared or raw step) is offered but sorts last: accepting
-  it puts the borrow error where the fix is.
+  the text from the edit's start, so its filter text is `.name`. A dot item whose call the
+  checker would refuse is still offered, sorted last and tagged deprecated (the nearest LSP has
+  to "refused"; clients that honour the tag strike it through): accepting it puts the borrow
+  error on the call, which names what blocks it. Refused means the call needs `Self.&mut` and
+  the receiver can't provide one, because of its type's borrow layers or the place it is read
+  from (an immutable root, a `static`, a shared or raw step). Examples: `.&mut.add()` on an
+  immutable root, `add()` on `Counter.&`, `*.add()` on `Counter.&mut.&`, and `s.*.c.add()`
+  with `c: Counter.&mut` and `s: S.&`.
 - **P13** The examples smoke target checks and runs every example against recorded snapshots
   under a timeout, so a hang fails naming the file, and a coverage guard fails if an example
   ships untested.
