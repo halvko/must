@@ -18,6 +18,12 @@ fn fixture(text: &str) -> (crate::Analysis, SourceFile, FilePosition) {
     (analysis, file, pos)
 }
 
+/// The item is a call the checker refuses: sorted in the refused tier (P16).
+fn is_refused(item: &crate::CompletionItem) -> bool {
+    item.sort_text
+        .starts_with(&crate::completions::TYPE_TIER_REFUSED.to_string())
+}
+
 /// Asserts goto-definition from `$0` lands focused on `expected`, located by
 /// `occurrence` (0-based) of that exact text in the fixture (after `$0` is
 /// stripped).
@@ -4791,10 +4797,10 @@ fn dot_completions_offer_members_next_to_fields() {
 
 #[test]
 fn dot_completions_on_a_borrow_receiver_follow_the_receiver_shape() {
-    // The dot offers what a call would accept: through a `&mut` receiver
-    // that is both borrow members and not the value one; through a shared
-    // receiver only the shared one. Fields are never offered — projecting
-    // through a borrow would be auto-deref.
+    // Through a `&mut` receiver the dot offers both borrow members and not
+    // the value one; through a shared receiver the exclusive one is offered
+    // refused (P16). Fields come through a written `.*`, never bare:
+    // projecting through a borrow would be auto-deref.
     const BORROW_FIXTURE: &str = r#"
 type Counter = struct { n: usize } with {
     impl Self {
@@ -4810,10 +4816,14 @@ type Counter = struct { n: usize } with {
     check_has_completion(&exclusive, "bump");
     check_no_completion(&exclusive, "get");
     check_no_completion(&exclusive, "n");
+    check_has_completion(&exclusive, "*.n");
     let shared =
         format!("{BORROW_FIXTURE}static main = fn::<@a>(c: Counter.&::<@a>) -> () {{ c.$0 }};");
     check_has_completion(&shared, "read");
-    check_no_completion(&shared, "bump");
+    let (analysis, _file, pos) = fixture(&shared);
+    let items = analysis.completions(pos);
+    let bump = items.iter().find(|c| c.label == "bump");
+    assert!(bump.is_some_and(is_refused), "`bump` is offered refused");
 }
 
 /// Applies the `label` completion's edit to the fixture, its snippet
@@ -4964,6 +4974,174 @@ static main = fn::<@a>(
         "through an exclusive borrow held by an immutable local"
     );
     assert!(add_last("x.*"), "through a raw pointer");
+}
+
+#[test]
+fn dot_completions_on_a_borrow_receiver_offer_the_referents_fields_through_a_deref() {
+    check_completions(
+        r#"
+static main = fn {
+    let a = struct {a = 8, b = "11"}.&;
+    a.$0
+}
+"#,
+        expect_test::expect![[r#"
+            *.a Field ({number})
+            *.b Field (str)
+        "#]],
+    );
+}
+
+#[test]
+fn dot_completions_deref_field_replaces_a_typed_prefix() {
+    check_completion_applied(
+        r#"
+static main = fn::<@a>(p: struct { x: usize, y: usize }.&mut::<@a>) -> usize {
+    p.y$0
+};
+"#,
+        "*.y",
+        expect_test::expect![[r#"
+            p.*.y
+            filter: y
+        "#]],
+    );
+}
+
+#[test]
+fn dot_completions_deref_once_per_borrow_layer() {
+    check_completion_applied(
+        r#"
+type Point = struct { x: usize };
+static f = fn::<@a, @b>(p: Point.&::<@a>.&::<@b>) -> usize {
+    p.$0
+};
+"#,
+        "*.*.x",
+        expect_test::expect![[r#"
+            p.*.*.x
+            filter: x
+        "#]],
+    );
+}
+
+#[test]
+fn dot_completions_reach_members_behind_the_innermost_borrow() {
+    const F: &str = r#"
+static f = fn::<@a, @b>(c: Counter.&::<@a>.&::<@b>) -> usize {
+    c.$0
+};
+"#;
+    check_completion_applied(
+        &format!("{BORROWED_MEMBER_FIXTURE}{F}"),
+        "*.get",
+        expect_test::expect![[r#"
+            c.*.get()
+            filter: get
+        "#]],
+    );
+    check_has_completion(&format!("{BORROWED_MEMBER_FIXTURE}{F}"), "*.*.n");
+    check_no_completion(&format!("{BORROWED_MEMBER_FIXTURE}{F}"), "*.take");
+}
+
+#[test]
+fn dot_completions_refuse_a_mut_member_behind_a_shared_layer() {
+    // `c.*` on a `Counter.&mut.&` reborrows through the shared layer, so
+    // `*.add()` is offered, sorted last and marked refused.
+    let text = format!(
+        "{BORROWED_MEMBER_FIXTURE}{}",
+        r#"
+static f = fn::<@a, @b>(c: Counter.&mut::<@a>.&::<@b>) -> () { c.$0 };
+"#
+    );
+    let (analysis, _file, pos) = fixture(&text);
+    let items = analysis.completions(pos);
+    let item = |label: &str| {
+        items
+            .iter()
+            .find(|c| c.label == label)
+            .unwrap_or_else(|| panic!("{label} is offered"))
+    };
+    assert!(!is_refused(item("*.get")));
+    assert!(is_refused(item("*.add")));
+    assert!(item("*.add").sort_text > item("*.get").sort_text);
+}
+
+#[test]
+fn dot_completions_refuse_a_mut_member_on_a_place_read_through_a_shared_borrow() {
+    // `s.*.c.*` reborrows through `s`'s shared layer, so `*.add()` is
+    // refused although `c` is a `Counter.&mut`.
+    let text = format!(
+        "{BORROWED_MEMBER_FIXTURE}{}",
+        r#"
+static f = fn::<@a, @b>(s: struct { c: Counter.&mut::<@a> }.&::<@b>) -> () { s.*.c.$0 };
+"#
+    );
+    let (analysis, _file, pos) = fixture(&text);
+    let items = analysis.completions(pos);
+    let item = |label: &str| {
+        items
+            .iter()
+            .find(|c| c.label == label)
+            .unwrap_or_else(|| panic!("{label} is offered"))
+    };
+    assert!(!is_refused(item("get")));
+    assert!(is_refused(item("add")));
+    assert!(item("add").sort_text > item("get").sort_text);
+}
+
+#[test]
+fn dot_completions_offer_a_mut_member_on_a_place_read_through_exclusive_borrows() {
+    let text = format!(
+        "{BORROWED_MEMBER_FIXTURE}{}",
+        r#"
+static f = fn::<@a, @b>(s: struct { c: Counter.&mut::<@a> }.&mut::<@b>) -> () { s.*.c.$0 };
+"#
+    );
+    let (analysis, _file, pos) = fixture(&text);
+    let items = analysis.completions(pos);
+    let add = items
+        .iter()
+        .find(|c| c.label == "add")
+        .expect("add is offered");
+    assert!(!is_refused(add));
+}
+
+#[test]
+fn dot_completions_reach_bound_requirements_behind_the_innermost_borrow() {
+    check_completions(
+        &format!(
+            "{BOUND_FIXTURE_HEAD}{}",
+            r#"
+static f = fn::<@a, @b, W: Write>(w: W.&mut::<@a>.&mut::<@b>) -> () { w.$0 };
+"#
+        ),
+        expect_test::expect![[r#"
+            *.push Function (fn(char, W.&mut::<@r>))
+        "#]],
+    );
+}
+
+#[test]
+fn dot_completions_refuse_a_mut_bound_requirement_behind_a_shared_layer() {
+    let (analysis, _file, pos) = fixture(&format!(
+        "{BOUND_FIXTURE_HEAD}{}",
+        r#"
+static f = fn::<@a, @b, W: Write>(w: W.&mut::<@a>.&::<@b>) -> () { w.$0 };
+"#
+    ));
+    let items = analysis.completions(pos);
+    let push = items.iter().find(|c| c.label == "*.push");
+    assert!(push.is_some_and(is_refused));
+}
+
+#[test]
+fn dot_completions_offer_no_deref_fields_through_a_raw_pointer() {
+    // TODO: halvko/must#181: a raw-pointer receiver offers no referent fields.
+    check_no_completion(
+        "static f = fn(p: struct { x: usize }.&raw mut) -> () { p.$0 };",
+        "*.x",
+    );
 }
 
 #[test]
@@ -5897,8 +6075,9 @@ static f = fn::<T: Mk>(t: T) -> usize { t.$0 };
 fn the_receiver_shape_decides_the_bounds_offer() {
     // One table for offers and calls alike. An OWNED receiver reaches a
     // `Self.&mut` requirement through a written `.&mut.` (the edit writes
-    // it), a SHARED borrow is refused an exclusive one, and an exclusive
-    // borrow takes both — `dot_reach`, read through the completion list.
+    // it), a SHARED borrow is offered an exclusive one refused (P16), and
+    // an exclusive borrow takes both — `dot_reach`, read through the
+    // completion list.
     let owned = format!("{BOUND_FIXTURE_HEAD}static f = fn::<W: Write>(w: W) -> () {{ w.$0 }};");
     check_completion_applied(
         &owned,
@@ -5912,7 +6091,10 @@ fn the_receiver_shape_decides_the_bounds_offer() {
         "{BOUND_FIXTURE_HEAD}\
          static f = fn::<@a, W: Write>(w: W.&::<@a>) -> () {{ w.$0 }};"
     );
-    check_no_completion(&shared, "push");
+    let (analysis, _file, pos) = fixture(&shared);
+    let items = analysis.completions(pos);
+    let push = items.iter().find(|c| c.label == "push");
+    assert!(push.is_some_and(is_refused), "`push` is offered refused");
     // A value-`Self` requirement is the mirror: the owned receiver takes
     // it, and the borrowed one does not (that would be auto-deref).
     let by_value = r#"

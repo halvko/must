@@ -190,6 +190,19 @@ pub enum InsertText {
     Snippet { snippet: String, plain: String },
 }
 
+impl InsertText {
+    /// The same insert with `prefix` written before it, in both spellings.
+    fn prefixed(self, prefix: &str) -> Self {
+        match self {
+            InsertText::Plain(text) => InsertText::Plain(format!("{prefix}{text}")),
+            InsertText::Snippet { snippet, plain } => InsertText::Snippet {
+                snippet: format!("{prefix}{snippet}"),
+                plain: format!("{prefix}{plain}"),
+            },
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CompletionItemKind {
     Function,
@@ -231,8 +244,8 @@ enum Provenance {
 const TYPE_TIER_NONE: u8 = 2;
 
 /// Below [`TYPE_TIER_NONE`]: a candidate offered although accepting it
-/// gives an error.
-const TYPE_TIER_REFUSED: u8 = 3;
+/// gives an error (P16).
+pub(crate) const TYPE_TIER_REFUSED: u8 = 3;
 
 /// Every variant candidate in a match-arm pattern slot: one tier for all
 /// of them (a pattern is not a value with a type to compare), behind the
@@ -1550,11 +1563,14 @@ fn dispatch_ty(ty: &hir::Ty) -> &hir::Ty {
 /// a genuinely wrong receiver already squiggles it, this just offers no
 /// candidates instead of a wrong one).
 ///
-/// A BORROW receiver has no fields — projecting through it would be
-/// auto-deref, which is sealed — but it does reach the members its shape
-/// can take, read off the same [`hir::receiver_takes`] table inference
-/// uses, so the dot offers exactly what a call would accept, counting the
-/// borrow the edit adds ([`borrowed_member_item`]).
+/// A BORROW receiver has no fields of its own (projecting through it
+/// would be auto-deref, which is sealed); its referent's are offered as
+/// `*.f`, one `*.` per layer. It also reaches the members its innermost
+/// borrow can reach, behind a `*.` per layer above that one. Reach and
+/// refusal both come from [`hir::dot_offer`], so the dot offers what a call
+/// would accept, counting the borrow the edit adds
+/// ([`borrowed_member_item`]); a member that needs a `&mut` the receiver
+/// can't provide is offered, refused ([`refuse`]).
 ///
 /// A RIGID receiver has neither fields nor an impl to look in, and its
 /// bounds are the only thing that re-opens its dot (TR07) — so its offers
@@ -1587,48 +1603,49 @@ fn field_items(
     let Some(ty) = inference.type_of_expr.get(expr) else {
         return Vec::new();
     };
-    let mut_refused = hir::infer::mut_borrow_refused(db, item, expr);
-    let record = match ty {
-        hir::Ty::Record(rec) => Some(rec.clone()),
-        hir::Ty::Named(named) => match hir::type_underlying_for(db, named) {
-            Some(hir::Ty::Record(rec)) => Some(rec),
-            _ => None,
-        },
-        _ => None,
+    // Members are reached through `member_receiver` behind `derefs`; a
+    // borrow's fields take one `*.` more.
+    let deref = hir::deref_receiver(ty);
+    let exclusive = hir::infer::dot_receiver_exclusive(db, item, expr, &deref);
+    let member_receiver = deref.receiver;
+    let derefs = "*.".repeat(deref.layers);
+    let field_derefs = match member_receiver {
+        hir::Ty::Borrow { .. } => format!("{derefs}*."),
+        _ => derefs.clone(),
     };
-    let mut items: Vec<CompletionItem> = record
+    let fields_of = dispatch_ty(&member_receiver);
+    let mut items: Vec<CompletionItem> = record_of(db, fields_of)
         .iter()
         .flat_map(|record| record.fields.iter())
-        .map(|(name, ty)| CompletionItem {
-            whole_expr: true,
-            ..completion_item(
-                name.clone(),
+        .map(|(name, ty)| {
+            let mut item = completion_item(
+                format!("{field_derefs}{name}"),
                 CompletionItemKind::Field,
                 Provenance::Item,
                 type_tier(Some(ty), expected),
                 Some(ty.display()),
                 edit_range,
-            )
+            );
+            // Typing the field's own name picks it, `*.` or not.
+            item.filter_text = name.clone();
+            item.whole_expr = true;
+            item
         })
         .collect();
-    // Dot-callable inherent members of a named receiver, offered next to
-    // the fields they share the dot with. A borrow receiver's members hang off the REFERENT's
-    // declaration; which of them the dot offers is the receiver shape's
-    // row of the table.
-    let shape = hir::ReceiverShape::of(ty);
-    let owner = match ty {
-        hir::Ty::Borrow { referent, .. } => &**referent,
-        _ => ty,
-    };
-    let decl = match owner {
+    // Dot-callable inherent members of a named receiver, offered next to the
+    // fields they share the dot with. A borrow receiver's members hang off the
+    // REFERENT's declaration; which of them the dot offers, and which it
+    // offers refused, is `hir::dot_offer`'s.
+    let decl = match fields_of {
         hir::Ty::Named(named) => Some(&named.decl),
         _ => None,
     };
     if let Some(decl) = decl {
         for member_id in hir::member_item_ids(db, decl.to_id(db)) {
-            let Some(reach) = hir::member_self_position(db, member_id)
-                .and_then(|position| hir::dot_reach(shape, position))
-            else {
+            let Some(position) = hir::member_self_position(db, member_id) else {
+                continue;
+            };
+            let Some(offer) = hir::dot_offer(&member_receiver, exclusive, position) else {
                 continue;
             };
             let sig = hir::signature(db, member_id);
@@ -1644,7 +1661,8 @@ fn field_items(
                 expected,
                 edit_range,
             );
-            items.push(borrowed_member_item(item, reach, dot, mut_refused));
+            let item = member_item(item, offer.reach, dot, &derefs);
+            items.push(if offer.refused { refuse(item) } else { item });
         }
     }
     // A RIGID receiver's bounds — the whole of its dot. Which requirements
@@ -1652,7 +1670,8 @@ fn field_items(
     // by `bound_dot_offers`, in hir, deliberately: were the filtering done
     // here, the offered set and the callable set would start drifting on
     // day one. This side renders what it is handed.
-    for offer in hir::bound_dot_offers(db, item, ty) {
+    for offer in hir::bound_dot_offers(db, item, &member_receiver, exclusive) {
+        let refused = offer.refused;
         // A requirement is fn-shaped like a member, so it earns the same
         // ranking and the same call-shaped insert (its receiver — `Self`
         // — does not count toward the written arity either).
@@ -1664,7 +1683,8 @@ fn field_items(
             expected,
             edit_range,
         );
-        items.push(borrowed_member_item(item, offer.reach, dot, mut_refused));
+        let item = member_item(item, offer.reach, dot, &derefs);
+        items.push(if refused { refuse(item) } else { item });
     }
     // BUILTIN members (`"...".next_char`), offered on the same dot. Ranked
     // as a builtin, like the builtin *functions* in expression position —
@@ -1687,34 +1707,61 @@ fn field_items(
     items
 }
 
+/// `item` as a call the checker refuses: sorted last (P16).
+fn refuse(mut item: CompletionItem) -> CompletionItem {
+    // The key's first character is its type tier.
+    item.sort_text
+        .replace_range(..1, &TYPE_TIER_REFUSED.to_string());
+    item
+}
+
+/// A dot member item: with the `*.`s in `derefs` written before it and shown
+/// in its label (typing the member's own name still picks it), or, when
+/// `derefs` is empty, with the borrow it needs ([`borrowed_member_item`]).
+fn member_item(
+    item: CompletionItem,
+    reach: hir::DotReach,
+    dot: TextSize,
+    derefs: &str,
+) -> CompletionItem {
+    if derefs.is_empty() {
+        return borrowed_member_item(item, reach, dot);
+    }
+    let mut item = item;
+    item.filter_text = item.label.clone();
+    item.label = format!("{derefs}{}", item.label);
+    item.text_edit.insert = item.text_edit.insert.prefixed(derefs);
+    item
+}
+
+/// The record shape `ty` projects fields through: its own (`Ty::Record`)
+/// or its declaration's (`Ty::Named`).
+fn record_of(db: &RootDatabase, ty: &hir::Ty) -> Option<std::sync::Arc<hir::RecordTy>> {
+    match ty {
+        hir::Ty::Record(rec) => Some(rec.clone()),
+        hir::Ty::Named(named) => match hir::type_underlying_for(db, named) {
+            Some(hir::Ty::Record(rec)) => Some(rec),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
 /// A dot item whose member an owned receiver reaches only through a written
 /// borrow ([`hir::DotReach::WrittenBorrow`]): the edit takes the `.` back
 /// and writes `.&.get()` / `.&mut.get()`, and the filter text starts with
-/// the dot. A refused `.&mut` (`mut_refused`) sorts last (P16). Any other
-/// item passes through untouched.
+/// the dot. Any other item passes through untouched.
 fn borrowed_member_item(
     mut item: CompletionItem,
     reach: hir::DotReach,
     dot: TextSize,
-    mut_refused: bool,
 ) -> CompletionItem {
     let hir::DotReach::WrittenBorrow { mutable } = reach else {
         return item;
     };
-    if mutable && mut_refused {
-        // The key's first character is its type tier.
-        item.sort_text
-            .replace_range(..1, &TYPE_TIER_REFUSED.to_string());
-    }
     let borrow = if mutable { ".&mut." } else { ".&." };
     item.text_edit.range = TextRange::new(dot, item.text_edit.range.end());
-    item.text_edit.insert = match item.text_edit.insert {
-        InsertText::Plain(text) => InsertText::Plain(format!("{borrow}{text}")),
-        InsertText::Snippet { snippet, plain } => InsertText::Snippet {
-            snippet: format!("{borrow}{snippet}"),
-            plain: format!("{borrow}{plain}"),
-        },
-    };
+    item.text_edit.insert = item.text_edit.insert.prefixed(borrow);
     item.filter_text = format!(".{}", item.label);
     item
 }
@@ -2253,18 +2300,8 @@ fn record_pattern_items(
     let Some(ty) = inference.type_of_pat.get(pat_id) else {
         return Vec::new();
     };
-    // The pattern's type directly (`Ty::Record`) or through a named type's
-    // declaration (`Ty::Named`) — same projection as `field_items`. Anything
-    // else has no record shape to complete against.
-    let record = match ty {
-        hir::Ty::Record(rec) => Some(rec.clone()),
-        hir::Ty::Named(named) => match hir::type_underlying_for(db, named) {
-            Some(hir::Ty::Record(rec)) => Some(rec),
-            _ => None,
-        },
-        _ => None,
-    };
-    let Some(record) = record else {
+    // Anything without a record shape has nothing to complete against.
+    let Some(record) = record_of(db, ty) else {
         return Vec::new();
     };
     record

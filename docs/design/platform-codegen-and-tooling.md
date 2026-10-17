@@ -133,11 +133,18 @@
   still being offered its enclosing bounds.
 - **P16** Completion writes the borrow the compiler will not (G14). On an owned receiver the
   dot also offers members and requirements taking `Self.&` / `Self.&mut`, and accepting one
-  rewrites the dot as `.&.` / `.&mut.`, so the user lands on the licensed borrow-receiver
-  call rather than the no-auto-ref refusal. The edit starts at the dot, and clients filter on
-  the text from the edit's start, so its filter text is `.name`. A `.&mut.` the checker would
-  refuse (an immutable root, a `static`, a shared or raw step) is offered but sorts last: accepting
-  it puts the borrow error where the fix is.
+  rewrites the dot as `.&.` / `.&mut.`, so the user lands on the licensed borrow-receiver call
+  rather than the no-auto-ref refusal. The edit starts at the dot, and clients filter on the
+  text from the edit's start, so its filter text is `.name`. A dot item whose call the checker
+  would refuse is still offered and sorted last, and its place in the list is the only sign of
+  the refusal: the row shows the member's type, which reads the same whether the receiver can
+  provide its `Self.&mut` or not. There is no marker label, because one would push that type
+  out of VS Code's list row. Accepting the item puts the borrow error on the call, which names
+  what blocks it. Refused means the call needs `Self.&mut` and the receiver can't provide one,
+  because of its type's borrow layers or the place it is read from (an immutable root, a
+  `static`, a shared or raw step). Examples: `.&mut.add()` on an immutable root, `add()` on
+  `Counter.&`, `*.add()` on `Counter.&mut.&`, and `s.*.c.add()` with `c: Counter.&mut` and
+  `s: S.&`.
 - **P13** The examples smoke target checks and runs every example against recorded snapshots
   under a timeout, so a hang fails naming the file, and a coverage guard fails if an example
   ships untested.
