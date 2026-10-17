@@ -47,6 +47,10 @@ here; they live in `docs/design/`.
 - The program and its expectation stay together in the test (expect-test).
   A program lives in a `.must` file only when it ships in `examples/` and
   the test includes that file to check the shipped copy.
+- An expectation that pins a known limitation, behaviour that is not the
+  intended one, sits under a `// TODO: halvko/must#N: <what is wrong>`
+  naming the issue that tracks it, not a plain comment or a doc-comment
+  aside.
 
 ## Diagnostics
 
