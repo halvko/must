@@ -11574,7 +11574,7 @@ trait D = requires { m: fn(Self) -> usize; } with {
 };
 "#,
         expect![[r#"
-            114..119: duplicate impl of `D` for `usize` (first implemented here at 62..67)
+            109..119: duplicate impl of `D` for `usize` (first implemented here at 57..67)
             122..123: duplicate member `m` (first defined here at 70..71)
         "#]],
     );
@@ -11592,7 +11592,7 @@ type P = struct { a: usize } with {
 };
 "#,
         expect![[r#"
-            148..149: duplicate impl of `D` for `P` (first implemented here at 62..63)
+            143..149: duplicate impl of `D` for `P` (first implemented here at 57..63)
         "#]],
     );
 }
@@ -11606,8 +11606,35 @@ trait D = requires { m: fn(Self) -> usize; } with {
 };
 "#,
         expect![[r#"
-            62..67: this impl of `D` is missing the member `m` (required by the trait here at 22..23)
+            57..67: this impl of `D` is missing the member `m` (required by the trait here at 22..23)
             70..75: `D` has no requirement `extra` (declared here at 7..8)
+        "#]],
+    );
+}
+
+/// A missing member underlines `impl` through the head in both impl homes.
+#[test]
+fn impl_missing_members_underline_impl_through_head() {
+    check_diagnostics(
+        r#"
+type Cmp = enum { Less, Equal, Greater };
+trait Ord = requires {
+    ord: fn::<@a>(Self.&::<@a>, Self.&::<@a>) -> Cmp;
+    min: fn::<@a>(Self.&::<@a>, Self.&::<@a>) -> Self.&::<@a>;
+} with {
+    impl usize {}
+};
+type P = struct { a: usize } with {
+    impl Ord {
+        ord = fn::<@a>(x: Self.&::<@a>, y: Self.&::<@a>) -> Cmp { 1 };
+    }
+};
+"#,
+        expect![[r#"
+            196..206: this impl of `Ord` is missing the member `ord` (required by the trait here at 70..73)
+            196..206: this impl of `Ord` is missing the member `min` (required by the trait here at 124..127)
+            253..261: this impl of `Ord` is missing the member `min` (required by the trait here at 124..127)
+            330..331: type mismatch: expected `Cmp`, found `{number}` (expected `Cmp` because of this return type at 321..327)
         "#]],
     );
 }
@@ -17915,7 +17942,7 @@ type P = struct { a: usize } with {
 };
 "#,
         expect![[r#"
-            b.must 55..56: duplicate impl of `D` for `P` (first implemented here at a.must 71..72)
+            b.must 50..56: duplicate impl of `D` for `P` (first implemented here at a.must 66..72)
         "#]],
     );
 }

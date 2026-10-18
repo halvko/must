@@ -2530,17 +2530,10 @@ fn trait_definition_diagnostics(db: &dyn Db, file: SourceFile, diagnostics: &mut
     // Impl sites: head resolution, member coverage and matching.
     let impls = traits::trait_impls(db, file);
     for (_, site) in impls.sites_in(file) {
-        let head_slot = std::cell::OnceCell::new();
-        let head_range = || {
-            *head_slot.get_or_init(|| {
-                traits::impl_site_source(db, site).map(|element| {
-                    element
-                        .head()
-                        .map(|head| head.syntax().text_range())
-                        .unwrap_or_else(|| element.syntax().text_range())
-                })
-            })
-        };
+        let element_slot = std::cell::OnceCell::new();
+        let element = || element_slot.get_or_init(|| traits::impl_site_source(db, site));
+        let head_range = || element().as_ref().map(ast::ImplElement::head_range);
+        let impl_range = || element().as_ref().map(ast::ImplElement::header_range);
         if site.type_side && site.trait_.is_none() {
             let error = match reject_ambiguous(file_scope(db, file).resolve(&site.head), &site.head)
             {
@@ -2618,7 +2611,7 @@ fn trait_definition_diagnostics(db: &dyn Db, file: SourceFile, diagnostics: &mut
         for req in requirements {
             let qualified = format!("{}::{}", site.head, req.name);
             let Some(member) = site_members.iter().find(|m| m.name == qualified) else {
-                let Some(range) = head_range() else {
+                let Some(range) = impl_range() else {
                     continue;
                 };
                 diagnostics.push(Diagnostic {
@@ -2741,10 +2734,7 @@ fn trait_definition_diagnostics(db: &dyn Db, file: SourceFile, diagnostics: &mut
             .map(|element| {
                 vec![RelatedInfo {
                     file: first.owner.file,
-                    range: element
-                        .head()
-                        .map(|head| head.syntax().text_range())
-                        .unwrap_or_else(|| element.syntax().text_range()),
+                    range: element.header_range(),
                     message: "first implemented here".to_owned(),
                 }]
             })
@@ -2753,10 +2743,7 @@ fn trait_definition_diagnostics(db: &dyn Db, file: SourceFile, diagnostics: &mut
             continue;
         };
         diagnostics.push(Diagnostic {
-            range: element
-                .head()
-                .map(|head| head.syntax().text_range())
-                .unwrap_or_else(|| element.syntax().text_range()),
+            range: element.header_range(),
             severity: Severity::Error,
             message: format!(
                 "duplicate impl of `{}` for `{}`",

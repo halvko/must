@@ -2,7 +2,7 @@
 //! a node produced from broken code may be missing ~any child.
 
 use crate::SyntaxKind::{self, *};
-use crate::{MustLanguage, SyntaxNode, SyntaxToken, TextSize};
+use crate::{MustLanguage, SyntaxNode, SyntaxToken, TextRange, TextSize};
 
 pub use rowan::ast::{AstNode, AstPtr};
 
@@ -707,6 +707,23 @@ impl ImplElement {
     }
     pub fn l_brace_token(&self) -> Option<SyntaxToken> {
         token(&self.syntax, L_BRACE)
+    }
+    /// Where an error about the head's name goes: the head, or the whole
+    /// element when recovery dropped it.
+    pub fn head_range(&self) -> TextRange {
+        self.head().map_or_else(
+            || self.syntax.text_range(),
+            |head| head.syntax().text_range(),
+        )
+    }
+    /// Where an error about the impl as a whole goes: `impl` through the
+    /// head, never the members.
+    pub fn header_range(&self) -> TextRange {
+        let start = self.impl_token().map_or_else(
+            || self.syntax.text_range().start(),
+            |t| t.text_range().start(),
+        );
+        TextRange::new(start, self.head_range().end())
     }
 }
 
