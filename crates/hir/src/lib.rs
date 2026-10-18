@@ -1288,15 +1288,36 @@ pub fn file_diagnostics(db: &dyn Db, file: SourceFile) -> Vec<Diagnostic> {
                         _ => None,
                     })
                     .map(|dot| {
-                        let borrow = if *mutable { ".&mut" } else { ".&" };
-                        syntax::Fix {
-                            label: format!("Insert `{borrow}` before `.{name}`"),
-                            edits: vec![syntax::TextEdit {
-                                range: TextRange::empty(dot.text_range().start()),
-                                insert: borrow.to_owned(),
-                            }],
-                        }
+                        insert_before_dot(&dot, if *mutable { ".&mut" } else { ".&" }, name)
                     }),
+                InferenceDiagnostic::TypeMismatch {
+                    expr,
+                    expected,
+                    actual: Ty::Borrow { referent, .. },
+                    ..
+                } if referent.as_ref() == expected => {
+                    let through_deref = match &body.exprs[*expr] {
+                        body::ExprData::Borrow { place, .. } => matches!(
+                            body.exprs[body.place_root(*place)],
+                            body::ExprData::Deref { .. }
+                        ),
+                        _ => false,
+                    };
+                    source_map
+                        .node_for_expr(*expr)
+                        .and_then(|ptr| ast::Expr::cast(ptr.to_node(&syntax_root)))
+                        .and_then(|found| read_through_fix(db, found, expected, through_deref))
+                }
+                InferenceDiagnostic::DotThroughBorrow {
+                    expr,
+                    name,
+                    deref_moves: false,
+                    ..
+                } => source_map
+                    .node_for_expr(*expr)
+                    .and_then(|ptr| ast::FieldExpr::cast(ptr.to_node(&syntax_root)))
+                    .and_then(|field| field.dot_token())
+                    .map(|dot| insert_before_dot(&dot, ".*", name)),
                 _ => hint_fix,
             };
             diagnostics.push(Diagnostic {
@@ -2089,6 +2110,67 @@ pub fn range_diagnostics(db: &dyn Db, file: SourceFile) -> Vec<Diagnostic> {
     trait_definition_diagnostics(db, file, &mut diagnostics);
 
     diagnostics
+}
+
+/// "Insert `{text}` before `.{name}`", at a field access's or dot-call's
+/// own `dot`, so the rest of the chain keeps its layout.
+fn insert_before_dot(dot: &syntax::SyntaxToken, text: &str, name: &str) -> syntax::Fix {
+    syntax::Fix {
+        label: format!("Insert `{text}` before `.{name}`"),
+        edits: vec![syntax::TextEdit {
+            range: TextRange::empty(dot.text_range().start()),
+            insert: text.to_owned(),
+        }],
+    }
+}
+
+/// The fix for a borrow `found` where its referent `wanted` is wanted:
+/// undo a borrow written right there (`x.&`), else read through with `.*`.
+/// A `through_deref` borrow is a copy, so it needs a copyable `wanted`. No
+/// fix when `found` is not a postfix chain, where `.*` might not bind to
+/// all of it.
+fn read_through_fix(
+    db: &dyn Db,
+    found: ast::Expr,
+    wanted: &Ty,
+    through_deref: bool,
+) -> Option<syntax::Fix> {
+    let copyable = || capability::is_copyable(db, wanted);
+    if let ast::Expr::BorrowExpr(borrow) = &found {
+        let place = borrow.receiver()?;
+        if through_deref && !copyable() {
+            return None;
+        }
+        return Some(syntax::Fix {
+            label: "Remove the borrow".to_owned(),
+            edits: vec![syntax::TextEdit {
+                range: TextRange::new(
+                    place.syntax().text_range().end(),
+                    borrow.syntax().text_range().end(),
+                ),
+                insert: String::new(),
+            }],
+        });
+    }
+    let postfix = matches!(
+        found,
+        ast::Expr::PathExpr(_)
+            | ast::Expr::CallExpr(_)
+            | ast::Expr::FieldExpr(_)
+            | ast::Expr::DerefExpr(_)
+            | ast::Expr::IndexExpr(_)
+            | ast::Expr::ParenExpr(_)
+    );
+    if !postfix || !copyable() {
+        return None;
+    }
+    Some(syntax::Fix {
+        label: "Read through the borrow with `.*`".to_owned(),
+        edits: vec![syntax::TextEdit {
+            range: TextRange::empty(found.syntax().text_range().end()),
+            insert: ".*".to_owned(),
+        }],
+    })
 }
 
 /// The "Add missing match arms" quick fix, attached to

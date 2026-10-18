@@ -941,6 +941,9 @@ pub enum InferenceDiagnostic {
         expr: ExprId,
         name: String,
         receiver_ty: Ty,
+        /// Whether the `.*` the message asks for would move out of the
+        /// borrow, judged like a written one. The quick fix is withheld then.
+        deref_moves: bool,
     },
     /// `.&`/`.&mut` of a NAME that has no value with storage — a const
     /// parameter, a type, a trait, a builtin. Any other operand is a place
@@ -2719,12 +2722,23 @@ pub(crate) struct InferCtx<'db> {
     /// Every `.*` read out of a borrow, with the referent type it read.
     /// Judged at the end of inference, not at the expression — see
     /// [`InferCtx::finish_deref_reads`].
-    deref_reads: Vec<(ExprId, Ty)>,
+    deref_reads: Vec<DerefRead>,
     /// The projection steps of a chain rooted in a borrow `.*` whose own
     /// read [`Self::place_positions`] defers — grown as the chain is
     /// inferred, so the copy question lands on the step that actually
     /// materializes a value. See [`InferCtx::carry_borrow_projection`].
-    borrow_projections: rustc_hash::FxHashSet<ExprId>,
+    /// A chain rooted in the unwritten `.*` of a
+    /// [`InferenceDiagnostic::DotThroughBorrow`] maps to that access.
+    borrow_projections: rustc_hash::FxHashMap<ExprId, Option<ExprId>>,
+}
+
+/// A value read through a borrow's `.*`, judged once inference settles.
+struct DerefRead {
+    expr: ExprId,
+    ty: Ty,
+    /// The [`InferenceDiagnostic::DotThroughBorrow`] whose unwritten `.*`
+    /// this read goes through, when it is not written in the source.
+    unwritten: Option<ExprId>,
 }
 
 /// One trait that could carry a concrete-receiver dot-call — see
@@ -2905,7 +2919,7 @@ impl<'db> InferCtx<'db> {
             place_positions: place_positions(body),
             value_receivers: rustc_hash::FxHashSet::default(),
             deref_reads: Vec::new(),
-            borrow_projections: rustc_hash::FxHashSet::default(),
+            borrow_projections: rustc_hash::FxHashMap::default(),
         }
     }
 
@@ -3191,21 +3205,44 @@ impl<'db> InferCtx<'db> {
     /// [`InferCtx::value_receivers`].
     ///
     /// What is left is a genuine copy.
+    ///
+    /// A read through the `.*` a [`InferenceDiagnostic::DotThroughBorrow`]
+    /// asks for is judged the same way, and a move there withholds that
+    /// diagnostic's fix instead of being reported.
     fn finish_deref_reads(&mut self, reborrows: &ArenaMap<ExprId, bool>) {
-        for (expr, referent) in std::mem::take(&mut self.deref_reads) {
+        let mut moving_fixes = rustc_hash::FxHashSet::default();
+        for read in std::mem::take(&mut self.deref_reads) {
+            let expr = read.expr;
             if reborrows.contains_idx(expr) {
                 continue;
             }
             if self.place_positions.contains(&expr) && !self.value_receivers.contains(&expr) {
                 continue;
             }
-            let resolved = self.resolve_shallow(&referent);
+            let resolved = self.resolve_shallow(&read.ty);
             if crate::capability::is_copyable(self.db, &resolved) {
                 continue;
             }
-            self.result
-                .diagnostics
-                .push(InferenceDiagnostic::MoveOutOfBorrow { expr, ty: resolved });
+            match read.unwritten {
+                None => self
+                    .result
+                    .diagnostics
+                    .push(InferenceDiagnostic::MoveOutOfBorrow { expr, ty: resolved }),
+                Some(access) => {
+                    moving_fixes.insert(access);
+                }
+            }
+        }
+        if moving_fixes.is_empty() {
+            return;
+        }
+        for diag in &mut self.result.diagnostics {
+            if let InferenceDiagnostic::DotThroughBorrow {
+                expr, deref_moves, ..
+            } = diag
+            {
+                *deref_moves = moving_fixes.contains(expr);
+            }
         }
     }
 
@@ -3242,12 +3279,39 @@ impl<'db> InferCtx<'db> {
     /// the deferral) going, so the question always lands on the step the
     /// value actually comes out of.
     fn carry_borrow_projection(&mut self, expr: ExprId, receiver: ExprId, ty: &Ty) {
-        if !self.borrow_projections.contains(&receiver) {
+        let Some(&unwritten) = self.borrow_projections.get(&receiver) else {
             return;
-        }
-        self.deref_reads.push((expr, ty.clone()));
+        };
+        self.deref_reads.push(DerefRead {
+            expr,
+            ty: ty.clone(),
+            unwritten,
+        });
         if self.place_positions.contains(&expr) {
-            self.borrow_projections.insert(expr);
+            self.borrow_projections.insert(expr, unwritten);
+        }
+    }
+
+    /// Report a [`InferenceDiagnostic::DotThroughBorrow`] at `expr`, and
+    /// judge `expr` as a read of `ty` through the `.*` the message asks
+    /// for: the fix is withheld if that read would move out of the borrow.
+    /// The unwritten `.*` roots a borrow chain like a written one.
+    fn dot_through_borrow(&mut self, expr: ExprId, name: &str, receiver_ty: Ty, ty: Ty) {
+        self.result
+            .diagnostics
+            .push(InferenceDiagnostic::DotThroughBorrow {
+                expr,
+                name: name.to_owned(),
+                receiver_ty,
+                deref_moves: false,
+            });
+        self.deref_reads.push(DerefRead {
+            expr,
+            ty,
+            unwritten: Some(expr),
+        });
+        if self.place_positions.contains(&expr) {
+            self.borrow_projections.insert(expr, Some(expr));
         }
     }
 
@@ -4910,6 +4974,9 @@ impl<'db> InferCtx<'db> {
                     Ty::Error
                 } else {
                     let resolved = self.resolve_shallow(&receiver_ty);
+                    // Through a borrow the access roots its own chain at
+                    // the unwritten `.*` ([`Self::dot_through_borrow`]).
+                    let through_borrow = matches!(resolved, Ty::Borrow { .. });
                     let ty = self.field_access_ty(expr, receiver, &name, resolved);
                     // `h.go::<usize>` NOT under call syntax: the dot selects
                     // a FIELD, and a field has no binder — the third place
@@ -4923,7 +4990,9 @@ impl<'db> InferCtx<'db> {
                     } else {
                         self.refuse_member_args(expr, expr, |_| name.clone(), &mut member_args);
                     }
-                    self.carry_borrow_projection(expr, receiver, &ty);
+                    if !through_borrow {
+                        self.carry_borrow_projection(expr, receiver, &ty);
+                    }
                     ty
                 }
             }
@@ -5175,13 +5244,17 @@ impl<'db> InferCtx<'db> {
                     // judgement, once inference has settled.
                     Ty::Borrow { referent, .. } => {
                         let referent = (*referent).clone();
-                        self.deref_reads.push((expr, referent.clone()));
+                        self.deref_reads.push(DerefRead {
+                            expr,
+                            ty: referent.clone(),
+                            unwritten: None,
+                        });
                         // A `.*` in place position reads nothing itself —
                         // the field or element beyond it does. Its entry
                         // above is skipped, so the chain it roots carries
                         // the question onward, one step at a time.
                         if self.place_positions.contains(&expr) {
-                            self.borrow_projections.insert(expr);
+                            self.borrow_projections.insert(expr, None);
                         }
                         referent
                     }
@@ -5537,15 +5610,19 @@ impl<'db> InferCtx<'db> {
         // (G14 clause 1), which `receiver_takes` decides before the
         // dot-call path ever falls through to this helper. A value `Self`
         // still lands here, on the callee, with this same message.
-        if matches!(resolved, Ty::Borrow { .. }) {
-            self.result
-                .diagnostics
-                .push(InferenceDiagnostic::DotThroughBorrow {
-                    expr,
-                    name: name.to_owned(),
-                    receiver_ty: resolved,
-                });
-            return Ty::Error;
+        //
+        // The access is typed as `receiver.*.name`, the fix the message
+        // names, so the rest of the chain is checked as it will be, and
+        // the read is judged like a written `.*`'s.
+        if let Ty::Borrow { referent, .. } = &resolved {
+            let referent = self.resolve_shallow(referent);
+            if matches!(referent, Ty::Borrow { .. }) {
+                self.dot_through_borrow(expr, name, resolved, Ty::Error);
+                return Ty::Error;
+            }
+            let ty = self.field_access_ty(expr, receiver, name, referent);
+            self.dot_through_borrow(expr, name, resolved, ty.clone());
+            return ty;
         }
         match resolved {
             Ty::Record(rec) => match rec.field_ty(name) {
@@ -6111,13 +6188,11 @@ impl<'db> InferCtx<'db> {
                     // through to "no such member" instead would have been
                     // a lie about a member that plainly exists.
                     if receiver_shape.is_borrow() {
-                        self.result
-                            .diagnostics
-                            .push(InferenceDiagnostic::DotThroughBorrow {
-                                expr: callee,
-                                name: name.to_owned(),
-                                receiver_ty: resolved.clone(),
-                            });
+                        // It would take the whole referent by value.
+                        if let Ty::Borrow { referent, .. } = &resolved {
+                            let referent = (**referent).clone();
+                            self.dot_through_borrow(callee, name, resolved.clone(), referent);
+                        }
                         self.result.type_of_expr.insert(callee, Ty::Error);
                         self.infer_args_broken(args);
                         return self.finish_dot_call(expr, Ty::Error, expected, cause);
@@ -6162,7 +6237,7 @@ impl<'db> InferCtx<'db> {
                         // `receiver_takes`'s table read backwards.
                         Some(member) => {
                             let position = self.self_position(&member);
-                            let diagnostic = self.receiver_shape_refusal(
+                            self.report_receiver_shape_refusal(
                                 expr,
                                 callee,
                                 name,
@@ -6171,7 +6246,6 @@ impl<'db> InferCtx<'db> {
                                 &resolved,
                                 member,
                             );
-                            self.result.diagnostics.push(diagnostic);
                         }
                         None => {
                             self.result
@@ -6843,14 +6917,14 @@ impl<'db> InferCtx<'db> {
         member_self_position(self.db, member.to_id(self.db))
     }
 
-    /// The precise refusal when a member EXISTS but this receiver cannot
+    /// Report the precise refusal when a member EXISTS but this receiver cannot
     /// reach it — [`receiver_takes`]'s table read backwards, and the one
     /// place that reading lives. Shared by the concrete-receiver path and
     /// the bound-directed one so a rigid receiver never gets different
     /// advice from a nominal one; `member` is what the diagnostic points at
     /// (the member itself concretely, the trait for a bound-directed call).
-    fn receiver_shape_refusal(
-        &self,
+    fn report_receiver_shape_refusal(
+        &mut self,
         expr: ExprId,
         callee: ExprId,
         name: &str,
@@ -6858,8 +6932,8 @@ impl<'db> InferCtx<'db> {
         position: Option<SelfPosition>,
         resolved: &Ty,
         member: ItemLoc,
-    ) -> InferenceDiagnostic {
-        match (receiver_shape, position) {
+    ) {
+        let diagnostic = match (receiver_shape, position) {
             // An owned receiver, a borrow `Self`: NOT auto-ref (clause 2
             // forbids borrowing the local) — write the borrow.
             (ReceiverShape::Owned, Some(SelfPosition::Borrow { mutable })) => {
@@ -6883,13 +6957,14 @@ impl<'db> InferCtx<'db> {
             // A borrow receiver, a value `Self`: that is auto-deref,
             // sealed. Reported on the CALLEE, exactly where the field path
             // has always reported it, so the squiggle and the MIR value
-            // trap do not move now that this branch reaches it first.
-            (ReceiverShape::Borrow { .. }, Some(SelfPosition::Value)) => {
-                InferenceDiagnostic::DotThroughBorrow {
-                    expr: callee,
-                    name: name.to_owned(),
-                    receiver_ty: resolved.clone(),
-                }
+            // trap do not move now that this branch reaches it first. The
+            // `.*` it asks for would take the whole referent by value.
+            (ReceiverShape::Borrow { .. }, Some(SelfPosition::Value))
+                if let Ty::Borrow { referent, .. } = resolved =>
+            {
+                let referent = (**referent).clone();
+                self.dot_through_borrow(callee, name, resolved.clone(), referent);
+                return;
             }
             // No self position at all: the structural shape is absent.
             _ => InferenceDiagnostic::NotDotCallable {
@@ -6897,7 +6972,8 @@ impl<'db> InferCtx<'db> {
                 name: name.to_owned(),
                 member,
             },
-        }
+        };
+        self.result.diagnostics.push(diagnostic);
     }
 
     /// Whether a member takes a dot-call from a receiver of this shape —
@@ -7197,7 +7273,7 @@ impl<'db> InferCtx<'db> {
         // is; admitting the call never does.
         let self_ty = Ty::Param(param.clone());
         if !dot_callable(&inst, &self_ty, receiver_shape) {
-            let diagnostic = self.receiver_shape_refusal(
+            self.report_receiver_shape_refusal(
                 expr,
                 callee,
                 name,
@@ -7206,7 +7282,6 @@ impl<'db> InferCtx<'db> {
                 resolved,
                 trait_loc,
             );
-            self.result.diagnostics.push(diagnostic);
             self.result.type_of_expr.insert(callee, Ty::Error);
             self.infer_args_broken(args);
             return Ty::Error;
