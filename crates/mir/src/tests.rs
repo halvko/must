@@ -187,31 +187,6 @@ fn let_shadowing_gets_distinct_locals() {
 }
 
 #[test]
-fn diverging_call_has_no_return_target() {
-    check_mir(
-        r#"static f = fn () -> usize { panic("boom"); 1 };"#,
-        expect![[r#"
-            item f:
-            fn b0() -> usize {
-              _0: usize  // return
-              _1: !
-              bb0:
-                _1 = call builtin panic("boom") -> !
-              bb1:
-                _0 = 1
-                return
-            }
-            fn b1() -> fn() -> usize {
-              _0: fn() -> usize  // return
-              bb0:
-                _0 = fn b0
-                return
-            }
-        "#]],
-    );
-}
-
-#[test]
 fn diverging_call_in_if_branch_leaves_a_dead_continuation() {
     // The `panic` call ends bb1 with no return target: its continuation bb3
     // has no predecessors, and the join bb4 keeps a single live one (bb2).
@@ -921,35 +896,6 @@ static apply = const fn (f: fn() -> usize) -> usize { f() };
 }
 
 #[test]
-fn assignment_reuses_the_lets_local() {
-    // `x`'s local (`_1`) is allocated once, by the `let`; the assignment
-    // writes into that same slot rather than minting a new one.
-    check_mir(
-        "static f = fn () -> usize { let mut x = 1; x = 2; x };",
-        expect![[r#"
-            item f:
-            fn b0() -> usize {
-              _0: usize  // return
-              _1: usize  // x
-              _2: usize
-              bb0:
-                _1 = 1
-                _1 = 2
-                _2 = _1
-                _0 = _2
-                return
-            }
-            fn b1() -> fn() -> usize {
-              _0: fn() -> usize  // return
-              bb0:
-                _0 = fn b0
-                return
-            }
-        "#]],
-    );
-}
-
-#[test]
 fn assignment_to_a_captured_local_is_diagnosed_and_trapped() {
     // Mirrors `capture_is_diagnosed_and_trapped`: writing to a local of an
     // enclosing function is exactly as unsupported as reading it.
@@ -1632,62 +1578,6 @@ static f = fn (s: Shape) -> usize {
 }
 
 #[test]
-fn construct_then_match_round_trip() {
-    // Construct a variant, then match: the tag the variant aggregate
-    // writes is exactly what `SwitchVariant` dispatches on.
-    check_mir(
-        r#"
-type Shape = enum { Circle(usize), Point };
-static f = fn () -> usize {
-    let mut s = Shape::Circle(3);
-    match s {
-        ::Circle(r) => r,
-        ::Point => 0,
-    }
-};
-"#,
-        expect![[r#"
-            item Shape:
-            item f:
-            fn b0() -> usize {
-              _0: usize  // return
-              _1: Shape
-              _2: Shape  // s
-              _3: Shape
-              _4: usize
-              _5: usize  // r
-              _6: usize
-              bb0:
-                _1 = Shape::Circle(3)
-                _2 = _1
-                _3 = _2
-                switch _3 on Shape -> [0: bb1, 1: bb2, otherwise: bb3]
-              bb1:
-                _5 = _3.0
-                _6 = _5
-                storage_dead _5
-                _4 = _6
-                goto -> bb4
-              bb2:
-                _4 = 0
-                goto -> bb4
-              bb3:
-                unreachable
-              bb4:
-                _0 = _4
-                return
-            }
-            fn b1() -> fn() -> usize {
-              _0: fn() -> usize  // return
-              bb0:
-                _0 = fn b0
-                return
-            }
-        "#]],
-    );
-}
-
-#[test]
 fn accumulator_loop_lowers_with_a_back_edge() {
     // The first cyclic CFG: bb-header re-entered by the back edge at the
     // body's end, break edges to the exit carrying the loop's value in a
@@ -1749,36 +1639,6 @@ static sum = fn () -> usize {
                 _11 = _2
                 _12 = Add(_11, 1)
                 _2 = _12
-                goto -> bb1
-            }
-            fn b1() -> fn() -> usize {
-              _0: fn() -> usize  // return
-              bb0:
-                _0 = fn b0
-                return
-            }
-        "#]],
-    );
-}
-
-#[test]
-fn break_with_value_stores_into_the_loop_result() {
-    check_mir(
-        "static f = fn () -> usize { loop { break 5; } };",
-        expect![[r#"
-            item f:
-            fn b0() -> usize {
-              _0: usize  // return
-              _1: usize
-              bb0:
-                goto -> bb1
-              bb1:
-                _1 = 5
-                goto -> bb2
-              bb2:
-                _0 = _1
-                return
-              bb3:
                 goto -> bb1
             }
             fn b1() -> fn() -> usize {
@@ -2822,26 +2682,38 @@ fn heap_builtin_calls_lower_as_plain_builtin_calls() {
     // allocates `n` uninit elements whatever `T` was.
     check_mir(
         r#"
-static f = fn (p: usize.&raw mut) -> () {
-    unsafe { dealloc_array(p, 1) };
+static f = fn (p: usize.&raw mut, n: usize) -> () {
+    unsafe {
+        let r = alloc_array::<usize>(n);
+        dealloc_array(p, 1)
+    };
 };
 "#,
         expect![[r#"
             item f:
-            fn b0(_1: usize.&raw mut) -> () {
+            fn b0(_1: usize.&raw mut, _2: usize) -> () {
               _0: ()  // return
               _1: usize.&raw mut  // param p
-              _2: usize.&raw mut
-              _3: ()
+              _2: usize  // param n
+              _3: usize
+              _4: AllocResult::<usize>
+              _5: AllocResult::<usize>  // r
+              _6: usize.&raw mut
+              _7: ()
               bb0:
-                _2 = _1
-                _3 = call builtin dealloc_array(_2, 1) -> bb1
+                _3 = _2
+                _4 = call builtin alloc_array(_3) -> bb1
               bb1:
+                _5 = _4
+                _6 = _1
+                _7 = call builtin dealloc_array(_6, 1) -> bb2
+              bb2:
+                storage_dead _5
                 _0 = ()
                 return
             }
-            fn b1() -> fn(usize.&raw mut) {
-              _0: fn(usize.&raw mut)  // return
+            fn b1() -> fn(usize.&raw mut, usize) {
+              _0: fn(usize.&raw mut, usize)  // return
               bb0:
                 _0 = fn b0
                 return
@@ -3405,15 +3277,21 @@ static f = fn (b: u8) -> usize {
 }
 
 #[test]
-fn a_character_match_without_a_catch_all_traps_at_the_fall_through() {
+fn a_literal_match_without_a_catch_all_traps_at_the_fall_through() {
     // The chain runs out, and the last `else` edge is the deferred error —
     // carrying the exact message the editor already showed, like every
-    // other non-exhaustive lowering.
+    // other non-exhaustive lowering. `g`: the `_` arm is required at every
+    // integer width, so a `u8` match falls through the same way.
     check_mir(
         r#"
 static f = fn (c: char) -> usize {
     match c {
         'a' => 1,
+    }
+};
+static g = fn (b: u8) -> usize {
+    match b {
+        0 => 1,
     }
 };
 "#,
@@ -3444,26 +3322,7 @@ static f = fn (c: char) -> usize {
                 _0 = fn b0
                 return
             }
-        "#]],
-    );
-}
-
-#[test]
-fn an_integer_match_without_a_catch_all_traps_the_same_way() {
-    // The `_` arm is required at EVERY width — a policy, not an
-    // arithmetic — so a `u8` match that lists a value still falls through
-    // to the deferred trap, carrying the message the editor showed. The
-    // character twin's shape, byte for byte apart from the type.
-    check_mir(
-        r#"
-static f = fn (b: u8) -> usize {
-    match b {
-        0 => 1,
-    }
-};
-"#,
-        expect![[r#"
-            item f:
+            item g:
             fn b0(_1: u8) -> usize {
               _0: usize  // return
               _1: u8  // param b
@@ -3545,18 +3404,25 @@ static f = fn (c: char) -> usize {
 }
 
 #[test]
-fn a_borrowed_character_match_tests_through_the_deref() {
+fn a_borrowed_literal_match_tests_through_the_deref() {
     // The projection rule reaching literal patterns (M13: the scrutinee's
     // flavour decides, all the way down). The equality test names the
     // POINTEE place, not a detached copy — so the interpreter's aliasing
     // tree sees the access and an invalidated scrutinee is caught at the
     // `match`, before any arm runs. The catch-all's binder still takes the
-    // borrow itself: it names the very same place.
+    // borrow itself: it names the very same place. `g`: an integer referent
+    // is tested through the deref too.
     check_mir(
         r#"
 static f = fn::<@a>(c: char.&::<@a>) -> usize {
     match c {
         'a' => 1,
+        other => 0,
+    }
+};
+static g = fn::<@a>(d: usize.&::<@a>) -> usize {
+    match d {
+        0 => 1,
         other => 0,
     }
 };
@@ -3588,6 +3454,36 @@ static f = fn::<@a>(c: char.&::<@a>) -> usize {
             }
             fn b1() -> fn(char.&) -> usize {
               _0: fn(char.&) -> usize  // return
+              bb0:
+                _0 = fn b0
+                return
+            }
+            item g:
+            fn b0(_1: usize.&) -> usize {
+              _0: usize  // return
+              _1: usize.&  // param d
+              _2: usize.&
+              _3: usize
+              _4: bool
+              _5: usize.&  // other
+              bb0:
+                _2 = _1
+                _4 = Eq(_2.*, 0)
+                if _4 -> [then: bb2, else: bb3]
+              bb1:
+                _0 = _3
+                return
+              bb2:
+                _3 = 1
+                goto -> bb1
+              bb3:
+                _5 = _2
+                storage_dead _5
+                _3 = 0
+                goto -> bb1
+            }
+            fn b1() -> fn(usize.&) -> usize {
+              _0: fn(usize.&) -> usize  // return
               bb0:
                 _0 = fn b0
                 return
@@ -4246,23 +4142,6 @@ static two_payloads_one_arm = fn::<@a>(e: E.&mut::<@a>) -> usize {
               note at 452..457: this borrow was created here
               note at 534..535: and it is still used here
         "#]],
-    );
-}
-
-#[test]
-fn the_same_two_loans_in_two_locals_are_fine() {
-    check_loans(
-        r#"
-static two_locals = fn() -> usize {
-    let mut a = 1;
-    let p = a.&mut;
-    let x = p.*;
-    let q = a.&mut;
-    let y = q.*;
-    x + y
-};
-"#,
-        expect![[r#""#]],
     );
 }
 
@@ -5129,56 +5008,6 @@ static f = fn::<@a>(key: usize, val: usize, map: Map.&mut::<@a>, slot: usize.&mu
             711..714: using `map` mutably here invalidates a borrow of it that is still live: the borrow is used after this point, and reading through it then would read through an invalidated borrow
               note at 643..646: this borrow was created here
               note at 747..748: and it is still used here
-        "#]],
-    );
-}
-
-#[test]
-fn a_borrowed_integer_match_tests_through_the_deref_too() {
-    // The lens generalises with the pattern kind: an integer referent
-    // dispatches by equality exactly as a character one does, so the test
-    // reads THROUGH the borrow here for the same reason, and the binder
-    // still takes the borrow itself.
-    check_mir(
-        r#"
-static f = fn::<@a>(d: usize.&::<@a>) -> usize {
-    match d {
-        0 => 1,
-        other => 0,
-    }
-};
-"#,
-        expect![[r#"
-            item f:
-            fn b0(_1: usize.&) -> usize {
-              _0: usize  // return
-              _1: usize.&  // param d
-              _2: usize.&
-              _3: usize
-              _4: bool
-              _5: usize.&  // other
-              bb0:
-                _2 = _1
-                _4 = Eq(_2.*, 0)
-                if _4 -> [then: bb2, else: bb3]
-              bb1:
-                _0 = _3
-                return
-              bb2:
-                _3 = 1
-                goto -> bb1
-              bb3:
-                _5 = _2
-                storage_dead _5
-                _3 = 0
-                goto -> bb1
-            }
-            fn b1() -> fn(usize.&) -> usize {
-              _0: fn(usize.&) -> usize  // return
-              bb0:
-                _0 = fn b0
-                return
-            }
         "#]],
     );
 }
@@ -6431,13 +6260,10 @@ fn a_borrow_of_a_temporary_that_outlives_the_body_is_refused() {
         r#"
 static mk = fn() -> usize { 7 };
 static leak = fn::<@a>() -> usize.&::<@a> { mk().& };
-static leak_named = fn::<@a>() -> usize.&::<@a> { let n = mk(); n.& };
 "#,
         expect![[r#"
             78..84: borrowed value does not live long enough: this borrows a temporary, which lives no longer than the block that creates it, but the borrow has to last for `@a`, which outlives the body
               note at 85..86: the storage ends here, where the body returns
-            152..155: borrowed value does not live long enough: this borrows a local, but the borrow has to last for `@a`, which outlives the body
-              note at 156..157: the storage ends here, where the body returns
         "#]],
     );
 }

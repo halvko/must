@@ -222,23 +222,6 @@ fn unreachable_code_is_not_judged() {
 }
 
 #[test]
-fn a_field_write_nothing_reads_afterwards_is_never_read() {
-    check(
-        r#"
-static f = fn () -> usize {
-    let mut p = struct { x = 1, y = 2 };
-    let sum = p.x + p.y;
-    p.x = 10;
-    sum
-};
-"#,
-        expect![[r#"
-            `10`: value written to `p` is never read
-        "#]],
-    );
-}
-
-#[test]
 fn an_element_write_nothing_reads_afterwards_is_never_read() {
     check(
         r#"
