@@ -374,15 +374,6 @@ impl ErrorSlot {
             }),
         };
     }
-
-    /// Report `msg` on the slot's token.
-    pub(crate) fn fill(self, p: &mut Parser<'_>, msg: impl Into<String>) {
-        p.events[self.pos as usize] = Event::Error {
-            msg: msg.into(),
-            after_prev: false,
-            fix: None,
-        };
-    }
 }
 
 pub(crate) struct Marker {

@@ -999,11 +999,28 @@ impl Param {
     pub fn is_mut(&self) -> bool {
         self.mut_token().is_some()
     }
+    /// The `:` before the type, if written: the last one, when a refused
+    /// fn-type parameter has two (`x: A: T`).
+    pub fn colon_token(&self) -> Option<SyntaxToken> {
+        self.syntax
+            .children_with_tokens()
+            .filter_map(|it| it.into_token())
+            .filter(|t| t.kind() == COLON)
+            .last()
+    }
     pub fn pat(&self) -> Option<Pat> {
         child(&self.syntax)
     }
+    /// The type: the first one after the `:` when one is written, else the
+    /// first one.
     pub fn ty(&self) -> Option<Type> {
-        child(&self.syntax)
+        let mut types = self.syntax.children().filter_map(Type::cast);
+        match self.colon_token() {
+            Some(colon) => {
+                types.find(|ty| ty.syntax().text_range().start() >= colon.text_range().end())
+            }
+            None => types.next(),
+        }
     }
 }
 
@@ -1512,6 +1529,9 @@ impl FnType {
     /// (validation rejects it); everywhere else it is the live spelling.
     pub fn unsafe_token(&self) -> Option<SyntaxToken> {
         token(&self.syntax, UNSAFE_KW)
+    }
+    pub fn fn_token(&self) -> Option<SyntaxToken> {
+        token(&self.syntax, FN_KW)
     }
     /// Whether calling a value of this type needs an `unsafe { ... }` block.
     pub fn is_unsafe(&self) -> bool {

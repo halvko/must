@@ -13070,7 +13070,7 @@ trait D = requires {
             52..53: duplicate requirement `m`
             76..77: requirement `n` must spell its full signature: every parameter's type and the return type
             106..107: requirement `o` must spell its full signature: every parameter's type and the return type
-            129..131: expected `(`: function types are written `fn(...) -> ...`
+            126..128: expected `(`: function types are written `fn(...) -> ...`
         "#]],
     );
     // A parameter with no type is reported by syntax, not again here.
@@ -13081,7 +13081,7 @@ trait D = requires {
 };
 "#,
         expect![[r#"
-            32..33: a function type's parameters are bare types, not patterns: write `fn(usize, str)`
+            32..34: a function type's parameters are bare types, not patterns: write `fn(usize, str)`
             35..36: expected a type
         "#]],
     );

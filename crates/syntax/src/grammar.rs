@@ -5,7 +5,7 @@
 use crate::BRACE_RULE;
 use crate::SyntaxKind;
 use crate::SyntaxKind::*;
-use crate::parser::{CompletedMarker, ErrorSlot, Parser};
+use crate::parser::{CompletedMarker, Parser};
 
 /// Tokens an expression parser must not consume on error: the enclosing
 /// construct knows what to do with them.
@@ -2366,16 +2366,12 @@ fn record_type_or_value(p: &mut Parser<'_>) -> Operand {
 /// read as a type's, so the literal is kept as an error node, and the `:`
 /// error says what to write.
 fn fn_type_or_value(p: &mut Parser<'_>) -> Operand {
-    let mut deferred = Vec::new();
-    let ty = anon_fn_type_deferring(p, Some(&mut deferred));
+    let ty = anon_fn_type(p);
     if p.at(L_BRACE) {
         let m = ty.precede(p);
         block_expr(p);
         m.complete(p, ERROR);
         return Operand::new(Reading::Value);
-    }
-    for (slot, msg) in deferred {
-        slot.fill(p, msg);
     }
     type_or_value_postfix(p, ty, Reading::Type)
 }
@@ -2596,13 +2592,6 @@ fn borrow_op_generic_args(p: &mut Parser<'_>) {
 /// parameter list of bare types, and an optional return type —
 /// `unsafe fn(u8.&raw, usize) -> isize`.
 fn anon_fn_type(p: &mut Parser<'_>) -> CompletedMarker {
-    anon_fn_type_deferring(p, None)
-}
-
-/// [`anon_fn_type`], holding the errors only a type has (a missing `(`, a
-/// named parameter) in `deferred` rather than reporting them, for a caller
-/// that may yet read the `fn` as a literal.
-fn anon_fn_type_deferring(p: &mut Parser<'_>, mut deferred: Deferred<'_>) -> CompletedMarker {
     let m = p.start();
     p.eat(UNSAFE_KW);
     p.bump(FN_KW);
@@ -2612,13 +2601,7 @@ fn anon_fn_type_deferring(p: &mut Parser<'_>, mut deferred: Deferred<'_>) -> Com
         generic_param_list(p);
     }
     if p.at(L_PAREN) {
-        fn_type_param_list(p, deferred);
-    } else {
-        defer_error(
-            p,
-            &mut deferred,
-            "expected `(`: function types are written `fn(...) -> ...`",
-        );
+        fn_type_param_list(p);
     }
     if p.at(THIN_ARROW) {
         ret_type(p);
@@ -2637,54 +2620,33 @@ fn anon_fn_type_deferring(p: &mut Parser<'_>, mut deferred: Deferred<'_>) -> Com
 /// fn-pointer types (E0561) — and the shapes that only a pattern could mean
 /// are refused where they are written instead of being reinterpreted as
 /// something else.
-fn fn_type_param_list(p: &mut Parser<'_>, mut deferred: Deferred<'_>) {
+fn fn_type_param_list(p: &mut Parser<'_>) {
     let m = p.start();
     p.bump(L_PAREN);
-    comma_list(p, R_PAREN, |p| fn_type_param(p, deferred.as_deref_mut()));
+    comma_list(p, R_PAREN, fn_type_param);
     m.complete(p, PARAM_LIST);
 }
 
 /// One parameter of a fn TYPE: a bare `Type`. A leading `mut` or `name:`, or
 /// a pattern that parsed as a type and then met its colon (`struct { x }:
-/// T`), is refused once and consumed, so one written mistake costs the
-/// reader one message, not the rest of the list.
-fn fn_type_param(p: &mut Parser<'_>, mut deferred: Deferred<'_>) {
+/// T`), is consumed into the `PARAM`, so one written mistake costs the
+/// reader one message (validation's, which carries the fix), not the rest
+/// of the list.
+fn fn_type_param(p: &mut Parser<'_>) {
     let m = p.start();
     let at_name = |p: &Parser<'_>| matches!(p.current(), IDENT | HOLE) && p.nth(1) == COLON;
-    let mut refuse = |p: &mut Parser<'_>| defer_error(p, &mut deferred, FN_TYPE_PARAM_IS_BARE);
-    let refused = p.at(MUT_KW) || at_name(p);
-    if refused {
-        refuse(p);
-        p.eat(MUT_KW);
-        if at_name(p) {
-            p.bump_any();
-            p.bump(COLON);
-        }
+    p.eat(MUT_KW);
+    if at_name(p) {
+        p.bump_any();
+        p.bump(COLON);
     }
     type_(p);
     if p.at(COLON) {
-        if !refused {
-            refuse(p);
-        }
         p.bump(COLON);
         type_(p);
     }
     m.complete(p, PARAM);
 }
-
-/// Errors held back from a fn type's parse ([`anon_fn_type_deferring`]).
-type Deferred<'a> = Option<&'a mut Vec<(ErrorSlot, &'static str)>>;
-
-/// Report `msg` here, or hold it in a slot when the caller defers.
-fn defer_error(p: &mut Parser<'_>, deferred: &mut Deferred<'_>, msg: &'static str) {
-    match deferred {
-        Some(slots) => slots.push((p.reserve_error(), msg)),
-        None => p.error(msg),
-    }
-}
-
-const FN_TYPE_PARAM_IS_BARE: &str =
-    "a function type's parameters are bare types, not patterns: write `fn(usize, str)`";
 
 /// The core (non-postfix) type. Returns `None` only when nothing was parsed
 /// (the `_ => error` arm), so the postfix loop in [`type_`] has no operand.
