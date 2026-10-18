@@ -2464,17 +2464,8 @@ pub(crate) fn check_item_body<'db>(
     // const params are value names (resolved by `scopes`). The whole body
     // is inside the binder — for a generic item the root IS the binder's
     // literal — so one body-wide scope is exact.
-    let generics: &[GenericParamData] = crate::item_data(db, item)
-        .as_ref()
-        .map(|it| it.generics.as_slice())
-        .unwrap_or(&[]);
-    // Members always take the scope (even with an empty binder, `Self` is
-    // in scope in every type position of the member's body).
-    let type_params = if generics.is_empty() && item.member(db).is_none() {
-        ParamScope::default()
-    } else {
-        generic_param_scope(db, item, generics)
-    };
+    let generics = item_generics(db, item);
+    let type_params = body_param_scope(db, item);
 
     if let Some(root) = body.root {
         // Check the body against the item's annotation, if any. For a
@@ -4051,19 +4042,12 @@ impl<'db> InferCtx<'db> {
     /// is judged by what its deciding name resolves to; an unknown name
     /// reads as a value, and its unresolved-name error says why.
     fn field_reading(&mut self, field: &RecordLitField) -> FieldReading {
-        let names_value = match self.resolutions.get(field.value) {
+        let names_value = match &self.body.exprs[field.value] {
             _ if field.undecided.is_none() => None,
-            Some(Resolution::TypeItem(_) | Resolution::TraitItem(_)) => Some(false),
-            None => match &self.body.exprs[field.value] {
-                ExprData::NameRef(name)
-                    if builtin_type_by_name(name).is_some()
-                        || self.type_params.types.contains_key(name) =>
-                {
-                    Some(false)
-                }
-                _ => None,
-            },
-            Some(_) => Some(true),
+            ExprData::NameRef(name) => {
+                deciding_name_reading(self.resolutions.get(field.value), name, &self.type_params)
+            }
+            _ => None,
         };
         let lower = |this: &mut Self| {
             field
@@ -11091,4 +11075,34 @@ enum FieldReading {
     Value(Option<Ty>),
     /// A type with no value; the field has this type.
     TypeOnly(Ty),
+}
+
+/// How an undecided construction field's deciding name reads: `Some(true)`
+/// for a value, `Some(false)` for a type, `None` for a name that resolves
+/// to neither (it reads as a value, and its unresolved-name error says why).
+pub(crate) fn deciding_name_reading(
+    resolution: Option<&Resolution>,
+    name: &str,
+    type_params: &ParamScope,
+) -> Option<bool> {
+    match resolution {
+        Some(Resolution::TypeItem(_) | Resolution::TraitItem(_)) => Some(false),
+        Some(_) => Some(true),
+        None if builtin_type_by_name(name).is_some() || type_params.types.contains_key(name) => {
+            Some(false)
+        }
+        None => None,
+    }
+}
+
+/// The type params in scope throughout `item`'s body, from its own binder.
+/// Members always take the scope: even with an empty binder, `Self` is in
+/// scope in every type position of the member's body.
+pub(crate) fn body_param_scope(db: &dyn Db, item: ItemId<'_>) -> ParamScope {
+    let generics = item_generics(db, item);
+    if generics.is_empty() && item.member(db).is_none() {
+        ParamScope::default()
+    } else {
+        generic_param_scope(db, item, generics)
+    }
 }
