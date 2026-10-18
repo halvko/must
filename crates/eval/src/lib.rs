@@ -472,7 +472,16 @@ pub enum EvalErrorKind {
 /// which already has a diagnostic) surface as editor diagnostics.
 #[salsa::tracked(returns(ref))]
 pub fn const_value<'db>(db: &'db dyn Db, item: ItemId<'db>) -> Result<Value, EvalError> {
-    Machine::for_const(db).force_item(hir::item_loc(db, item))
+    const_value_on(db, Machine::for_const(db), item)
+}
+
+/// [`const_value`] on a given machine (tests lower its fuel).
+pub(crate) fn const_value_on<'db>(
+    db: &'db dyn Db,
+    mut machine: Machine<'db, ConstMode>,
+    item: ItemId<'db>,
+) -> Result<Value, EvalError> {
+    machine.force_item(hir::item_loc(db, item))
 }
 
 /// The check-time value of every `const { … }` block in the item's lowered
@@ -485,8 +494,16 @@ pub fn const_block_values<'db>(
     db: &'db dyn Db,
     item: ItemId<'db>,
 ) -> Vec<(ExprId, Result<Value, EvalError>)> {
+    const_block_values_on(db, Machine::for_const(db), item)
+}
+
+/// [`const_block_values`] on a given machine (tests lower its fuel).
+pub(crate) fn const_block_values_on<'db>(
+    db: &'db dyn Db,
+    mut machine: Machine<'db, ConstMode>,
+    item: ItemId<'db>,
+) -> Vec<(ExprId, Result<Value, EvalError>)> {
     let loc = hir::item_loc(db, item);
-    let mut machine = Machine::for_const(db);
     mir::mir_checked(db, item)
         .const_blocks
         .iter()
