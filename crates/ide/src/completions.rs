@@ -73,7 +73,9 @@
 //! - a missing record-literal field: `x = $1`;
 //! - the block-taking keywords: `loop {$0}`, and `if $0` / `match $0`,
 //!   which write no braces;
-//! - the `match` arm-list template.
+//! - the `match` arm-list template;
+//! - a missing member in a trait impl's body: the whole member, its
+//!   `panic` body the tab stop (`${0:panic("unimplemented ord")}`).
 //!
 //! Every snippet carries its own plain fallback for a client without
 //! `snippetSupport` — `must-lsp::to_proto` picks between the two per client
@@ -161,6 +163,9 @@ pub struct CompletionItem {
     /// label most of the time, a tab-stop snippet for the handful of rules
     /// in the module doc's "Snippets" section.
     pub text_edit: CompletionTextEdit,
+    /// Edits elsewhere in the file that come with the insertion: the `use`
+    /// items a missing member's stub needs.
+    pub additional_edits: Vec<crate::TextEdit>,
     /// The insertion is a whole expression (a value, call, field or
     /// variant), not the head of a longer one: [`space_before_block`] ends
     /// it in a space when it heads a `match` or `if`.
@@ -340,6 +345,7 @@ fn completion_item_at_tier(
         label,
         kind,
         detail,
+        additional_edits: Vec::new(),
         whole_expr: false,
     }
 }
@@ -521,6 +527,11 @@ enum Context {
     /// would see. Reaching for that scope from the *cursor* instead would
     /// mean climbing out of a hole with no registered expression in it.
     MatchScrutinee { match_start: TextSize },
+    /// A member name being typed in a trait impl's body (`impl usize {
+    /// o˽ }`), nothing after it yet. Carries the impl's start (its `impl`
+    /// keyword), which sits before the cursor and so back-maps to the real
+    /// tree.
+    ImplMember { impl_start: TextSize },
 }
 
 pub(crate) fn completions(
@@ -656,6 +667,9 @@ pub(crate) fn completions(
             expected_ty,
             true,
         ),
+        Some(Context::ImplMember { impl_start }) => {
+            impl_member_items(db, file, impl_start, edit_range)
+        }
         None => Vec::new(),
     };
     if opens_block {
@@ -890,6 +904,23 @@ fn classify(parent: &SyntaxNode) -> Option<Context> {
         });
     }
 
+    // A member name alone in an impl body: the member has no `=` or `:`
+    // yet, so the whole member is still to be written.
+    if let Some(name) = ast::Name::cast(parent.clone())
+        && let Some(member) = name.syntax().parent().and_then(ast::Member::cast)
+        && let Some(element) = member.syntax().parent().and_then(ast::ImplElement::cast)
+        && member
+            .syntax()
+            .children_with_tokens()
+            .filter(|child| !child.kind().is_trivia())
+            .count()
+            == 1
+    {
+        return Some(Context::ImplMember {
+            impl_start: element.syntax().text_range().start(),
+        });
+    }
+
     let name_ref = ast::NameRef::cast(parent.clone())?;
     let grandparent = name_ref.syntax().parent()?;
 
@@ -978,6 +1009,53 @@ fn classify(parent: &SyntaxNode) -> Option<Context> {
         statement_start,
         in_loop: in_loop(path_expr.syntax()),
     })
+}
+
+/// The requirements a trait impl has not implemented yet, each inserting
+/// its whole member: the requirement's signature, with the `use` items its
+/// names need, and a `panic` body as the one tab stop, selected for
+/// overwriting.
+fn impl_member_items(
+    db: &RootDatabase,
+    file: SourceFile,
+    impl_start: TextSize,
+    edit_range: TextRange,
+) -> Vec<CompletionItem> {
+    hir::missing_member_stubs(db, file, impl_start)
+        .into_iter()
+        .map(|stub| {
+            let mut item = completion_item(
+                &stub.name,
+                CompletionItemKind::Function,
+                Provenance::Gold,
+                TYPE_TIER_NONE,
+                Some(stub.requirement.clone()),
+                edit_range,
+            );
+            item.text_edit.insert = InsertText::Snippet {
+                snippet: format!(
+                    "{} {{ ${{0:{}}} }};",
+                    snippet_escape(&stub.head),
+                    snippet_escape(&stub.body)
+                ),
+                plain: stub.text(),
+            };
+            item.additional_edits.extend(stub.imports);
+            item
+        })
+        .collect()
+}
+
+/// `text` as literal snippet text: `\`, `$` and `}` escaped.
+fn snippet_escape(text: &str) -> String {
+    let mut escaped = String::with_capacity(text.len());
+    for c in text.chars() {
+        if matches!(c, '\\' | '$' | '}') {
+            escaped.push('\\');
+        }
+        escaped.push(c);
+    }
+    escaped
 }
 
 /// Whether `node` sits inside a `loop` body without crossing a fn-literal

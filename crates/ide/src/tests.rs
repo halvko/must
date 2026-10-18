@@ -6994,3 +6994,124 @@ static main = fn { g(h, 1); };
         );
     }
 }
+
+/// Inside a trait impl's body, the members it still lacks are offered by
+/// name; the member already written is not.
+#[test]
+fn impl_body_offers_missing_members() {
+    check_completions(
+        r#"
+type Cmp = enum { Less, Equal, Greater };
+trait Ord = requires {
+    ord: fn::<@a>(Self.&::<@a>, Self.&::<@a>) -> Cmp;
+    min: fn::<@a>(Self.&::<@a>, Self.&::<@a>) -> Self.&::<@a>;
+    max: fn::<@a>(Self.&::<@a>, Self.&::<@a>) -> Self.&::<@a>;
+} with {
+    impl usize {
+        max = fn::<@a>(a: Self.&::<@a>, _b: Self.&::<@a>) -> Self.&::<@a> { a };
+        o$0
+    }
+};
+"#,
+        expect_test::expect![[r#"
+            min Function (fn::<@a>(Self.&::<@a>, Self.&::<@a>) -> Self.&::<@a>)
+            ord Function (fn::<@a>(Self.&::<@a>, Self.&::<@a>) -> Cmp)
+        "#]],
+    );
+}
+
+/// Accepting a missing member writes the whole member, its `panic` body
+/// the tab stop.
+#[test]
+fn impl_member_completion_writes_the_stub() {
+    check_completion_applied(
+        r#"
+type Cmp = enum { Less, Equal, Greater };
+trait Ord = requires {
+    ord: fn::<@a>(Self.&::<@a>, Self.&::<@a>) -> Cmp;
+} with {
+    impl usize {
+        o$0
+    }
+};
+"#,
+        "ord",
+        expect_test::expect![[r#"
+            ord = fn::<@a>(a: Self.&::<@a>, b: Self.&::<@a>) -> Cmp { ${0:panic("unimplemented ord")} };
+            filter: ord
+        "#]],
+    );
+}
+
+/// A missing member of a trait from another module brings the `use` items
+/// its stub's names need as an edit at the top of the file.
+#[test]
+fn impl_member_completion_imports_what_the_stub_names() {
+    let mut db = crate::RootDatabase::default();
+    let files = base_db::fixture_files(
+        r#"
+//- a.must
+type Cmp = enum { Less, Equal, Greater };
+trait Ord = requires { ord: fn(Self, Self) -> Cmp; };
+//- b.must
+use a::Ord;
+type P = struct { x: usize } with {
+    impl Ord {
+        o
+    }
+};
+"#,
+    );
+    let library = base_db::new_library(&mut db, "", files);
+    let file = library[1];
+    let analysis = crate::Analysis::new(db);
+    let offset = analysis.file_text(file).find("o\n").expect("the cursor");
+    let items = analysis.completions(FilePosition {
+        file,
+        offset: TextSize::new(offset as u32 + 1),
+    });
+    let item = items
+        .iter()
+        .find(|c| c.label == "ord")
+        .unwrap_or_else(|| panic!("no completion labeled \"ord\": {items:?}"));
+    expect_test::expect![[r#"
+        (
+            Snippet {
+                snippet: "ord = fn(a: Self, b: Self) -> Cmp { ${0:panic(\"unimplemented ord\")} };",
+                plain: "ord = fn(a: Self, b: Self) -> Cmp { panic(\"unimplemented ord\") };",
+            },
+            [
+                TextEdit {
+                    range: 0..0,
+                    insert: "use a::Cmp;\n",
+                },
+            ],
+        )
+    "#]]
+    .assert_debug_eq(&(&item.text_edit.insert, &item.additional_edits));
+}
+
+/// A type's own chain (`impl Ord` in `type P`) completes the same way, and
+/// an inherent impl or an already named member offers nothing.
+#[test]
+fn impl_member_completion_in_a_type_chain_only_for_trait_impls() {
+    let trait_ = "trait Show = requires { show: fn(Self) -> usize; };\n";
+    check_has_completion(
+        &format!(
+            "{trait_}type P = struct {{ a: usize }} with {{\n    impl Show {{\n        s$0\n    }}\n}};\n"
+        ),
+        "show",
+    );
+    check_no_completion(
+        &format!(
+            "{trait_}type P = struct {{ a: usize }} with {{\n    impl Self {{\n        s$0\n    }}\n}};\n"
+        ),
+        "show",
+    );
+    check_no_completion(
+        &format!(
+            "{trait_}type P = struct {{ a: usize }} with {{\n    impl Show {{\n        s$0 = fn(x: Self) -> usize {{ 1 }};\n    }}\n}};\n"
+        ),
+        "show",
+    );
+}

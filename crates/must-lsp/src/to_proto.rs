@@ -158,6 +158,14 @@ pub(crate) fn completion_item(
             range: range(line_index, item.text_edit.range),
             new_text,
         })),
+        additional_text_edits: (!item.additional_edits.is_empty()).then(|| {
+            (item.additional_edits.into_iter())
+                .map(|edit| lsp_types::TextEdit {
+                    range: range(line_index, edit.range),
+                    new_text: edit.insert,
+                })
+                .collect()
+        }),
         ..Default::default()
     }
 }
