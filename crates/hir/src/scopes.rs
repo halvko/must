@@ -310,6 +310,10 @@ pub enum Resolution {
 pub enum Builtin {
     Print,
     Panic,
+    /// `index_out_of_bounds(len, index)` — panics with the out-of-bounds
+    /// message, numbers included (`panic` takes only a `str`). The
+    /// prelude's `index` calls it; it is not for anything else.
+    IndexOutOfBounds,
     /// `alloc_array::<T>(n)` — one fresh heap allocation of `n`
     /// uninitialized elements. SAFE (allocating cannot UB); returns the
     /// result-shaped [`ALLOC_RESULT_NAME`] enum (`Ok(T.&raw mut)` /
@@ -449,6 +453,7 @@ impl Builtin {
         match name {
             "print" => Some(Builtin::Print),
             "panic" => Some(Builtin::Panic),
+            "index_out_of_bounds" => Some(Builtin::IndexOutOfBounds),
             "alloc_array" => Some(Builtin::AllocArray),
             "dealloc_array" => Some(Builtin::DeallocArray),
             "add" => Some(Builtin::Add),
@@ -493,6 +498,7 @@ impl Builtin {
         match self {
             Builtin::Print => "print",
             Builtin::Panic => "panic",
+            Builtin::IndexOutOfBounds => "index_out_of_bounds",
             Builtin::AllocArray => "alloc_array",
             Builtin::DeallocArray => "dealloc_array",
             Builtin::Add => "add",
@@ -538,6 +544,7 @@ impl Builtin {
             // the receiver already holds.
             Builtin::Print
             | Builtin::Panic
+            | Builtin::IndexOutOfBounds
             | Builtin::AllocArray
             | Builtin::ReadLine
             | Builtin::Dangling
@@ -571,6 +578,7 @@ impl Builtin {
             // and the `str` operations read and decode bytes — none of
             // them observes anything outside its own arguments.
             Builtin::Panic
+            | Builtin::IndexOutOfBounds
             | Builtin::Add
             | Builtin::Offset
             | Builtin::Dangling
@@ -617,6 +625,7 @@ impl Builtin {
             // `print`/`panic`/`read_line` take no pointer either.
             Builtin::Print
             | Builtin::Panic
+            | Builtin::IndexOutOfBounds
             | Builtin::AllocArray
             | Builtin::ReadLine
             | Builtin::NextChar
@@ -626,16 +635,17 @@ impl Builtin {
 }
 
 /// The [`ItemLoc`] of the compiler-provided declaration `name`, in the
-/// prelude file ([`base_db::prelude_file`]). The prelude file has no source,
-/// so its locations round-trip through interning like any other while their
-/// item-tree queries answer the builtin shape and their *source* queries
-/// answer the empty case.
+/// prelude file ([`base_db::prelude_file`]). The table-provided ones have no
+/// source, so their locations round-trip through interning like any other
+/// while their item-tree queries answer the builtin shape and their
+/// *source* queries answer the empty case.
 ///
-/// TWO kinds of compiler-provided declaration share this namespace, keyed
-/// only by name: the ENUMS ([`synthetic_decls`]) and the generic builtin
-/// FUNCTIONS, whose schemes are keyed here too (`infer::builtin_scheme`). A
-/// collision is unconstructible: builtins are `snake_case` names and the
-/// enums are `CamelCase` ones. A naming convention holds that up, not a type.
+/// THREE kinds of compiler-provided declaration share this namespace, keyed
+/// only by name: the ENUMS ([`synthetic_decls`]), the generic builtin
+/// FUNCTIONS, whose schemes are keyed here too (`infer::builtin_scheme`),
+/// and the items written in [`base_db::PRELUDE_SOURCE`]. The enums are
+/// `CamelCase` and the others `snake_case`, and no builtin shares a name
+/// with a prelude item; a naming convention holds that up, not a type.
 pub fn prelude_loc(db: &dyn Db, name: &str) -> ItemLoc {
     ItemLoc::top_level(base_db::prelude_file(db), std::sync::Arc::from(name), 0)
 }

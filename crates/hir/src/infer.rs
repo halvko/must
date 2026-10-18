@@ -10619,6 +10619,10 @@ fn builtin_type_unpriced(db: &dyn Db, builtin: Builtin) -> Ty {
     match builtin {
         Builtin::Print => Ty::fn_type(vec![Ty::Str], Ty::Unit),
         Builtin::Panic => Ty::fn_type(vec![Ty::Str], Ty::Never),
+        Builtin::IndexOutOfBounds => Ty::fn_type(
+            vec![Ty::Int(IntKind::Usize), Ty::Int(IntKind::Usize)],
+            Ty::Never,
+        ),
         Builtin::ReadLine => Ty::fn_type(
             Vec::new(),
             Ty::Named(NamedTy::plain(crate::read_line_result_loc(db))),
@@ -10688,6 +10692,7 @@ fn builtin_generics(builtin: Builtin) -> Option<&'static [GenericParamData]> {
         }
         Builtin::Print
         | Builtin::Panic
+        | Builtin::IndexOutOfBounds
         | Builtin::Add
         | Builtin::Offset
         | Builtin::Copy
@@ -10730,6 +10735,7 @@ fn builtin_scheme(db: &dyn Db, builtin: Builtin) -> (ItemLoc, Ty) {
         Builtin::Dangling => Ty::fn_type(Vec::new(), Ty::raw_ptr(true, t)),
         Builtin::Print
         | Builtin::Panic
+        | Builtin::IndexOutOfBounds
         | Builtin::Add
         | Builtin::Offset
         | Builtin::Copy

@@ -1761,6 +1761,40 @@ impl<'a, 'db> Emitter<'a, 'db> {
                         // `panic` diverges: no continuation is emitted.
                         return Ok(());
                     }
+                    // The prelude's `index` out of range: the same trap
+                    // as an out-of-range element step.
+                    Some(CallTarget::IndexOutOfBounds) => {
+                        let [len, index] = args.as_slice() else {
+                            return Err(Refusal::new(
+                                "an `index_out_of_bounds` without two arguments",
+                                &ctx.loc,
+                                origin,
+                            ));
+                        };
+                        let Some(len) = self.const_int(ctx, len)? else {
+                            return Err(Refusal::new(
+                                "an array length that is not known at compile time",
+                                &ctx.loc,
+                                origin,
+                            ));
+                        };
+                        let trap = match self.const_int(ctx, index)? {
+                            Some(index) => self.traps.intern(
+                                TrapKind::IndexOutOfBounds,
+                                hir::diag::index_out_of_bounds(len, index),
+                                true,
+                            ),
+                            None => self.traps.intern(
+                                TrapKind::IndexOutOfBounds,
+                                format!(
+                                    "index out of bounds: the length is {len} but the index is "
+                                ),
+                                false,
+                            ),
+                        };
+                        self.trap(ctx, trap);
+                        return Ok(());
+                    }
                     Some(CallTarget::Instance(callee)) => {
                         let (params, results) = self.signature(&callee)?;
                         let (expected, results) = (params.len() as u32, results.len() as u32);

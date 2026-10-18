@@ -2525,6 +2525,22 @@ impl<'db, M: Mode> Machine<'db, M> {
             }
         }
         match builtin {
+            Builtin::IndexOutOfBounds => {
+                expect_args(self, 2)?;
+                let usize_arg = |value: &Value| match value {
+                    Value::Int(iv) => iv.usize_payload(),
+                    _ => None,
+                };
+                let (Some(len), Some(index)) = (usize_arg(&args[0]), usize_arg(&args[1])) else {
+                    return Err(self.ill_typed("two `usize` arguments", &args[0], loc, origin));
+                };
+                Err(EvalError {
+                    kind: EvalErrorKind::Panic,
+                    message: hir::diag::index_out_of_bounds(len, index),
+                    origin: Some((loc.clone(), origin)),
+                    notes: Vec::new(),
+                })
+            }
             Builtin::Panic => {
                 expect_args(self, 1)?;
                 let Value::Str(text) = &args[0] else {
