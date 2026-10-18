@@ -1,0 +1,30 @@
+# Checks that the editor plugins pin the grammar of the change, and tags the
+# pinned commit on main so the editors can fetch it; see
+# .github/scripts/grammar-pin.sh.
+name: Grammar pin
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+      - run: .github/scripts/grammar-pin.sh check
+
+  publish:
+    needs: check
+    if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - run: .github/scripts/grammar-pin.sh publish
