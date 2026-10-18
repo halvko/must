@@ -180,27 +180,24 @@ fn spawn_with_timeout_input(
     (stdout, stderr, code)
 }
 
-/// `must check examples/<file>`: assert the combined diagnostics text
-/// (stdout: rendered diagnostics; stderr: the summary line) and exit code
-/// match. Every example except `errors.must` is expected clean (empty
-/// output, exit 0); `errors.must` is intentionally dirty and pins its
-/// full diagnostic dump plus the "found N errors and M warnings" line.
-fn assert_check(file: &str, want_code: i32, want: Expect) {
+/// `must check examples/<file>`: the combined diagnostics text (stdout:
+/// rendered diagnostics; stderr: the summary line) and the exit code.
+fn check_output(file: &str) -> (String, i32) {
     let rel = format!("examples/{file}");
-    let label = format!("check {rel}");
-    let (stdout, stderr, code) = spawn_with_timeout(&["check", &rel], &label);
-    assert_eq!(code, want_code, "unexpected exit code from `must {label}`");
-    want.assert_eq(&format!("{stdout}{stderr}"));
+    let (stdout, stderr, code) = spawn_with_timeout(&["check", &rel], &format!("check {rel}"));
+    (format!("{stdout}{stderr}"), code)
 }
 
 /// One documented (or default) `must run ...` invocation: assert
-/// stdout and exit code match. `args` is the full argument list after the
-/// binary name, e.g. `["run", "examples/loops.must", "-e", "sum_to(10)"]`.
-fn assert_run(args: &[&str], want_code: i32, want: Expect) {
+/// stdout and exit code match, and return stderr. `args` is the full
+/// argument list after the binary name, e.g.
+/// `["run", "examples/loops.must", "-e", "sum_to(10)"]`.
+fn assert_run(args: &[&str], want_code: i32, want: Expect) -> String {
     let label = args.join(" ");
-    let (stdout, _stderr, code) = spawn_with_timeout(args, &label);
+    let (stdout, stderr, code) = spawn_with_timeout(args, &label);
     assert_eq!(code, want_code, "unexpected exit code from `must {label}`");
     want.assert_eq(&stdout);
+    stderr
 }
 
 /// [`assert_run`], with `input` piped to the child's stdin — the real-CLI
@@ -215,36 +212,41 @@ fn assert_run_with_input(args: &[&str], input: &str, want_code: i32, want: Expec
 // --- check: every example is silent except errors.must ---------------------
 
 #[test]
-fn arrays_checks_clean() {
-    assert_check("arrays.must", 0, expect![[r#""#]]);
-}
-
-#[test]
-fn borrows_checks_clean() {
-    assert_check("borrows.must", 0, expect![[r#""#]]);
-}
-
-#[test]
-fn chars_checks_clean() {
-    assert_check("chars.must", 0, expect![[r#""#]]);
-}
-
-#[test]
-fn compile_time_checks_clean() {
-    assert_check("compile_time.must", 0, expect![[r#""#]]);
-}
-
-#[test]
-fn display_checks_clean() {
-    assert_check("display.must", 0, expect![[r#""#]]);
+fn every_clean_example_checks_clean() {
+    // One spawn per file, all at once: the files are independent and a
+    // serial loop would be the slowest test in this binary. Failures are
+    // collected so one broken example doesn't hide the others.
+    let failures: Vec<String> = std::thread::scope(|scope| {
+        let runs: Vec<_> = COVERED
+            .iter()
+            .filter(|file| **file != "errors.must")
+            .map(|file| {
+                scope.spawn(move || {
+                    let (output, code) = check_output(file);
+                    (code != 0 || !output.is_empty())
+                        .then(|| format!("`must check examples/{file}` exited {code}:\n{output}"))
+                })
+            })
+            .collect();
+        runs.into_iter()
+            .filter_map(|run| run.join().expect("check thread panicked"))
+            .collect()
+    });
+    assert!(
+        failures.is_empty(),
+        "examples that should check clean did not:\n\n{}",
+        failures.join("\n")
+    );
 }
 
 #[test]
 fn errors_checks_dirty_with_the_documented_count() {
-    assert_check(
-        "errors.must",
-        1,
-        expect![[r#"
+    let (output, code) = check_output("errors.must");
+    assert_eq!(
+        code, 1,
+        "unexpected exit code from `must check examples/errors.must`"
+    );
+    expect![[r#"
             error: type mismatch: expected `usize`, found `str`
               --> examples/errors.must:17:32
                |
@@ -518,76 +520,8 @@ fn errors_checks_dirty_with_the_documented_count() {
                = note: `x` is declared without `mut` here (examples/errors.must:407:9)
 
             found 40 errors and 1 warning
-        "#]],
-    );
-}
-
-#[test]
-fn functions_checks_clean() {
-    assert_check("functions.must", 0, expect![[r#""#]]);
-}
-
-#[test]
-fn generics_checks_clean() {
-    assert_check("generics.must", 0, expect![[r#""#]]);
-}
-
-#[test]
-fn heap_checks_clean() {
-    assert_check("heap.must", 0, expect![[r#""#]]);
-}
-
-#[test]
-fn hello_checks_clean() {
-    assert_check("hello.must", 0, expect![[r#""#]]);
-}
-
-#[test]
-fn loops_checks_clean() {
-    assert_check("loops.must", 0, expect![[r#""#]]);
-}
-
-#[test]
-fn match_projection_checks_clean() {
-    assert_check("match_projection.must", 0, expect![[r#""#]]);
-}
-
-#[test]
-fn option_checks_clean() {
-    // `Option` and its inherent members (`is_some`, `unwrap`, `flat_map`,
-    // `map`, `as_ref`) — definitions only, no `main`; see `option_runs`
-    // below for the four documented `-e` invocations.
-    assert_check("option.must", 0, expect![[r#""#]]);
-}
-
-#[test]
-fn pointers_checks_clean() {
-    assert_check("pointers.must", 0, expect![[r#""#]]);
-}
-
-#[test]
-fn reborrow_checks_clean() {
-    assert_check("reborrow.must", 0, expect![[r#""#]]);
-}
-
-#[test]
-fn records_checks_clean() {
-    assert_check("records.must", 0, expect![[r#""#]]);
-}
-
-#[test]
-fn stdin_checks_clean() {
-    assert_check("stdin.must", 0, expect![[r#""#]]);
-}
-
-#[test]
-fn stdin_lib_checks_clean() {
-    assert_check("stdin_lib.must", 0, expect![[r#""#]]);
-}
-
-#[test]
-fn string_lib_checks_clean() {
-    assert_check("string_lib.must", 0, expect![[r#""#]]);
+        "#]]
+    .assert_eq(&output);
 }
 
 // --- run: the documented `// Run:` invocation(s), or the default entry -----
@@ -674,8 +608,15 @@ fn errors_runs() {
     // No `must run ...` invocation is documented (its header only
     // documents `must check`), so this is the default entry. The file
     // defines no `main`, so running it (rather than checking it) traps
-    // immediately on the synthetic entry expression.
-    assert_run(&["run", "examples/errors.must"], 1, expect![[r#""#]]);
+    // immediately on the synthetic entry expression. A failing run prints
+    // nothing to stdout whatever the reason, so the reason is pinned on
+    // stderr.
+    let stderr = assert_run(&["run", "examples/errors.must"], 1, expect![""]);
+    expect![[r#"
+        error: unresolved name `main`
+          --> entry expression
+    "#]]
+    .assert_eq(&stderr);
 }
 
 #[test]

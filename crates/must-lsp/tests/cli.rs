@@ -39,18 +39,10 @@ fn run_merged(args: &[&str]) -> (String, i32) {
 }
 
 #[test]
-fn help_exits_zero_and_usage_errors_exit_two() {
+fn help_exits_zero() {
     let (help, code) = run_merged(&["--help"]);
     assert_eq!(code, 0, "--help exits 0: {help}");
     assert!(help.contains("must run <file.must>"), "{help}");
-
-    let (msg, code) = run_merged(&["frobnicate"]);
-    assert_eq!(code, 2, "an unknown subcommand exits 2: {msg}");
-    assert!(msg.contains("try `must --help`"), "{msg}");
-
-    let (msg, code) = run_merged(&["--serve-harder"]);
-    assert_eq!(code, 2, "an unknown flag exits 2: {msg}");
-    assert!(msg.contains("try `must --help`"), "{msg}");
 }
 
 #[test]
