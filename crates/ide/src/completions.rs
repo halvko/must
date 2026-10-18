@@ -2780,7 +2780,11 @@ mod tests {
     fn item_keywords_match_the_grammar() {
         // Both directions: nothing the grammar accepts may be missing (the
         // drift that lost `trait`), and nothing we offer may be a keyword
-        // the parser would reject on the spot.
+        // the parser would reject on the spot. The two asserts show the
+        // discriminator answers both ways, so the loop cannot pass against an
+        // empty grammar and an empty list.
+        assert!(opens_an_item("trait"), "`trait` opens an item");
+        assert!(!opens_an_item("break"), "`break` does not open an item");
         for (text, kind) in syntax::KEYWORDS {
             assert_eq!(
                 opens_an_item(text),
@@ -2788,13 +2792,5 @@ mod tests {
                 "`{text}`: the grammar and the item-position completion list disagree"
             );
         }
-    }
-
-    #[test]
-    fn the_guard_can_actually_fail() {
-        // Proof the discriminator discriminates — otherwise the test above
-        // would pass just as happily against an empty grammar.
-        assert!(opens_an_item("trait"), "`trait` opens an item");
-        assert!(!opens_an_item("break"), "`break` does not open an item");
     }
 }
