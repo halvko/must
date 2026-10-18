@@ -167,6 +167,21 @@ fn string_literal(text: &str) -> Option<String> {
     None
 }
 
+/// Every file of a crate's `tests` directory (relative to this crate), in
+/// name order.
+fn test_sources(tests: &str) -> Vec<String> {
+    let dir = format!("{}/{tests}", env!("CARGO_MANIFEST_DIR"));
+    let mut paths: Vec<_> = std::fs::read_dir(dir)
+        .unwrap()
+        .map(|entry| entry.unwrap().path())
+        .collect();
+    paths.sort();
+    paths
+        .iter()
+        .map(|path| std::fs::read_to_string(path).unwrap())
+        .collect()
+}
+
 #[test]
 fn every_error_traps() {
     let mut corpus = Vec::new();
@@ -180,15 +195,15 @@ fn every_error_traps() {
     for path in paths {
         corpus.push(std::fs::read_to_string(path).unwrap());
     }
-    corpus.extend(programs(
-        include_str!("../../hir/src/tests.rs"),
-        "check_diagnostics(",
-    ));
-    corpus.extend(programs(
-        include_str!("../../syntax/src/tests.rs"),
-        "check_errors(",
-    ));
-    corpus.extend(programs(include_str!("tests.rs"), "check_loans("));
+    for (tests, helper) in [
+        ("../hir/src/tests", "check_diagnostics("),
+        ("../syntax/src/tests", "check_errors("),
+        ("src/tests", "check_loans("),
+    ] {
+        for source in test_sources(tests) {
+            corpus.extend(programs(&source, helper));
+        }
+    }
     let mut gaps = BTreeSet::new();
     for text in &corpus {
         gaps.extend(untrapped(text));
