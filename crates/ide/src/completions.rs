@@ -1289,8 +1289,7 @@ fn block_keyword_items(edit_range: TextRange) -> Vec<CompletionItem> {
 
 /// The integer types plus `str`/`string`/`bool`/`char` — the nameable
 /// builtin types (mirrors [`hir::ty::builtin_type_by_name`]'s name set).
-/// Rendered with the keyword kind (they're not declarations to navigate to)
-/// but the builtin sort tier. Only the names `keep` accepts.
+/// Only the names `keep` accepts.
 fn builtin_type_items(keep: impl Fn(&str) -> bool, edit_range: TextRange) -> Vec<CompletionItem> {
     [
         "i8", "i16", "i32", "i64", "u8", "u16", "u32", "u64", "usize", "isize", "str", "string",
@@ -1301,7 +1300,7 @@ fn builtin_type_items(keep: impl Fn(&str) -> bool, edit_range: TextRange) -> Vec
     .map(|w| {
         completion_item(
             *w,
-            CompletionItemKind::Keyword,
+            CompletionItemKind::Struct,
             Provenance::Builtin,
             TYPE_TIER_NONE,
             None,
