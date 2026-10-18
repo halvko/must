@@ -6702,6 +6702,52 @@ fn deref_outside_unsafe_errors() {
 }
 
 #[test]
+fn an_operation_outside_unsafe_offers_the_block() {
+    // A block's tail is wrapped as it stands.
+    let fixed = apply_fix(
+        "static main = fn(p: usize.&raw) -> usize { p.* };",
+        "Wrap in `unsafe { }`",
+    );
+    assert!(fixed.contains("{ unsafe { p.* } }"), "fixed: {fixed}");
+    check_diagnostics(&fixed, expect![[r#""#]]);
+    // A write wraps its whole statement: wrapping the place alone would
+    // make it a value.
+    let fixed = apply_fix(
+        "static main = fn(p: struct { a: usize }.&raw) { p.*.a = 2; };",
+        "Wrap in `unsafe { }`",
+    );
+    assert!(
+        fixed.contains("{ unsafe { p.*.a = 2; } }"),
+        "fixed: {fixed}"
+    );
+    check_diagnostics(&fixed, expect![[r#""#]]);
+    // A `let` keeps its binding outside: only the initializer is wrapped.
+    let fixed = apply_fix(
+        "static main = fn(p: usize.&raw) -> usize { let x = p.* + 1; x };",
+        "Wrap in `unsafe { }`",
+    );
+    assert!(
+        fixed.contains("let x = unsafe { p.* + 1 };"),
+        "fixed: {fixed}"
+    );
+    check_diagnostics(&fixed, expect![[r#""#]]);
+    // A call statement.
+    let fixed = apply_fix(
+        r#"
+static f = fn (p: usize.&raw) {
+    dealloc_array(p, 1);
+};
+"#,
+        "Wrap in `unsafe { }`",
+    );
+    assert!(
+        fixed.contains("    unsafe { dealloc_array(p, 1); }\n"),
+        "fixed: {fixed}"
+    );
+    check_diagnostics(&fixed, expect![[r#""#]]);
+}
+
+#[test]
 fn deref_inside_unsafe_is_clean() {
     check_diagnostics(
         "static main = fn() -> usize { let mut x = 1; let p = x.&raw; unsafe { p.* } };",
@@ -15415,6 +15461,28 @@ fn a_callees_declared_bound_still_binds_an_elided_call() {
          static g = fn::<@p, @q>(x: usize.&::<@p>, y: usize.&::<@q>) -> usize { f(x, y) };",
         expect![[r#""#]],
     );
+}
+
+#[test]
+fn an_undeclared_outlives_offers_the_clause() {
+    let fixed = apply_fix(
+        "static f = fn::<@a, @b>(x: usize.&::<@b>) -> usize.&::<@a> { x.*.& };",
+        "Declare `@b: @a`",
+    );
+    assert!(fixed.contains("fn::<@a, @b: @a>("), "fixed: {fixed}");
+    check_diagnostics(&fixed, expect![[r#""#]]);
+    // After a bound the region already has.
+    let fixed = apply_fix(
+        "static f = fn::<@a, @c, @b: @c>(x: usize.&::<@b>, y: usize.&::<@c>) -> usize.&::<@a> {\n\
+             x.*.&\n\
+         };",
+        "Declare `@b: @a`",
+    );
+    assert!(
+        fixed.contains("fn::<@a, @c, @b: @c + @a>("),
+        "fixed: {fixed}"
+    );
+    check_diagnostics(&fixed, expect![[r#""#]]);
 }
 
 #[test]

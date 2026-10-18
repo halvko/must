@@ -247,280 +247,283 @@ fn errors_checks_dirty_with_the_documented_count() {
         "unexpected exit code from `must check examples/errors.must`"
     );
     expect![[r#"
-            error: type mismatch: expected `usize`, found `str`
-              --> examples/errors.must:17:32
-               |
-            17 | static bad_annotation: usize = "not a number";
-               |                                ^^^^^^^^^^^^^^
-               = note: expected `usize` because of this annotation (examples/errors.must:17:24)
+        error: type mismatch: expected `usize`, found `str`
+          --> examples/errors.must:17:32
+           |
+        17 | static bad_annotation: usize = "not a number";
+           |                                ^^^^^^^^^^^^^^
+           = note: expected `usize` because of this annotation (examples/errors.must:17:24)
 
-            error: cannot call `double` in a const context; marking it `const fn` would allow this
-              --> examples/errors.must:27:26
-               |
-            27 | static const_violation = double(21);
-               |                          ^^^^^^
-               = help: Mark `double` as `const fn`
-               = note: `double` is defined here (examples/errors.must:26:8)
-               = note: this item's initializer is a const context (examples/errors.must:27:1)
+        error: cannot call `double` in a const context; marking it `const fn` would allow this
+          --> examples/errors.must:27:26
+           |
+        27 | static const_violation = double(21);
+           |                          ^^^^^^
+           = help: Mark `double` as `const fn`
+           = note: `double` is defined here (examples/errors.must:26:8)
+           = note: this item's initializer is a const context (examples/errors.must:27:1)
 
-            error: this `match` does not cover `Shape::Point`
-              --> examples/errors.must:35:5
-               |
-            35 |     match s {
-               |     ^^^^^
-               = help: Add missing match arms
+        error: this `match` does not cover `Shape::Point`
+          --> examples/errors.must:35:5
+           |
+        35 |     match s {
+           |     ^^^^^
+           = help: Add missing match arms
 
-            error: cannot assign to `x`: it is not declared `mut`
-              --> examples/errors.must:45:5
-               |
-            45 |     x = 2;
-               |     ^
-               = help: Make `x` mutable
-               = note: `x` is declared without `mut` here (examples/errors.must:44:9)
+        error: cannot assign to `x`: it is not declared `mut`
+          --> examples/errors.must:45:5
+           |
+        45 |     x = 2;
+           |     ^
+           = help: Make `x` mutable
+           = note: `x` is declared without `mut` here (examples/errors.must:44:9)
 
-            error: record literal is missing field `y: str`
-              --> examples/errors.must:52:53
-               |
-            52 | static missing_field: struct { x: usize, y: str } = struct { x = 1 };
-               |                                                     ^^^^^^^^^^^^^^^^
+        error: record literal is missing field `y: str`
+          --> examples/errors.must:52:53
+           |
+        52 | static missing_field: struct { x: usize, y: str } = struct { x = 1 };
+           |                                                     ^^^^^^^^^^^^^^^^
 
-            error: `Shape::Circle` is a variant, not a type; use `Shape`
-              --> examples/errors.must:57:30
-               |
-            57 | static wants_circle = fn (s: Shape::Circle) -> usize { 0 };
-               |                              ^^^^^^^^^^^^^
-               = help: Use `Shape`
+        error: `Shape::Circle` is a variant, not a type; use `Shape`
+          --> examples/errors.must:57:30
+           |
+        57 | static wants_circle = fn (s: Shape::Circle) -> usize { 0 };
+           |                              ^^^^^^^^^^^^^
+           = help: Use `Shape`
 
-            warning: `Point` binds the whole value; write `::Point` (or `Shape::Point`) to match the variant
-              --> examples/errors.must:67:9
-               |
-            67 |         Point => "point",
-               |         ^^^^^
-               = help: Match the variant `::Point`
-               = note: `Shape` is defined here (examples/errors.must:29:6)
+        warning: `Point` binds the whole value; write `::Point` (or `Shape::Point`) to match the variant
+          --> examples/errors.must:67:9
+           |
+        67 |         Point => "point",
+           |         ^^^^^
+           = help: Match the variant `::Point`
+           = note: `Shape` is defined here (examples/errors.must:29:6)
 
-            error: type mismatch: expected `{number}`, found `T`
-              --> examples/errors.must:84:13
-               |
-            84 |     let n = x + 1;
-               |             ^
-               = note: `+` requires `{number}` operands (examples/errors.must:84:15)
+        error: type mismatch: expected `{number}`, found `T`
+          --> examples/errors.must:84:13
+           |
+        84 |     let n = x + 1;
+           |             ^
+           = note: `+` requires `{number}` operands (examples/errors.must:84:15)
 
-            error: index out of bounds: the length is 2 but the index is 2
-              --> examples/errors.must:96:5
-               |
-            96 |     a[2]
-               |     ^^^^
+        error: index out of bounds: the length is 2 but the index is 2
+          --> examples/errors.must:96:5
+           |
+        96 |     a[2]
+           |     ^^^^
 
-            error: dereferencing a raw pointer requires an `unsafe { ... }` block
-              --> examples/errors.must:106:5
-                |
-            106 |     p.*
-                |     ^^^
+        error: dereferencing a raw pointer requires an `unsafe { ... }` block
+          --> examples/errors.must:106:5
+            |
+        106 |     p.*
+            |     ^^^
+           = help: Wrap in `unsafe { }`
 
-            error: cannot mint a safe borrow through `usize.&raw`: a raw pointer carries no region for the new borrow to be bounded by
-              --> examples/errors.must:116:22
-                |
-            116 |     let b = unsafe { p.*.& };
-                |                      ^^^^^
+        error: cannot mint a safe borrow through `usize.&raw`: a raw pointer carries no region for the new borrow to be bounded by
+          --> examples/errors.must:116:22
+            |
+        116 |     let b = unsafe { p.*.& };
+            |                      ^^^^^
 
-            error: type mismatch: expected `Buf::<8>`, found `Buf::<9>`
-              --> examples/errors.must:124:36
-                |
-            124 | static wrong_const_len: Buf::<8> = Buf::<9>(struct { len = 1 });
-                |                                    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-               = note: expected `Buf::<8>` because of this annotation (examples/errors.must:124:25)
+        error: type mismatch: expected `Buf::<8>`, found `Buf::<9>`
+          --> examples/errors.must:124:36
+            |
+        124 | static wrong_const_len: Buf::<8> = Buf::<9>(struct { len = 1 });
+            |                                    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+           = note: expected `Buf::<8>` because of this annotation (examples/errors.must:124:25)
 
-            error: constant evaluation failed: a pointer cannot leave compile-time evaluation
-              --> examples/errors.must:132:33
-                |
-            132 | static pointer_escaping_const = const {
-                |                                 ^^^^^^^
+        error: constant evaluation failed: a pointer cannot leave compile-time evaluation
+          --> examples/errors.must:132:33
+            |
+        132 | static pointer_escaping_const = const {
+            |                                 ^^^^^^^
 
-            error: cannot infer the type of this number: it has no defining use — add a type annotation
-              --> examples/errors.must:143:13
-                |
-            143 |     let n = 5;
-                |             ^
+        error: cannot infer the type of this number: it has no defining use — add a type annotation
+          --> examples/errors.must:143:13
+            |
+        143 |     let n = 5;
+            |             ^
 
-            error: `300` does not fit in `u8`
-              --> examples/errors.must:150:29
-                |
-            150 | static too_big_for_u8: u8 = 300;
-                |                             ^^^
+        error: `300` does not fit in `u8`
+          --> examples/errors.must:150:29
+            |
+        150 | static too_big_for_u8: u8 = 300;
+            |                             ^^^
 
-            error: record fields are defined with `=` (`name = value`); `:` annotates a type
-              --> examples/errors.must:157:56
-                |
-            157 | static old_spelling: struct { x: usize } = struct { x: 1 };
-                |                                                        ^
+        error: record fields are defined with `=` (`name = value`); `:` annotates a type
+          --> examples/errors.must:157:56
+            |
+        157 | static old_spelling: struct { x: usize } = struct { x: 1 };
+            |                                                        ^
 
-            error: unknown trait `Display`
-              --> examples/errors.must:164:10
-                |
-            164 |     impl Display {
-                |          ^^^^^^^
+        error: unknown trait `Display`
+          --> examples/errors.must:164:10
+            |
+        164 |     impl Display {
+            |          ^^^^^^^
 
-            error: a declare-only inherent member is an unimplementable promise; define it: `name = fn(...) -> ... { ... };`
-              --> examples/errors.must:175:9
-                |
-            175 |         len: fn(Self) -> usize;
-                |         ^^^^^^^^^^^^^^^^^^^^^^^
+        error: a declare-only inherent member is an unimplementable promise; define it: `name = fn(...) -> ... { ... };`
+          --> examples/errors.must:175:9
+            |
+        175 |         len: fn(Self) -> usize;
+            |         ^^^^^^^^^^^^^^^^^^^^^^^
 
-            error: no field or member `plain_len` on `Opted`
-              --> examples/errors.must:185:47
-                |
-            185 | static dotted_call = fn (o: Opted) -> usize { o.plain_len() };
-                |                                               ^^^^^^^^^^^^^
-               = note: a module-level `plain_len` is defined here — statics are never dot-callable; call `plain_len(...)` instead (examples/errors.must:184:8)
+        error: no field or member `plain_len` on `Opted`
+          --> examples/errors.must:185:47
+            |
+        185 | static dotted_call = fn (o: Opted) -> usize { o.plain_len() };
+            |                                               ^^^^^^^^^^^^^
+           = note: a module-level `plain_len` is defined here — statics are never dot-callable; call `plain_len(...)` instead (examples/errors.must:184:8)
 
-            error: `scaled` is not dot-callable: its last parameter is neither `Self` nor a safe borrow of `Self` (dot-call resolution is structural)
-              --> examples/errors.must:196:56
-                |
-            196 | static wrong_self_position = fn (s: Scaler) -> usize { s.scaled(2) };
-                |                                                        ^^^^^^^^^^^
-               = note: `scaled` is defined here (examples/errors.must:193:9)
+        error: `scaled` is not dot-callable: its last parameter is neither `Self` nor a safe borrow of `Self` (dot-call resolution is structural)
+          --> examples/errors.must:196:56
+            |
+        196 | static wrong_self_position = fn (s: Scaler) -> usize { s.scaled(2) };
+            |                                                        ^^^^^^^^^^^
+           = note: `scaled` is defined here (examples/errors.must:193:9)
 
-            error: raw borrows are spelled postfix: `x.&raw`
-              --> examples/errors.must:205:13
-                |
-            205 |     let p = &raw x;
-                |             ^
+        error: raw borrows are spelled postfix: `x.&raw`
+          --> examples/errors.must:205:13
+            |
+        205 |     let p = &raw x;
+            |             ^
 
-            error: `return` inside a `const` block is not supported yet: it would have to leave the enclosing `fn` body, and a `const` block is compiled as a body of its own
-              --> examples/errors.must:216:23
-                |
-            216 |     const { if true { return 1; } 0 }
-                |                       ^^^^^^^^
+        error: `return` inside a `const` block is not supported yet: it would have to leave the enclosing `fn` body, and a `const` block is compiled as a body of its own
+          --> examples/errors.must:216:23
+            |
+        216 |     const { if true { return 1; } 0 }
+            |                       ^^^^^^^^
 
-            error: `Measured::size` takes no generic arguments
-              --> examples/errors.must:235:53
-                |
-            235 | static member_own_turbofish = fn () -> () { let f = Measured::size::<usize>; };
-                |                                                     ^^^^^^^^^^^^^^^^^^^^^^^
+        error: `Measured::size` takes no generic arguments
+          --> examples/errors.must:235:53
+            |
+        235 | static member_own_turbofish = fn () -> () { let f = Measured::size::<usize>; };
+            |                                                     ^^^^^^^^^^^^^^^^^^^^^^^
 
-            error: `Counted::step` declares a const parameter of its own, and const member arguments are not supported yet (a member's type arguments are written here; its region arguments are always inferred)
-              --> examples/errors.must:248:62
-                |
-            248 | static member_own_const_turbofish = fn (n: usize) -> usize { Counted::step::<3>(n) };
-                |                                                              ^^^^^^^^^^^^^^^^^^^^^
+        error: `Counted::step` declares a const parameter of its own, and const member arguments are not supported yet (a member's type arguments are written here; its region arguments are always inferred)
+          --> examples/errors.must:248:62
+            |
+        248 | static member_own_const_turbofish = fn (n: usize) -> usize { Counted::step::<3>(n) };
+            |                                                              ^^^^^^^^^^^^^^^^^^^^^
 
-            error: `len` is a field of `Sized`, not a member — fields are reached through a value: `value.len`
-              --> examples/errors.must:256:55
-                |
-            256 | static field_through_the_type = fn () -> () { let n = Sized::len; };
-                |                                                       ^^^^^^^^^^
-               = note: `Sized` is defined here (examples/errors.must:255:6)
+        error: `len` is a field of `Sized`, not a member — fields are reached through a value: `value.len`
+          --> examples/errors.must:256:55
+            |
+        256 | static field_through_the_type = fn () -> () { let n = Sized::len; };
+            |                                                       ^^^^^^^^^^
+           = note: `Sized` is defined here (examples/errors.must:255:6)
 
-            error: `Self` names the implementer, so it cannot be `_`: write the type (`Trait::<Self = Type>::member`), or use the short form `Trait::member(...)` where an argument determines `Self`
-              --> examples/errors.must:269:45
-                |
-            269 | static self_hole = fn (n: usize) -> usize { Countable::<Self = _>::count(n) };
-                |                                             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+        error: `Self` names the implementer, so it cannot be `_`: write the type (`Trait::<Self = Type>::member`), or use the short form `Trait::member(...)` where an argument determines `Self`
+          --> examples/errors.must:269:45
+            |
+        269 | static self_hole = fn (n: usize) -> usize { Countable::<Self = _>::count(n) };
+            |                                             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
-            error: using this borrow where a longer-lived one is expected needs `@a` to outlive `@b`, which this signature does not declare; add `@a: @b` to the binder
-              --> examples/errors.must:278:80
-                |
-            278 | static undeclared_outlives = fn::<@a, @b>(x: usize.&::<@a>) -> usize.&::<@b> { x };
-                |                                                                                ^
+        error: using this borrow where a longer-lived one is expected needs `@a` to outlive `@b`, which this signature does not declare; add `@a: @b` to the binder
+          --> examples/errors.must:278:80
+            |
+        278 | static undeclared_outlives = fn::<@a, @b>(x: usize.&::<@a>) -> usize.&::<@b> { x };
+            |                                                                                ^
+           = help: Declare `@a: @b`
 
-            error: cannot resolve `::Point` without an expected type — write `Enum::Point`
-              --> examples/errors.must:288:53
-                |
-            288 | static sigil_without_a_type = fn () -> () { let s = ::Point; };
-                |                                                     ^^^^^^^
+        error: cannot resolve `::Point` without an expected type — write `Enum::Point`
+          --> examples/errors.must:288:53
+            |
+        288 | static sigil_without_a_type = fn () -> () { let s = ::Point; };
+            |                                                     ^^^^^^^
 
-            error: `bump` takes `Self.&mut`, and a borrow is never inserted for an owned receiver — write `.&mut.bump(...)`
-              --> examples/errors.must:305:5
-                |
-            305 |     c.bump()
-                |     ^^^^^^^^
-               = help: Insert `.&mut` before `.bump`
-               = note: `bump` is defined here (examples/errors.must:300:9)
+        error: `bump` takes `Self.&mut`, and a borrow is never inserted for an owned receiver — write `.&mut.bump(...)`
+          --> examples/errors.must:305:5
+            |
+        305 |     c.bump()
+            |     ^^^^^^^^
+           = help: Insert `.&mut` before `.bump`
+           = note: `bump` is defined here (examples/errors.must:300:9)
 
-            error: generic arguments use the turbofish: write `Boxed::<...>`
-              --> examples/errors.must:316:37
-                |
-            316 | static bare_angle_generics = fn (b: Boxed<usize>) -> usize { b.value };
-                |                                     ^^^^^^^^^^^^
-               = help: Insert `::`
+        error: generic arguments use the turbofish: write `Boxed::<...>`
+          --> examples/errors.must:316:37
+            |
+        316 | static bare_angle_generics = fn (b: Boxed<usize>) -> usize { b.value };
+            |                                     ^^^^^^^^^^^^
+           = help: Insert `::`
 
-            error: cannot call `read_line` in a const context; const evaluation cannot have side effects
-              --> examples/errors.must:324:29
-                |
-            324 | static read_line_in_const = read_line();
-                |                             ^^^^^^^^^
-               = note: this item's initializer is a const context (examples/errors.must:324:1)
+        error: cannot call `read_line` in a const context; const evaluation cannot have side effects
+          --> examples/errors.must:324:29
+            |
+        324 | static read_line_in_const = read_line();
+            |                             ^^^^^^^^^
+           = note: this item's initializer is a const context (examples/errors.must:324:1)
 
-            error: borrows are spelled postfix: `x.&` / `x.&mut`
-              --> examples/errors.must:333:13
-                |
-            333 |     let r = &x;
-                |             ^^
-               = help: Rewrite as postfix
+        error: borrows are spelled postfix: `x.&` / `x.&mut`
+          --> examples/errors.must:333:13
+            |
+        333 |     let r = &x;
+            |             ^^
+           = help: Rewrite as postfix
 
-            error: calling the `extern` item `host_read` requires an `unsafe { ... }` block; nothing on this side of the boundary can check what it does
-              --> examples/errors.must:339:57
-                |
-            339 | static call_outside_unsafe = fn (p: u8.&raw) -> isize { host_read(p, 8) };
-                |                                                         ^^^^^^^^^^^^^^^
+        error: calling the `extern` item `host_read` requires an `unsafe { ... }` block; nothing on this side of the boundary can check what it does
+          --> examples/errors.must:339:57
+            |
+        339 | static call_outside_unsafe = fn (p: u8.&raw) -> isize { host_read(p, 8) };
+            |                                                         ^^^^^^^^^^^^^^^
+           = help: Wrap in `unsafe { }`
 
-            error: an `extern static` has no initializer: the declaration is the whole contract, and an `extern` item sets nothing to anything
-              --> examples/errors.must:348:69
-                |
-            348 | unsafe extern static extern_with_a_value: unsafe fn(usize) -> usize = fn (n: usize) -> usize { n };
-                |                                                                     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-               = help: Remove the initializer
+        error: an `extern static` has no initializer: the declaration is the whole contract, and an `extern` item sets nothing to anything
+          --> examples/errors.must:348:69
+            |
+        348 | unsafe extern static extern_with_a_value: unsafe fn(usize) -> usize = fn (n: usize) -> usize { n };
+            |                                                                     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+           = help: Remove the initializer
 
-            error: declaring an `extern` item is a VOUCH: write `unsafe extern static`
-              --> examples/errors.must:353:1
-                |
-            353 | extern static unvouched_extern: fn() -> i64;
-                | ^^^^^^
-               = help: Write `unsafe extern`
+        error: declaring an `extern` item is a VOUCH: write `unsafe extern static`
+          --> examples/errors.must:353:1
+            |
+        353 | extern static unvouched_extern: fn() -> i64;
+            | ^^^^^^
+           = help: Write `unsafe extern`
 
-            error: `extern` data is not supported yet — an `extern` item must have a function type
-              --> examples/errors.must:361:35
-                |
-            361 | unsafe extern static extern_data: usize;
-                |                                   ^^^^^
+        error: `extern` data is not supported yet — an `extern` item must have a function type
+          --> examples/errors.must:361:35
+            |
+        361 | unsafe extern static extern_data: usize;
+            |                                   ^^^^^
 
-            error: an `extern` item's type must be written in full: the declaration is the whole contract, and there is no body for `_` to be inferred from
-              --> examples/errors.must:368:52
-                |
-            368 | unsafe extern static a_partial_contract: unsafe fn(_) -> i64;
-                |                                                    ^
+        error: an `extern` item's type must be written in full: the declaration is the whole contract, and there is no body for `_` to be inferred from
+          --> examples/errors.must:368:52
+            |
+        368 | unsafe extern static a_partial_contract: unsafe fn(_) -> i64;
+            |                                                    ^
 
-            error: regions are inferred at calls, never written: drop this argument — a turbofish spells type and const arguments only
-              --> examples/errors.must:379:73
-                |
-            379 | static region_at_a_call = fn::<@b>(p: usize.&::<@b>) -> usize { first::<@b, usize>(p).* };
-                |                                                                         ^^
+        error: regions are inferred at calls, never written: drop this argument — a turbofish spells type and const arguments only
+          --> examples/errors.must:379:73
+            |
+        379 | static region_at_a_call = fn::<@b>(p: usize.&::<@b>) -> usize { first::<@b, usize>(p).* };
+            |                                                                         ^^
 
-            error: region parameters come first in a binder; move `@a` before `T`
-              --> examples/errors.must:387:36
-                |
-            387 | static misordered_binder = fn::<T, @a>(r: T.&::<@a>) -> T.&::<@a> { r };
-                |                                    ^^
-               = help: Move `@a` before `T`
+        error: region parameters come first in a binder; move `@a` before `T`
+          --> examples/errors.must:387:36
+            |
+        387 | static misordered_binder = fn::<T, @a>(r: T.&::<@a>) -> T.&::<@a> { r };
+            |                                    ^^
+           = help: Move `@a` before `T`
 
-            error: regions are inferred at a borrow, never written: drop this argument — a region belongs in a type position, so assert it with an annotation (`let r: _.&::<@a> = x.&;`)
-              --> examples/errors.must:396:80
-                |
-            396 | static region_at_a_borrow = fn::<@c>(p: usize.&::<@c>) -> usize { let q = p.*.&::<@c>; q.* };
-                |                                                                                ^^^^^^
-               = help: Drop the region argument
+        error: regions are inferred at a borrow, never written: drop this argument — a region belongs in a type position, so assert it with an annotation (`let r: _.&::<@a> = x.&;`)
+          --> examples/errors.must:396:80
+            |
+        396 | static region_at_a_borrow = fn::<@c>(p: usize.&::<@c>) -> usize { let q = p.*.&::<@c>; q.* };
+            |                                                                                ^^^^^^
+           = help: Drop the region argument
 
-            error: cannot borrow `x` as `.&mut`: it is not declared `mut`
-              --> examples/errors.must:407:13
-                |
-            407 |     let m = x.&mut;
-                |             ^
-               = help: Make `x` mutable
-               = note: `x` is declared without `mut` here (examples/errors.must:405:9)
+        error: cannot borrow `x` as `.&mut`: it is not declared `mut`
+          --> examples/errors.must:407:13
+            |
+        407 |     let m = x.&mut;
+            |             ^
+           = help: Make `x` mutable
+           = note: `x` is declared without `mut` here (examples/errors.must:405:9)
 
-            found 40 errors and 1 warning
-        "#]]
+        found 40 errors and 1 warning
+    "#]]
     .assert_eq(&output);
 }
 
