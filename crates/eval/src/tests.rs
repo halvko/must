@@ -8799,6 +8799,61 @@ static main = fn() -> usize {
     );
 }
 
+/// A direct use of a member its impl lacks traps with the impl's error,
+/// not with a claim that the trait isn't implemented, in each spelling.
+#[test]
+fn a_missing_impl_member_traps_at_a_direct_use() {
+    for call in ["n.n()", "D::n(n)", "D::<Self = usize>::n(n)"] {
+        check_run(
+            &format!(
+                r#"
+trait D = requires {{ m: fn(Self) -> usize; n: fn(Self) -> usize; }} with {{
+    impl usize {{ m = fn(x: Self) -> usize {{ x }}; }}
+}};
+static main = fn() -> usize {{
+    print("before;");
+    let n: usize = 1;
+    {call}
+}};
+"#
+            ),
+            "main()",
+            expect![[r#"
+                output: "before;"
+                error[Trap]: this impl of `D` is missing the member `n`
+            "#]],
+        );
+    }
+}
+
+/// A provided member of an incomplete impl traps with the impl's error,
+/// whether called directly or through a bound.
+#[test]
+fn a_provided_member_of_an_incomplete_impl_traps() {
+    for call in ["n.m()", "f(n)"] {
+        check_run(
+            &format!(
+                r#"
+trait D = requires {{ m: fn(Self) -> usize; n: fn(Self) -> usize; }} with {{
+    impl usize {{ m = fn(x: Self) -> usize {{ x }}; }}
+}};
+static f = fn::<T: D>(x: T) -> usize {{ x.m() }};
+static main = fn() -> usize {{
+    print("before;");
+    let n: usize = 1;
+    {call}
+}};
+"#
+            ),
+            "main()",
+            expect![[r#"
+                output: "before;"
+                error[Trap]: this impl of `D` is missing the member `n`
+            "#]],
+        );
+    }
+}
+
 /// A member without its full signature traps when a dot-call reaches it.
 #[test]
 fn a_member_without_a_full_signature_traps_at_the_call() {

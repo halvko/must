@@ -124,6 +124,10 @@ pub struct InferenceResult {
     /// ([`crate::traits::bound_slots`]). MIR appends one operand per slot
     /// per trait requirement.
     pub bound_dicts_of_expr: ArenaMap<ExprId, Vec<DictEntry>>,
+    /// Member uses whose impl lacks the member, keyed by the use and
+    /// mapping to the impl's owner item. The use traps with that item's
+    /// errors.
+    pub incomplete_impl_of_expr: ArenaMap<ExprId, ItemLoc>,
     /// The body's OUTLIVES constraints, in emission order — the whole
     /// input the outlives module needs from inference, RECORDED here
     /// rather than re-derived from region-erased MIR (the wasm honesty
@@ -2753,9 +2757,8 @@ pub(crate) struct InferCtx<'db> {
 /// [`InferCtx::trait_call_candidates`].
 struct TraitCallCandidate {
     trait_: ItemLoc,
-    /// The impl's member for the requirement; `None` when the impl doesn't
-    /// provide it (the impl's definition site carries that diagnostic).
-    member: Option<ItemLoc>,
+    /// The impl's member for the requirement, or that the impl lacks it.
+    member: crate::traits::ImplMember,
     /// Whether the impl member can take the call (TR01's structural shape).
     dot_callable: bool,
     /// Whether the impl member's signature is broken (its definition site
@@ -6027,7 +6030,7 @@ impl<'db> InferCtx<'db> {
                 // A broken IMPL member is the definition site's problem
                 // too — it makes nothing ambiguous, and the call names it.
                 if let Some(broken) = traits.iter().find(|candidate| candidate.broken) {
-                    if let Some(member) = &broken.member {
+                    if let Some(member) = broken.member.found() {
                         self.result.member_of_expr.insert(expr, member.clone());
                     }
                     self.result.type_of_expr.insert(callee, Ty::Error);
@@ -6058,7 +6061,7 @@ impl<'db> InferCtx<'db> {
                             // requirement's `Self` parameter, so the short
                             // form determines `Self` by itself.
                             short: true,
-                            def: candidate.member.clone(),
+                            def: candidate.member.found().cloned(),
                         });
                     }
                     if fn_field {
@@ -6101,7 +6104,8 @@ impl<'db> InferCtx<'db> {
                 if let [candidate] = trait_carriers.as_slice() {
                     let member_loc = candidate
                         .member
-                        .clone()
+                        .found()
+                        .cloned()
                         .expect("a carrying candidate has its impl member");
                     self.value_receivers.insert(receiver);
                     let ty = self.infer_impl_member_call(
@@ -6162,22 +6166,21 @@ impl<'db> InferCtx<'db> {
                 // requirement, a member without the dot-callable shape
                 // (TR01 is structural), or an unknown name. A field — even a
                 // plain one — still gets its own (better) story below.
-                let impl_gap = traits.iter().find(|candidate| candidate.member.is_none());
-                if let Some(candidate) = impl_gap {
+                let impl_gap = traits.iter().find_map(|candidate| match &candidate.member {
+                    crate::traits::ImplMember::Missing { owner } => Some(owner),
+                    crate::traits::ImplMember::Found(_) => None,
+                });
+                if let Some(owner) = impl_gap {
                     self.result
-                        .diagnostics
-                        .push(InferenceDiagnostic::NoTraitImpl {
-                            expr,
-                            trait_: candidate.trait_.clone(),
-                            ty: recv_ty,
-                        });
+                        .incomplete_impl_of_expr
+                        .insert(expr, owner.clone());
                     self.result.type_of_expr.insert(callee, Ty::Error);
                     self.infer_args_broken(args);
                     return self.finish_dot_call(expr, Ty::Error, expected, cause);
                 }
                 if !named_has_field {
                     let not_dot_callable =
-                        inherent.or_else(|| traits.first().and_then(|c| c.member.clone()));
+                        inherent.or_else(|| traits.first().and_then(|c| c.member.found().cloned()));
                     match not_dot_callable {
                         // A member exists but this RECEIVER cannot reach it.
                         // Three reasons, and each names its own escape —
@@ -6944,6 +6947,36 @@ impl<'db> InferCtx<'db> {
         )
     }
 
+    /// The impl member a qualified use `expr` of `trait_loc`'s `member`
+    /// reaches with `Self` = `ty`. `None` when there is none: no impl is
+    /// reported as `NoTraitImpl`, and a missing member is recorded in
+    /// `incomplete_impl_of_expr`.
+    fn concrete_impl_member(
+        &mut self,
+        expr: ExprId,
+        trait_loc: &ItemLoc,
+        ty: Ty,
+        member: &str,
+    ) -> Option<ItemLoc> {
+        match crate::traits::impl_member(self.db, self.file, trait_loc, &ty, member) {
+            Some(crate::traits::ImplMember::Found(loc)) => Some(loc),
+            Some(crate::traits::ImplMember::Missing { owner }) => {
+                self.result.incomplete_impl_of_expr.insert(expr, owner);
+                None
+            }
+            None => {
+                self.result
+                    .diagnostics
+                    .push(InferenceDiagnostic::NoTraitImpl {
+                        expr,
+                        trait_: trait_loc.clone(),
+                        ty,
+                    });
+                None
+            }
+        }
+    }
+
     /// Every trait that could answer `recv.name(...)` on a CONCRETE
     /// receiver (impl-directed, TR01 extended): the trait declares `name`
     /// AND is implemented for the receiver. In library order; whether each
@@ -6957,21 +6990,14 @@ impl<'db> InferCtx<'db> {
         let Some(self_key) = crate::traits::SelfKey::for_ty(resolved) else {
             return Vec::new();
         };
-        let impls = crate::traits::trait_impls(self.db, self.file);
         crate::traits::traits_providing_member(self.db, self.file, &self_key, name)
             .into_iter()
-            .map(|(trait_loc, member_index)| {
-                let member = impls
-                    .impl_for(&trait_loc, &self_key)
-                    .and_then(|site| crate::traits::impl_dict_members(self.db, &trait_loc, site))
-                    .and_then(|members| members.get(member_index as usize).cloned());
-                let broken = member
-                    .as_ref()
+            .map(|(trait_loc, member)| {
+                let found = member.found();
+                let broken = found
                     .is_some_and(|loc| signature(self.db, loc.to_id(self.db)).contains_error());
-                let dot_callable = !broken
-                    && member
-                        .as_ref()
-                        .is_some_and(|loc| self.member_takes_receiver(loc, receiver));
+                let dot_callable =
+                    !broken && found.is_some_and(|loc| self.member_takes_receiver(loc, receiver));
                 TraitCallCandidate {
                     trait_: trait_loc,
                     member,
@@ -7493,31 +7519,13 @@ impl<'db> InferCtx<'db> {
                     });
             }
             concrete => {
-                let resolved_impl = crate::traits::SelfKey::for_ty(concrete).and_then(|key| {
-                    let impls = crate::traits::trait_impls(self.db, self.file);
-                    impls
-                        .impl_for(&trait_loc, &key)
-                        .cloned()
-                        .and_then(|site| {
-                            crate::traits::impl_dict_members(self.db, &trait_loc, &site)
-                        })
-                        .and_then(|members| members.get(member_index).cloned())
-                });
-                match resolved_impl {
-                    Some(member_loc) => {
-                        self.result
-                            .qualified_member_of_expr
-                            .insert(expr, member_loc);
-                    }
-                    None => {
-                        self.result
-                            .diagnostics
-                            .push(InferenceDiagnostic::NoTraitImpl {
-                                expr,
-                                trait_: trait_loc,
-                                ty: concrete.clone(),
-                            });
-                    }
+                let concrete = concrete.clone();
+                if let Some(member_loc) =
+                    self.concrete_impl_member(expr, &trait_loc, concrete, member)
+                {
+                    self.result
+                        .qualified_member_of_expr
+                        .insert(expr, member_loc);
                 }
             }
         }
@@ -8279,25 +8287,11 @@ impl<'db> InferCtx<'db> {
             return Ty::Error;
         }
         let requirements = crate::item_tree::trait_requirements(self.db, trait_loc.to_id(self.db));
-        let Some(member_index) = requirements.iter().position(|req| req.name == member) else {
+        if !requirements.iter().any(|req| req.name == member) {
             return Ty::Error;
-        };
-        let member_loc = crate::traits::SelfKey::for_ty(&resolved).and_then(|key| {
-            let impls = crate::traits::trait_impls(self.db, self.file);
-            impls
-                .impl_for(trait_loc, &key)
-                .cloned()
-                .and_then(|site| crate::traits::impl_dict_members(self.db, trait_loc, &site))
-                .and_then(|members| members.get(member_index).cloned())
-        });
-        let Some(member_loc) = member_loc else {
-            self.result
-                .diagnostics
-                .push(InferenceDiagnostic::NoTraitImpl {
-                    expr,
-                    trait_: trait_loc.clone(),
-                    ty: resolved,
-                });
+        }
+        let Some(member_loc) = self.concrete_impl_member(expr, trait_loc, resolved.clone(), member)
+        else {
             return Ty::Error;
         };
         let sig = signature(self.db, member_loc.to_id(self.db));
