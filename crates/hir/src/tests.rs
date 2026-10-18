@@ -11631,10 +11631,345 @@ type P = struct { a: usize } with {
 };
 "#,
         expect![[r#"
-            196..206: this impl of `Ord` is missing the member `ord` (required by the trait here at 70..73)
-            196..206: this impl of `Ord` is missing the member `min` (required by the trait here at 124..127)
+            196..206: this impl of `Ord` is missing the members `ord` and `min` (required by the trait here at 70..73) (required by the trait here at 124..127)
             253..261: this impl of `Ord` is missing the member `min` (required by the trait here at 124..127)
             330..331: type mismatch: expected `Cmp`, found `{number}` (expected `Cmp` because of this return type at 321..327)
+        "#]],
+    );
+}
+
+/// Applies the "Add missing members" fix and checks the result, and the
+/// diagnostics left on it (`left`, one message per line).
+fn check_missing_members_fix(before: &str, after: &str, left: Expect) {
+    let db = RootDatabase::default();
+    let file = SourceFile::new(&db, "test.must".to_owned(), before.to_owned());
+    let diagnostics = crate::file_diagnostics(&db, file);
+    let fix = diagnostics
+        .iter()
+        .filter_map(|d| d.fix.as_ref())
+        .find(|fix| fix.label == "Add missing members")
+        .expect("an \"Add missing members\" fix");
+    let mut fixed = before.to_owned();
+    for edit in fix.edits.iter().rev() {
+        fixed.replace_range(std::ops::Range::<usize>::from(edit.range), &edit.insert);
+    }
+    assert_eq!(fixed, after);
+    let file = SourceFile::new(&db, "fixed.must".to_owned(), fixed);
+    let left_messages: String = crate::file_diagnostics(&db, file)
+        .into_iter()
+        .map(|d| d.message + "\n")
+        .collect();
+    left.assert_eq(&left_messages);
+}
+
+#[test]
+fn add_missing_members_fills_an_empty_impl() {
+    check_missing_members_fix(
+        r#"
+type Cmp = enum { Less, Equal, Greater };
+trait Ord = requires {
+    ord: fn::<@a>(Self.&::<@a>, Self.&::<@a>) -> Cmp;
+    min: fn::<@a>(Self.&::<@a>, Self.&::<@a>) -> Self.&::<@a>;
+} with {
+    impl usize {}
+};
+"#,
+        r#"
+type Cmp = enum { Less, Equal, Greater };
+trait Ord = requires {
+    ord: fn::<@a>(Self.&::<@a>, Self.&::<@a>) -> Cmp;
+    min: fn::<@a>(Self.&::<@a>, Self.&::<@a>) -> Self.&::<@a>;
+} with {
+    impl usize {
+        ord = fn::<@a>(a: Self.&::<@a>, b: Self.&::<@a>) -> Cmp { panic("unimplemented ord") };
+        min = fn::<@a>(a: Self.&::<@a>, b: Self.&::<@a>) -> Self.&::<@a> { panic("unimplemented min") };
+    }
+};
+"#,
+        expect![""],
+    );
+}
+
+#[test]
+fn add_missing_members_goes_after_the_last_member() {
+    check_missing_members_fix(
+        r#"
+trait Write = requires { push: fn(str, Self) -> Self; };
+trait Show = requires {
+    fmt: fn::<W: Write>(W, Self) -> W;
+    width: fn(Self) -> usize;
+};
+type P = struct { a: usize } with {
+    impl Show {
+        width = fn(_p: Self) -> usize { 1 };
+    }
+};
+"#,
+        r#"
+trait Write = requires { push: fn(str, Self) -> Self; };
+trait Show = requires {
+    fmt: fn::<W: Write>(W, Self) -> W;
+    width: fn(Self) -> usize;
+};
+type P = struct { a: usize } with {
+    impl Show {
+        width = fn(_p: Self) -> usize { 1 };
+        fmt = fn::<W: Write>(a: W, b: Self) -> W { panic("unimplemented fmt") };
+    }
+};
+"#,
+        expect![""],
+    );
+}
+
+/// On a one-line impl the stubs go after the last member and the `}`
+/// moves to its own line.
+#[test]
+fn add_missing_members_breaks_a_one_line_impl() {
+    check_missing_members_fix(
+        r#"
+trait Show = requires { show: fn(Self) -> usize; width: fn(Self) -> usize; } with {
+    impl usize { width = fn(_x: usize) -> usize { 1 }; }
+};
+"#,
+        r#"
+trait Show = requires { show: fn(Self) -> usize; width: fn(Self) -> usize; } with {
+    impl usize { width = fn(_x: usize) -> usize { 1 };
+        show = fn(a: Self) -> usize { panic("unimplemented show") };
+    }
+};
+"#,
+        expect![""],
+    );
+}
+
+/// A requirement with its own error gets no stub; the others still do.
+#[test]
+fn add_missing_members_skips_a_broken_requirement() {
+    check_missing_members_fix(
+        r#"
+trait D = requires { m: fn(Self); n: fn(Self) -> usize; } with {
+    impl usize {}
+};
+"#,
+        r#"
+trait D = requires { m: fn(Self); n: fn(Self) -> usize; } with {
+    impl usize {
+        n = fn(a: Self) -> usize { panic("unimplemented n") };
+    }
+};
+"#,
+        expect![[r#"
+            requirement `m` must spell its full signature: every parameter's type and the return type
+            this impl of `D` is missing the member `m`
+        "#]],
+    );
+}
+
+/// A body-elided impl gets a body holding the stubs.
+#[test]
+fn add_missing_members_gives_a_body_elided_impl_a_body() {
+    check_missing_members_fix(
+        r#"
+trait D = requires { m: fn(Self) -> usize; } with {
+    impl usize;
+};
+"#,
+        r#"
+trait D = requires { m: fn(Self) -> usize; } with {
+    impl usize {
+        m = fn(a: Self) -> usize { panic("unimplemented m") };
+    }
+};
+"#,
+        expect![""],
+    );
+}
+
+/// [`check_missing_members_fix`] on a library fixture: the fix in the
+/// file at `path`, which `after` is that file's text after.
+fn check_library_missing_members_fix(fixture: &str, path: &str, after: &str, left: Expect) {
+    let mut db = RootDatabase::default();
+    let files = base_db::fixture_files(fixture);
+    let library = base_db::new_library(&mut db, "", files.clone());
+    let (index, file) = (library.iter().enumerate())
+        .find(|(_, file)| file.path(&db) == path)
+        .expect("the fixture has the file");
+    let diagnostics = crate::file_diagnostics(&db, *file);
+    let fix = diagnostics
+        .iter()
+        .filter_map(|d| d.fix.as_ref())
+        .find(|fix| fix.label == "Add missing members")
+        .expect("an \"Add missing members\" fix");
+    let mut fixed = file.text(&db).clone();
+    for edit in fix.edits.iter().rev() {
+        fixed.replace_range(std::ops::Range::<usize>::from(edit.range), &edit.insert);
+    }
+    assert_eq!(fixed, after.strip_prefix('\n').unwrap_or(after));
+    let mut files = files;
+    files[index].1 = fixed;
+    let mut db = RootDatabase::default();
+    let mut left_messages = String::new();
+    for file in base_db::new_library(&mut db, "", files) {
+        for d in crate::file_diagnostics(&db, file) {
+            left_messages.push_str(&format!("{}: {}\n", file.path(&db), d.message));
+        }
+    }
+    left.assert_eq(&left_messages);
+}
+
+/// A stub for a trait of another module imports the types and traits it
+/// names that the impl's file doesn't see.
+#[test]
+fn add_missing_members_imports_what_the_stub_names() {
+    check_library_missing_members_fix(
+        r#"
+//- a.must
+type Cmp = enum { Less, Equal, Greater };
+trait Write = requires { put: fn(Self) -> usize; };
+trait Ord = requires {
+    ord: fn(Self, Self) -> Cmp;
+    out: fn::<W: Write>(Self, W) -> W;
+};
+//- b.must
+use a::Ord;
+type P = struct { x: usize } with {
+    impl Ord {}
+};
+"#,
+        "b.must",
+        r#"
+use a::Cmp;
+use a::Write;
+use a::Ord;
+type P = struct { x: usize } with {
+    impl Ord {
+        ord = fn(a: Self, b: Self) -> Cmp { panic("unimplemented ord") };
+        out = fn::<W: Write>(a: Self, b: W) -> W { panic("unimplemented out") };
+    }
+};
+"#,
+        expect![[r#""#]],
+    );
+}
+
+/// A requirement naming an item whose name the impl's file uses for
+/// something else gets no stub: the fix never makes up a name.
+#[test]
+fn add_missing_members_skips_a_requirement_whose_name_is_taken() {
+    check_library_missing_members_fix(
+        r#"
+//- a.must
+type Cmp = enum { Less, Equal, Greater };
+trait Ord = requires {
+    ord: fn(Self, Self) -> Cmp;
+    id: fn(Self) -> Self;
+};
+//- b.must
+use a::Ord;
+type Cmp = struct { x: usize };
+type P = struct { x: usize } with {
+    impl Ord {}
+};
+"#,
+        "b.must",
+        r#"
+use a::Ord;
+type Cmp = struct { x: usize };
+type P = struct { x: usize } with {
+    impl Ord {
+        id = fn(a: Self) -> Self { panic("unimplemented id") };
+    }
+};
+"#,
+        expect![[r#"
+            b.must: this impl of `Ord` is missing the member `ord`
+        "#]],
+    );
+}
+
+/// A type the impl's file already imports under another name is written
+/// with that name.
+#[test]
+fn add_missing_members_uses_the_impl_files_own_name() {
+    check_library_missing_members_fix(
+        r#"
+//- a.must
+type Cmp = enum { Less, Equal, Greater };
+trait Ord = requires { ord: fn(Self, Self) -> Cmp; };
+//- b.must
+use a::{Ord, Cmp as Ordering};
+type Cmp = struct { x: usize };
+type P = struct { x: usize } with {
+    impl Ord {}
+};
+"#,
+        "b.must",
+        r#"
+use a::{Ord, Cmp as Ordering};
+type Cmp = struct { x: usize };
+type P = struct { x: usize } with {
+    impl Ord {
+        ord = fn(a: Self, b: Self) -> Ordering { panic("unimplemented ord") };
+    }
+};
+"#,
+        expect![[r#""#]],
+    );
+}
+
+/// A requirement naming a builtin the impl's file shadows gets no stub,
+/// and nothing imported for it.
+#[test]
+fn add_missing_members_skips_a_requirement_the_impl_file_cannot_name() {
+    check_library_missing_members_fix(
+        r#"
+//- a.must
+type Cmp = enum { Less, Equal, Greater };
+trait Ord = requires {
+    ord: fn(Self, Cmp) -> usize;
+    id: fn(Self) -> Self;
+};
+//- b.must
+use a::Ord;
+type usize = struct { x: bool };
+type P = struct { x: bool } with {
+    impl Ord {}
+};
+"#,
+        "b.must",
+        r#"
+use a::Ord;
+type usize = struct { x: bool };
+type P = struct { x: bool } with {
+    impl Ord {
+        id = fn(a: Self) -> Self { panic("unimplemented id") };
+    }
+};
+"#,
+        expect![[r#"
+            b.must: this impl of `Ord` is missing the member `ord`
+        "#]],
+    );
+}
+
+#[test]
+fn stub_params_run_a_to_z_then_p_numbered() {
+    assert_eq!(crate::stub_param_name(0), "a");
+    assert_eq!(crate::stub_param_name(25), "z");
+    assert_eq!(crate::stub_param_name(26), "p26");
+}
+
+#[test]
+fn impl_missing_members_are_one_error() {
+    check_diagnostics(
+        r#"
+trait D = requires { m: fn(Self) -> usize; n: fn(Self) -> usize; o: fn(Self) -> usize; } with {
+    impl usize {}
+};
+"#,
+        expect![[r#"
+            101..111: this impl of `D` is missing the members `m`, `n` and `o` (required by the trait here at 22..23) (required by the trait here at 44..45) (required by the trait here at 66..67)
         "#]],
     );
 }
