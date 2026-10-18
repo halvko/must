@@ -458,14 +458,22 @@ fn import_hints(
     let fix = match elsewhere.as_slice() {
         [declaration] => Some(syntax::Fix {
             label: format!("Import `{name}` from `{}`", declaration.module),
-            edits: vec![syntax::TextEdit {
-                range: TextRange::empty(0.into()),
-                insert: format!("use {}::{name};\n", declaration.module),
-            }],
+            edits: vec![use_items_edit([(declaration.module.as_str(), name)])],
         }),
         _ => None,
     };
     (fix, related)
+}
+
+/// The edit adding `use module::name;` for each `(module, name)`, at the
+/// top of the file.
+fn use_items_edit<'a>(items: impl IntoIterator<Item = (&'a str, &'a str)>) -> syntax::TextEdit {
+    syntax::TextEdit {
+        range: TextRange::empty(0.into()),
+        insert: (items.into_iter())
+            .map(|(module, name)| format!("use {module}::{name};\n"))
+            .collect(),
+    }
 }
 
 /// An error at a name, with [`import_hints`] when the file has no such name.
@@ -2257,18 +2265,6 @@ fn match_arms_fix<'db>(
             .is_none_or(|t| t.kind() != syntax::SyntaxKind::COMMA)
     });
 
-    // One line per missing arm, joined by `\n` with none trailing: whenever
-    // a line break already separates the anchor from the closing `}` (the
-    // common case — a multi-line arm list, or a comment sitting on its own
-    // line after the last arm), the buffer's own existing `\n{indent}}`
-    // supplies the final newline already, so appending another would leave
-    // a blank line. Only when NO line break sits between the anchor and
-    // `}` (a tight empty list, a space-separated one, or a non-empty list
-    // written on one line) is there no newline there to supply, so a
-    // trailing `\n{indent}` is synthesized instead. This is a property of
-    // the text between the two offsets, not of the offsets' equality: an
-    // empty arm list with a space before `}` (`match s { }`) has
-    // `anchor < r_brace_start` yet still needs the synthesized newline.
     let arm_lines: Vec<String> = missing
         .iter()
         .map(|(name, payload)| {
@@ -2280,32 +2276,19 @@ fn match_arms_fix<'db>(
                     format!("::{name}({})", binders.join(", "))
                 }
             };
-            format!(
-                "{indent}{}{pattern} => panic(\"unhandled ::{name}\"),",
-                syntax::INDENT_UNIT
-            )
+            format!("{pattern} => panic(\"unhandled ::{name}\"),")
         })
         .collect();
 
-    let mut insert = if needs_comma {
-        ",\n".to_owned()
-    } else {
-        "\n".to_owned()
-    };
-    insert.push_str(&arm_lines.join("\n"));
-    let has_line_break = text[usize::from(anchor)..usize::from(r_brace_start)].contains('\n');
-    if !has_line_break {
-        insert.push('\n');
-        insert.push_str(&indent);
-    }
-
-    Some(syntax::Fix {
-        label: "Add missing match arms".to_owned(),
-        edits: vec![syntax::TextEdit {
-            range: TextRange::empty(anchor),
-            insert,
-        }],
-    })
+    Some(syntax::insert_lines_fix(
+        "Add missing match arms",
+        text,
+        anchor,
+        r_brace_start,
+        &indent,
+        if needs_comma { "," } else { "" },
+        &arm_lines,
+    ))
 }
 
 /// Definition-site rules for inherent members, reported at the member's
@@ -2401,24 +2384,275 @@ impl<'db> MemberNameRanges<'db> {
 /// The name range of the requirement `name` in the trait declared at
 /// `trait_loc` — the "required here" related location.
 fn requirement_related(db: &dyn Db, trait_loc: &ItemLoc, name: &str) -> Vec<RelatedInfo> {
+    requirement_members(db, trait_loc, &[name])
+        .iter()
+        .filter_map(|req| required_here(trait_loc, req))
+        .collect()
+}
+
+/// The "required by the trait here" location of requirement `req`.
+fn required_here(trait_loc: &ItemLoc, req: &ast::Member) -> Option<RelatedInfo> {
+    Some(RelatedInfo {
+        file: trait_loc.file,
+        range: req.name()?.syntax().text_range(),
+        message: "required by the trait here".to_owned(),
+    })
+}
+
+/// The requirements of `trait_loc` named in `names`, in declaration order,
+/// the first of each name only.
+fn requirement_members(db: &dyn Db, trait_loc: &ItemLoc, names: &[&str]) -> Vec<ast::Member> {
     let Some(ast::Item::TraitItem(decl)) = item_source(db, trait_loc.to_id(db)) else {
         return Vec::new();
     };
     let Some(requires) = decl.requires_def() else {
         return Vec::new();
     };
+    let mut found: Vec<String> = Vec::new();
     requires
         .members()
-        .filter_map(|member| member.name())
-        .find(|n| n.text() == name)
-        .map(|n| {
-            vec![RelatedInfo {
-                file: trait_loc.file,
-                range: n.syntax().text_range(),
-                message: "required by the trait here".to_owned(),
-            }]
+        .filter(|member| {
+            let Some(name) = member.name().map(|n| n.text()) else {
+                return false;
+            };
+            if !names.contains(&name.as_str()) || found.contains(&name) {
+                return false;
+            }
+            found.push(name);
+            true
         })
-        .unwrap_or_default()
+        .collect()
+}
+
+const ADD_MISSING_MEMBERS: &str = "Add missing members";
+
+/// The "Add missing members" quick fix: a stub for each of `stubbed` (the
+/// missing requirements that spell their full signature) that `speller` can
+/// write, after the impl's last member or its `{`, with the `use` items its
+/// names need. A body-elided impl (`impl T;`) gets a body.
+fn missing_members_fix(
+    mut speller: StubSpeller<'_>,
+    element: &ast::ImplElement,
+    file_text: &str,
+    stubbed: &[ast::Member],
+) -> Option<syntax::Fix> {
+    let stubs: Vec<String> = stubbed
+        .iter()
+        .filter_map(|req| member_stub(&mut speller, req))
+        .collect();
+    if stubs.is_empty() {
+        return None;
+    }
+    let mut fix = members_fix(element, file_text, &stubs)?;
+    fix.edits.splice(0..0, speller.imports_edit());
+    Some(fix)
+}
+
+/// The edit that writes `stubs` into the impl's body.
+fn members_fix(
+    element: &ast::ImplElement,
+    file_text: &str,
+    stubs: &[String],
+) -> Option<syntax::Fix> {
+    let indent = syntax::line_indent(file_text, element.syntax().text_range().start());
+    let Some(r_brace) = element.r_brace_token() else {
+        let semicolon = element
+            .syntax()
+            .children_with_tokens()
+            .filter_map(|child| child.into_token())
+            .find(|token| token.kind() == syntax::SyntaxKind::SEMICOLON)?;
+        return Some(syntax::Fix {
+            label: ADD_MISSING_MEMBERS.to_owned(),
+            edits: vec![syntax::TextEdit {
+                range: semicolon.text_range(),
+                insert: format!(" {{{}\n{indent}}}", syntax::indented_lines(&indent, stubs)),
+            }],
+        });
+    };
+    let anchor = std::iter::successors(r_brace.prev_token(), |token| token.prev_token())
+        .find(|token| !token.kind().is_trivia())?;
+    Some(syntax::insert_lines_fix(
+        ADD_MISSING_MEMBERS,
+        file_text,
+        anchor.text_range().end(),
+        r_brace.text_range().start(),
+        &indent,
+        "",
+        stubs,
+    ))
+}
+
+/// `name = fn::<binder>(a: T, b: U) -> R { panic("unimplemented name") };`,
+/// its types written as `speller` spells them. The parameters get plain
+/// names; the unused-binding warning and its rename fix cover them.
+/// `panic(..)` types as `!`, so the body adds no error of its own.
+fn member_stub(speller: &mut StubSpeller<'_>, req: &ast::Member) -> Option<String> {
+    let mark = speller.mark();
+    let stub = write_member_stub(speller, req);
+    if stub.is_none() {
+        speller.reset(mark);
+    }
+    stub
+}
+
+fn write_member_stub(speller: &mut StubSpeller<'_>, req: &ast::Member) -> Option<String> {
+    let name = req.name()?.text();
+    let Some(ast::Type::FnType(fn_type)) = req.ty() else {
+        return None;
+    };
+    let binder: Vec<String> = fn_type
+        .syntax()
+        .descendants()
+        .filter_map(|node| match ast::GenericParam::cast(node)? {
+            ast::GenericParam::TypeParam(param) => param.name(),
+            ast::GenericParam::ConstParam(param) => param.name(),
+            ast::GenericParam::RegionParam(_) => None,
+        })
+        .map(|name| name.text())
+        .collect();
+    let binder_text = match fn_type.generic_param_list() {
+        Some(list) => speller.spell(list.syntax(), &binder)?,
+        None => String::new(),
+    };
+    let params = fn_type
+        .params_types()
+        .into_iter()
+        .enumerate()
+        .map(|(index, ty)| {
+            let ty = speller.spell(ty?.syntax(), &binder)?;
+            Some(format!("{}: {ty}", stub_param_name(index)))
+        })
+        .collect::<Option<Vec<_>>>()?
+        .join(", ");
+    let ret = speller.spell(fn_type.ret_type()?.ty()?.syntax(), &binder)?;
+    Some(format!(
+        "{name} = fn{binder_text}({params}) -> {ret} {{ panic(\"unimplemented {name}\") }};"
+    ))
+}
+
+/// Writes a requirement's types for an impl in another file. A type or
+/// trait name the impl's file resolves to something else is written as the
+/// impl file's own name for that item, or imported under its declared name
+/// when the impl's file has that name free.
+struct StubSpeller<'db> {
+    db: &'db dyn Db,
+    trait_file: SourceFile,
+    impl_file: SourceFile,
+    /// The items the stubs import, each once.
+    imports: Vec<StubImport>,
+}
+
+/// An item a stub imports under its declared `name`.
+struct StubImport {
+    loc: ItemLoc,
+    module: String,
+    name: String,
+}
+
+impl<'db> StubSpeller<'db> {
+    fn new(db: &'db dyn Db, trait_file: SourceFile, impl_file: SourceFile) -> Self {
+        StubSpeller {
+            db,
+            trait_file,
+            impl_file,
+            imports: Vec::new(),
+        }
+    }
+
+    /// How many items the speller imports, for [`Self::reset`].
+    fn mark(&self) -> usize {
+        self.imports.len()
+    }
+
+    /// Drops the imports added since `mark`: a stub that failed halfway
+    /// needs none of them.
+    fn reset(&mut self, mark: usize) {
+        self.imports.truncate(mark);
+    }
+
+    /// The edit adding the `use` items the stubs need, if they need any.
+    fn imports_edit(&self) -> Option<syntax::TextEdit> {
+        (!self.imports.is_empty()).then(|| {
+            use_items_edit(
+                (self.imports.iter()).map(|import| (import.module.as_str(), import.name.as_str())),
+            )
+        })
+    }
+
+    /// `node`'s text with each type and trait name spelled for the impl's
+    /// file. `binder` names the params of the binders in it, which stay as
+    /// written. `None` when a name has no spelling there.
+    fn spell(&mut self, node: &syntax::SyntaxNode, binder: &[String]) -> Option<String> {
+        let start = node.text_range().start();
+        let mut text = node.text().to_string();
+        let mut respelled = Vec::new();
+        for path in node.descendants().filter_map(ast::PathType::cast) {
+            let Some(name_ref) = path.name_ref() else {
+                continue;
+            };
+            let name = name_ref.text();
+            if name.is_empty() || name == "Self" || binder.contains(&name) {
+                continue;
+            }
+            let spelling = self.spelling(&name)?;
+            if spelling != name {
+                respelled.push((name_ref.syntax().text_range() - start, spelling));
+            }
+        }
+        for (range, spelling) in respelled.into_iter().rev() {
+            text.replace_range(std::ops::Range::<usize>::from(range), &spelling);
+        }
+        Some(text)
+    }
+
+    /// What the impl's file calls the item `name` names in the trait's file.
+    fn spelling(&mut self, name: &str) -> Option<String> {
+        if self.trait_file == self.impl_file {
+            return Some(name.to_owned());
+        }
+        let wanted = scopes::file_scope(self.db, self.trait_file).resolve(name);
+        let scope = scopes::file_scope(self.db, self.impl_file);
+        if scope.resolve(name) == wanted {
+            return Some(name.to_owned());
+        }
+        // A builtin the impl's file shadows, or an ambiguous name, has no
+        // spelling there.
+        let Some(Resolution::TypeItem(loc) | Resolution::TraitItem(loc)) = &wanted else {
+            return None;
+        };
+        if let Some(own) = scope
+            .iter()
+            .filter(|(_, resolution)| Some(resolution) == wanted.as_ref())
+            .map(|(own, _)| own)
+            .min()
+        {
+            return Some(own.to_owned());
+        }
+        if let Some(import) = self.imports.iter().find(|import| import.loc == *loc) {
+            return Some(import.name.clone());
+        }
+        let name = item_source(self.db, loc.to_id(self.db))?.name()?.text();
+        let free = scope.resolve(&name).is_none()
+            && scopes::Builtin::by_name(&name).is_none()
+            && !self.imports.iter().any(|import| import.name == name);
+        if !free {
+            return None;
+        }
+        self.imports.push(StubImport {
+            loc: loc.clone(),
+            module: library::module_path(self.db, loc.file)?,
+            name: name.clone(),
+        });
+        Some(name)
+    }
+}
+
+/// `a` through `z`, then `p26`, `p27`, ...
+fn stub_param_name(index: usize) -> String {
+    match u8::try_from(index).ok().filter(|i| *i < 26) {
+        Some(i) => char::from(b'a' + i).to_string(),
+        None => format!("p{index}"),
+    }
 }
 
 /// Definition-site rules for the trait layer: requirement well-formedness,
@@ -2670,23 +2904,11 @@ fn trait_definition_diagnostics(db: &dyn Db, file: SourceFile, diagnostics: &mut
             )
             .collect();
         let member_ranges = MemberNameRanges::new(db, owner_id);
+        let mut missing: Vec<&item_tree::TraitRequirement> = Vec::new();
         for req in requirements {
             let qualified = format!("{}::{}", site.head, req.name);
             let Some(member) = site_members.iter().find(|m| m.name == qualified) else {
-                let Some(range) = impl_range() else {
-                    continue;
-                };
-                diagnostics.push(Diagnostic {
-                    range,
-                    severity: Severity::Error,
-                    message: format!(
-                        "this impl of `{}` is missing the member `{}`",
-                        trait_loc.display_name(),
-                        req.name
-                    ),
-                    fix: None,
-                    related: requirement_related(db, trait_loc, &req.name),
-                });
+                missing.push(req);
                 continue;
             };
             // A member that isn't fully annotated already carries its own
@@ -2757,6 +2979,49 @@ fn trait_definition_diagnostics(db: &dyn Db, file: SourceFile, diagnostics: &mut
                     related: requirement_related(db, trait_loc, &req.name),
                 });
             }
+        }
+        if !missing.is_empty()
+            && let Some(range) = impl_range()
+        {
+            let names: Vec<&str> = missing.iter().map(|req| req.name.as_str()).collect();
+            let missing_reqs = requirement_members(db, trait_loc, &names);
+            // A requirement that does not spell its full signature carries
+            // its own error and gets no stub.
+            let stubbed: Vec<ast::Member> = missing_reqs
+                .iter()
+                .filter(|member| {
+                    let name = member.name().map(|n| n.text());
+                    missing
+                        .iter()
+                        .any(|req| name.as_deref() == Some(req.name.as_str()) && req.sig.is_some())
+                })
+                .cloned()
+                .collect();
+            let names = names
+                .iter()
+                .map(|name| format!("`{name}`"))
+                .collect::<Vec<_>>();
+            let message = match names.split_last() {
+                Some((last, [])) => format!("the member {last}"),
+                Some((last, rest)) => format!("the members {} and {last}", rest.join(", ")),
+                None => unreachable!("`missing` is not empty"),
+            };
+            diagnostics.push(Diagnostic {
+                range,
+                severity: Severity::Error,
+                message: format!(
+                    "this impl of `{}` is missing {message}",
+                    trait_loc.display_name()
+                ),
+                fix: element().as_ref().and_then(|element| {
+                    let speller = StubSpeller::new(db, trait_loc.file, file);
+                    missing_members_fix(speller, element, file.text(db), &stubbed)
+                }),
+                related: missing_reqs
+                    .iter()
+                    .filter_map(|req| required_here(trait_loc, req))
+                    .collect(),
+            });
         }
         for member in &site_members {
             if !requirements

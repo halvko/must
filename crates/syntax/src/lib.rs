@@ -70,6 +70,47 @@ pub fn line_indent(text: &str, offset: TextSize) -> String {
         .collect()
 }
 
+/// A [`Fix`] inserting `lines` into a braced list at `anchor` (the end of
+/// its last entry, or of its `{`), one per line, one [`INDENT_UNIT`] deeper
+/// than `indent`, after `prefix` (a separator the last entry still needs).
+/// `close` is the offset of the closing `}`, which ends on a line of its own.
+pub fn insert_lines_fix(
+    label: &str,
+    text: &str,
+    anchor: TextSize,
+    close: TextSize,
+    indent: &str,
+    prefix: &str,
+    lines: &[String],
+) -> Fix {
+    let mut insert = prefix.to_owned();
+    insert.push_str(&indented_lines(indent, lines));
+    // An existing line break before `}` already ends the last line; adding
+    // one would leave a blank line. A spaces-only gap is replaced.
+    let gap = &text[usize::from(anchor)..usize::from(close)];
+    let mut range = TextRange::empty(anchor);
+    if !gap.contains('\n') {
+        insert.push('\n');
+        insert.push_str(indent);
+        if gap.trim().is_empty() {
+            range = TextRange::new(anchor, close);
+        }
+    }
+    Fix {
+        label: label.to_owned(),
+        edits: vec![TextEdit { range, insert }],
+    }
+}
+
+/// `lines`, each on a line of its own one [`INDENT_UNIT`] deeper than
+/// `indent`: every line starts with a line break.
+pub fn indented_lines(indent: &str, lines: &[String]) -> String {
+    lines
+        .iter()
+        .map(|line| format!("\n{indent}{INDENT_UNIT}{line}"))
+        .collect()
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum MustLanguage {}
 
