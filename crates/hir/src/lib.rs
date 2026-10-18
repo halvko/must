@@ -1387,6 +1387,117 @@ pub fn file_diagnostics(db: &dyn Db, file: SourceFile) -> Vec<Diagnostic> {
                     .map(|dot| {
                         insert_before_dot(&dot, if *mutable { ".&mut" } else { ".&" }, name)
                     }),
+                // The member spelled through the one trait that provides
+                // it: `P::m(p)` becomes `D::m(p)`. With several providers
+                // the choice is the user's.
+                InferenceDiagnostic::QualifiedTraitMemberOnType {
+                    expr,
+                    member,
+                    traits,
+                    ..
+                } => match traits.as_slice() {
+                    [trait_name] => source_map
+                        .node_for_expr(*expr)
+                        .and_then(|ptr| ast::PathExpr::cast(ptr.to_node(&syntax_root)))
+                        .filter(|path| path.generic_arg_list().is_none())
+                        .and_then(|path| path.name_ref())
+                        .map(|owner| syntax::Fix {
+                            label: format!("Write `{trait_name}::{member}`"),
+                            edits: vec![syntax::TextEdit {
+                                range: owner.syntax().text_range(),
+                                insert: trait_name.clone(),
+                            }],
+                        }),
+                    _ => None,
+                },
+                // `::` in front of the name turns the binding into the
+                // variant it shadows; the short spelling, since the
+                // scrutinee's type already names the enum.
+                InferenceDiagnostic::BindShadowsVariant { pat, name, .. } => source_map
+                    .node_for_pat(*pat)
+                    .and_then(|ptr| ast::BindPat::cast(ptr.to_node(&syntax_root)))
+                    .filter(|bind| bind.mut_token().is_none())
+                    .map(|bind| syntax::Fix {
+                        label: format!("Match the variant `::{name}`"),
+                        edits: vec![syntax::TextEdit {
+                            range: TextRange::empty(bind.syntax().text_range().start()),
+                            insert: "::".to_owned(),
+                        }],
+                    }),
+                // `..` after the last field, when nothing it skips has to
+                // be consumed (then `..` is its own error).
+                InferenceDiagnostic::PatMissingFields { pat, fields, .. }
+                    if (fields.iter()).all(|(_, ty)| capability::has_forget(db, ty)) =>
+                {
+                    source_map
+                        .node_for_pat(*pat)
+                        .and_then(|ptr| {
+                            ptr.to_node(&syntax_root)
+                                .descendants()
+                                .find_map(ast::RecordPat::cast)
+                        })
+                        .and_then(|record| {
+                            let edit = match record.fields().last() {
+                                Some(last) => syntax::TextEdit {
+                                    range: TextRange::empty(last.syntax().text_range().end()),
+                                    insert: ", ..".to_owned(),
+                                },
+                                None => syntax::TextEdit {
+                                    range: TextRange::empty(
+                                        record.l_brace_token()?.text_range().end(),
+                                    ),
+                                    insert: " .. ".to_owned(),
+                                },
+                            };
+                            Some(syntax::Fix {
+                                label: "Add `..`".to_owned(),
+                                edits: vec![edit],
+                            })
+                        })
+                }
+                // The arguments the message says belong to the owner, moved
+                // there: `Pair::first::<usize>` becomes
+                // `Pair::<usize>::first`.
+                InferenceDiagnostic::NotGeneric {
+                    expr,
+                    owner_list_hint: Some(owner),
+                    ..
+                }
+                | InferenceDiagnostic::VariantOwnGenericArgs {
+                    expr,
+                    owner,
+                    suggest_owner_list: true,
+                    ..
+                } => source_map
+                    .node_for_expr(*expr)
+                    .and_then(|ptr| ast::PathExpr::cast(ptr.to_node(&syntax_root)))
+                    .and_then(|path| owner_args_fix(&path, owner)),
+                // A record where a named type is wanted: construct the
+                // named type from it, as the message says.
+                InferenceDiagnostic::TypeMismatch {
+                    expr,
+                    expected: Ty::Named(named),
+                    actual: Ty::Record(_),
+                    ..
+                } if ty::enum_variants(db, named.decl.to_id(db)).is_none() => {
+                    source_map.node_for_expr(*expr).map(|ptr| {
+                        let range = ptr.text_range();
+                        let name = named.decl.display_name();
+                        syntax::Fix {
+                            label: format!("Construct a `{name}`"),
+                            edits: vec![
+                                syntax::TextEdit {
+                                    range: TextRange::empty(range.start()),
+                                    insert: format!("{name}("),
+                                },
+                                syntax::TextEdit {
+                                    range: TextRange::empty(range.end()),
+                                    insert: ")".to_owned(),
+                                },
+                            ],
+                        }
+                    })
+                }
                 InferenceDiagnostic::TypeMismatch {
                     expr,
                     expected,
@@ -2219,6 +2330,30 @@ fn insert_before_dot(dot: &syntax::SyntaxToken, text: &str, name: &str) -> synta
             insert: text.to_owned(),
         }],
     }
+}
+
+/// Moves a path's second-segment turbofish onto its first segment, where
+/// `owner` (the first segment's name) declares the binder.
+fn owner_args_fix(path: &ast::PathExpr, owner: &str) -> Option<syntax::Fix> {
+    let owner_ref = path.name_ref()?;
+    let member_args = path.member_generic_args()?;
+    let args = member_args.generic_arg_list()?;
+    if path.generic_arg_list().is_some() {
+        return None;
+    }
+    Some(syntax::Fix {
+        label: format!("Move the arguments to `{owner}`"),
+        edits: vec![
+            syntax::TextEdit {
+                range: TextRange::empty(owner_ref.syntax().text_range().end()),
+                insert: format!("::{}", args.syntax().text()),
+            },
+            syntax::TextEdit {
+                range: member_args.syntax().text_range(),
+                insert: String::new(),
+            },
+        ],
+    })
 }
 
 /// The fix for a borrow `found` where its referent `wanted` is wanted:

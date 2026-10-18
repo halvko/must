@@ -296,6 +296,7 @@ fn errors_checks_dirty_with_the_documented_count() {
                |
             67 |         Point => "point",
                |         ^^^^^
+               = help: Match the variant `::Point`
                = note: `Shape` is defined here (examples/errors.must:29:6)
 
             error: type mismatch: expected `{number}`, found `T`
