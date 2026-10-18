@@ -588,7 +588,7 @@ static present = fn(x: usize) -> usize { x.m() + D::m(x) + D::<Self = usize>::m(
 static missing = fn(x: usize) -> usize { x.n() + D::n(x) + D::<Self = usize>::n(x) };
 "#,
         expect![[r#"
-            79..89: this impl of `D` is missing the member `n` (required by the trait here at 44..45)
+            79..89: this impl of `D` is missing the member `n` (`n` is required by `D` here at 44..45)
         "#]],
     );
 }
