@@ -661,6 +661,23 @@ type Cell = struct { n: usize } with {
 }
 
 #[test]
+fn a_bare_impl_element_is_one_diagnostic() {
+    // Its members are not live (no `with` group), so their `Self` is not
+    // judged as an unknown type next to the missing-`with` error.
+    let src = "type Point = struct { x: usize } impl { origin = fn() -> Self { Point(struct { x = 0 }) }; };";
+    let (analysis, file, _pos) = fixture(&format!("{src}$0"));
+    let messages: Vec<_> = analysis
+        .diagnostics(file)
+        .into_iter()
+        .map(|d| d.message)
+        .collect();
+    assert_eq!(
+        messages,
+        ["an `impl` goes inside a `with` group: `with { impl Self { ... } }`"]
+    );
+}
+
+#[test]
 fn diagnostics_include_const_check_findings() {
     // Item initializers are const contexts; `double` is a plain `fn`, so
     // calling it there is rejected — squiggle on the callee.
