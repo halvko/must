@@ -650,6 +650,19 @@ pub fn prelude_loc(db: &dyn Db, name: &str) -> ItemLoc {
     ItemLoc::top_level(base_db::prelude_file(db), std::sync::Arc::from(name), 0)
 }
 
+/// The prelude function `a[i]` calls: `index` for a read or a `.&`
+/// borrow, `index_mut` when the element is written or borrowed `.&mut`.
+pub fn prelude_index_loc(db: &dyn Db, mutable: bool) -> ItemLoc {
+    prelude_loc(db, if mutable { "index_mut" } else { "index" })
+}
+
+/// Whether `a[i]` in `file` is a call of [`prelude_index_loc`]: everywhere
+/// but in the prelude itself, where `[i]` is the element step `index` and
+/// `index_mut` are written with.
+pub fn index_is_a_call(db: &dyn Db, file: SourceFile) -> bool {
+    file != base_db::prelude_file(db)
+}
+
 /// The result-shaped return of `alloc_array` (and the library convention
 /// for fallible allocators built over it): a compiler-provided generic enum
 /// `AllocResult::<T> = enum { Ok(T.&raw mut), Err }`.

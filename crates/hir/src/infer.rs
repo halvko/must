@@ -4929,7 +4929,21 @@ impl<'a, 'db> InferCtx<'a, 'db> {
                         Ty::Error
                     }
                 };
-                self.carry_borrow_projection(expr, base, &element);
+                // Outside the prelude `a[i]` is `index(a.&, i).*`, so it
+                // starts a borrow-rooted chain the way a `.*` does: a read
+                // that would copy the element out is judged by
+                // [`Self::finish_deref_reads`], and a place position
+                // passes the question on.
+                if crate::scopes::index_is_a_call(self.db, self.file)
+                    && matches!(self.resolve_shallow(&base_ty), Ty::Array { .. })
+                {
+                    self.deref_reads.push((expr, element.clone()));
+                    if self.place_positions.contains(&expr) {
+                        self.borrow_projections.insert(expr);
+                    }
+                } else {
+                    self.carry_borrow_projection(expr, base, &element);
+                }
                 element
             }
             // `place.&raw` / `place.&raw mut`: the operand reads like any

@@ -3463,11 +3463,11 @@ static main = fn() -> usize {
 
 #[test]
 fn through_pointer_element_write_out_of_bounds_is_an_ordinary_trap() {
-    // The `[i]` step is the program's own checked indexing — an ordinary
-    // runtime trap with the same message as `a[i]`, symmetric with the
-    // `p.*[i]` read. (Pointers MINTED out of bounds are the UB case; a
-    // compile-time-known OOB index would be the planted squiggle trap
-    // instead — same message either way.)
+    // `p.*[i] = 0` is a write through `index_mut(p.*.&mut, i)`, so an
+    // index out of range is the prelude's panic, the same as for `a[i]`
+    // and for the `p.*[i]` read. (Pointers MINTED out of bounds are the
+    // UB case; a compile-time-known OOB index would be the planted
+    // squiggle trap instead — same message either way.)
     check_run(
         r#"
 static main = fn() {
@@ -3479,7 +3479,7 @@ static main = fn() {
 "#,
         "main()",
         expect![[r#"
-            error[Runtime]: index out of bounds: the length is 2 but the index is 5
+            error[Panic]: index out of bounds: the length is 2 but the index is 5
         "#]],
     );
 }
@@ -3561,10 +3561,11 @@ static main = fn() -> usize {
 }
 
 #[test]
-fn addr_of_out_of_bounds_element_mints_silently_and_derefs_as_ub() {
-    // Address-taking never bounds-checks (validity is a deref-time
-    // judgement): the out-of-range address mints fine, the deref is
-    // detected UB.
+fn an_out_of_bounds_raw_element_address_panics() {
+    // `a[i].&raw mut` is an element step like any other: it goes through
+    // the prelude's checked `index_mut`, so an out-of-range index panics
+    // before any pointer exists. An address past the end is an unsafe
+    // operation's job (`add` below), not indexing's.
     check_run(
         r#"
 static main = fn() -> usize {
@@ -3576,7 +3577,7 @@ static main = fn() -> usize {
 "#,
         "main()",
         expect![[r#"
-            error[UndefinedBehavior]: out-of-bounds pointer — it points to element 5 of an array with 2 elements
+            error[Panic]: index out of bounds: the length is 2 but the index is 5
         "#]],
     );
 }
@@ -3584,13 +3585,13 @@ static main = fn() -> usize {
 #[test]
 fn out_of_bounds_pointer_traps_deterministically() {
     // Same program, two fresh machines: identical trap kind and message —
-    // the determinism pin for the new UB wording.
+    // the determinism pin for the new UB wording. The pointer is pushed out
+    // of range with `add`: indexing itself would panic first.
     let text = r#"
 static main = fn() -> usize {
     let mut a = [1, 2];
-    let i = 5;
-    let p = a[i].&raw mut;
-    unsafe { p.* = 9; a[0] }
+    let p = a[0].&raw mut;
+    unsafe { add(p, 5).* = 9; a[0] }
 };
 static entrypoint = (main());
 "#;
@@ -3857,7 +3858,7 @@ static main = fn () -> usize {
 }
 
 #[test]
-fn runtime_out_of_bounds_read_traps_deterministically() {
+fn runtime_out_of_bounds_read_panics() {
     check_run(
         r#"
 static get = fn (a: [usize; 2], i: usize) -> usize { a[i] };
@@ -3865,13 +3866,13 @@ static main = fn () -> usize { get([1, 2], 5) };
 "#,
         "main()",
         expect![[r#"
-            error[Runtime]: index out of bounds: the length is 2 but the index is 5
+            error[Panic]: index out of bounds: the length is 2 but the index is 5
         "#]],
     );
 }
 
 #[test]
-fn runtime_out_of_bounds_write_traps() {
+fn runtime_out_of_bounds_write_panics() {
     check_run(
         r#"
 static set = fn (i: usize) -> usize {
@@ -3882,7 +3883,7 @@ static set = fn (i: usize) -> usize {
 "#,
         "set(2)",
         expect![[r#"
-            error[Runtime]: index out of bounds: the length is 2 but the index is 2
+            error[Panic]: index out of bounds: the length is 2 but the index is 2
         "#]],
     );
 }
@@ -5984,7 +5985,10 @@ static f = fn () -> usize {
 }
 
 #[test]
-fn disjoint_array_element_borrows_coexist() {
+fn a_second_element_borrow_invalidates_the_first() {
+    // `a[1].&mut` borrows through `index_mut(a.&mut, 1)`, a borrow of the
+    // whole array, so it ends `b0` just as `a.&mut` would. The checker
+    // refuses this statically; past it, the aliasing tree agrees.
     check_run_past_the_cfg_checkers(
         r#"
 static set = fn::<@a>(m: usize.&mut::<@a>, v: usize) -> () { m.* = v; };
@@ -5999,7 +6003,9 @@ static f = fn () -> usize {
 "#,
         "f()",
         expect![[r#"
-            => 30
+            error[UndefinedBehavior]: write through a borrow that is no longer valid: the value was borrowed again, written through another borrow, or moved away, while this borrow was still live
+              note: this borrow was created here
+              note: invalidated here — the value was borrowed again, written through another borrow, or moved away
         "#]],
     );
 }
@@ -6031,7 +6037,10 @@ static f = fn () -> usize {
 }
 
 #[test]
-fn reading_one_element_through_a_wide_borrow_does_not_kill_a_sibling_element_child() {
+fn reading_an_element_through_a_wide_borrow_suspends_a_sibling_element_child() {
+    // `b.*[0]` reads through `index(b.*.&, 0)`, a shared borrow of the
+    // whole array, which suspends the exclusive `c` under it. Fields have
+    // no such call, so the field twin above is accepted.
     check_run_past_the_cfg_checkers(
         r#"
 static f = fn () -> usize {
@@ -6045,7 +6054,9 @@ static f = fn () -> usize {
 "#,
         "f()",
         expect![[r#"
-            => 10
+            error[UndefinedBehavior]: write through a borrow that was suspended by a read of the same place while this borrow was live
+              note: this borrow was created here
+              note: suspended here — the place was read while this exclusive borrow was live
         "#]],
     );
 }
@@ -6101,7 +6112,9 @@ static f = fn () -> usize {
 }
 
 #[test]
-fn reading_a_sibling_element_by_name_does_not_kill_an_element_child() {
+fn reading_a_sibling_element_suspends_an_element_borrow() {
+    // `a[1]` is `index(a.&, 1).*`: a shared borrow of the whole array, so
+    // the exclusive `b0` it overlaps is suspended.
     check_run_past_the_cfg_checkers(
         r#"
 static f = fn () -> usize {
@@ -6114,7 +6127,9 @@ static f = fn () -> usize {
 "#,
         "f()",
         expect![[r#"
-            => 11
+            error[UndefinedBehavior]: write through a borrow that was suspended by a read of the same place while this borrow was live
+              note: this borrow was created here
+              note: suspended here — the place was read while this exclusive borrow was live
         "#]],
     );
 }
@@ -6164,8 +6179,10 @@ static f = fn () -> usize {
 }
 
 #[test]
-fn reading_a_field_of_an_element_by_name_does_not_kill_its_sibling() {
-    // An index step then a field step: `a[0].x` carries `[0, x]`.
+fn reading_a_field_of_an_element_borrows_the_whole_array() {
+    // `a[0].x` reads through `index(a.&, 0)`, which borrows all of `a`
+    // while `c` holds `a[0].y` exclusively: the checker refuses the read,
+    // where a field step alone would carry the disjoint path `[0, x]`.
     check_run(
         r#"
 static f = fn () -> usize {
@@ -6179,7 +6196,7 @@ static f = fn () -> usize {
 "#,
         "f()",
         expect![[r#"
-            => 6
+            error[Trap]: borrowing `a` here invalidates an exclusive borrow of it that is still live: a `.&mut` is the only way to the value while it lasts, and this one is used after this point
         "#]],
     );
 }
@@ -6330,17 +6347,49 @@ static f = fn () -> usize {
 }
 
 #[test]
-fn copy_through_the_destination_is_foreign_to_a_live_borrow_of_an_element() {
-    // `copy` is memmove, not a route around the aliasing tree: a live
-    // safe borrow of an element the copy overwrites must be invalidated
-    // exactly as `a[0] = 7;` would invalidate it.
+fn copy_judges_its_destination_against_the_aliasing_tree() {
+    // `copy` is memmove, not a route around the aliasing tree: its write
+    // through a destination whose tag was invalidated is detected UB,
+    // exactly as `p.* = 7` would be.
+    //
+    // Every element pointer comes from a borrow of its array (`a[i].&raw`
+    // goes through the prelude's checked `index`), so a raw pointer and a
+    // live safe borrow of the same array cannot coexist: whichever is made
+    // second invalidates the first. The builtin's own judgement shows on
+    // the other side of that: the raw pointer's tag is already dead, and
+    // the builtin's access through it is the detected UB.
     check_run(
         r#"
 static f = fn () -> usize {
     let mut src: [usize; 1] = [7];
     let mut a: [usize; 2] = [1, 2];
-    let m = a[0].&mut;
-    unsafe { copy(src[0].&raw, a[0].&raw mut, 1); }
+    let p = a[0].&raw mut;
+    let m = a[1].&mut;
+    unsafe { copy(src[0].&raw, p, 1); }
+    m.*
+};
+"#,
+        "f()",
+        expect![[r#"
+            error[UndefinedBehavior]: write through a borrow that is no longer valid: the value was borrowed again, written through another borrow, or moved away, while this borrow was still live
+              note: this borrow was created here
+              note: invalidated here — the value was borrowed again, written through another borrow, or moved away
+        "#]],
+    );
+}
+
+#[test]
+fn copy_judges_its_source_against_the_aliasing_tree() {
+    // The other half of the same claim: the SOURCE range is read, element
+    // by element, through the aliasing tree.
+    check_run(
+        r#"
+static f = fn () -> usize {
+    let mut a: [usize; 2] = [1, 2];
+    let mut dst: [usize; 1] = [0];
+    let p = a[0].&raw;
+    let m = a[1].&mut;
+    unsafe { copy(p, dst[0].&raw mut, 1); }
     m.*
 };
 "#,
@@ -6349,31 +6398,6 @@ static f = fn () -> usize {
             error[UndefinedBehavior]: read through a borrow that is no longer valid: the value was borrowed again, written through another borrow, or moved away, while this borrow was still live
               note: this borrow was created here
               note: invalidated here — the value was borrowed again, written through another borrow, or moved away
-        "#]],
-    );
-}
-
-#[test]
-fn copy_through_the_source_is_foreign_to_a_live_borrow_of_an_element() {
-    // The other half of the same claim: the SOURCE range is read, element
-    // by element, so a live exclusive borrow of an element the copy reads
-    // is suspended exactly as `let v = a[0];` would suspend it.
-    check_run(
-        r#"
-static f = fn () -> usize {
-    let mut a: [usize; 2] = [1, 2];
-    let mut dst: [usize; 1] = [0];
-    let m = a[0].&mut;
-    unsafe { copy(a[0].&raw, dst[0].&raw mut, 1); }
-    m.* = 5;
-    a[0]
-};
-"#,
-        "f()",
-        expect![[r#"
-            error[UndefinedBehavior]: write through a borrow that was suspended by a read of the same place while this borrow was live
-              note: this borrow was created here
-              note: suspended here — the place was read while this exclusive borrow was live
         "#]],
     );
 }
@@ -7094,11 +7118,10 @@ static f = fn() -> i64 { unsafe { read(dangling::<u8>(), 0) } };
 }
 
 #[test]
-fn the_host_read_invalidates_a_safe_borrow_of_the_bytes_it_writes() {
+fn the_host_read_judges_its_buffer_against_the_aliasing_tree() {
     // The host's fill is a WRITE, judged against the aliasing tree like
-    // `copy`'s destination range: `m` borrows a byte the read overwrites,
-    // so reading through `m` afterwards is detected UB, exactly as it
-    // would be after `p.*[3] = v`.
+    // `copy`'s destination range: `m` invalidated `p`, so the fill through
+    // `p` is detected UB, exactly as `p.* = v` would be.
     check_run_with_input(
         r#"
 unsafe extern static read: unsafe fn(u8.&raw mut, usize) -> i64;
@@ -7113,7 +7136,7 @@ static f = fn() -> u8 {
         "f()",
         "abcd",
         expect![[r#"
-            error[UndefinedBehavior]: read through a borrow that is no longer valid: the value was borrowed again, written through another borrow, or moved away, while this borrow was still live
+            error[UndefinedBehavior]: write through a borrow that is no longer valid: the value was borrowed again, written through another borrow, or moved away, while this borrow was still live
               note: this borrow was created here
               note: invalidated here — the value was borrowed again, written through another borrow, or moved away
         "#]],
@@ -7154,15 +7177,16 @@ fn the_host_read_judges_aliasing_before_consuming_input() {
 unsafe extern static read: unsafe fn(u8.&raw mut, usize) -> i64;
 static f = fn () -> u8 {
     let mut a: [u8; 4] = [1, 2, 3, 4];
-    let m = a[0].&mut;
-    unsafe { read(a[0].&raw mut, 2); };
+    let p = a[0].&raw mut;
+    let m = a[1].&mut;
+    unsafe { read(p, 2); };
     m.*
 };
 "#,
         "f()",
         "",
         expect![[r#"
-            error[UndefinedBehavior]: read through a borrow that is no longer valid: the value was borrowed again, written through another borrow, or moved away, while this borrow was still live
+            error[UndefinedBehavior]: write through a borrow that is no longer valid: the value was borrowed again, written through another borrow, or moved away, while this borrow was still live
               note: this borrow was created here
               note: invalidated here — the value was borrowed again, written through another borrow, or moved away
         "#]],
@@ -7479,26 +7503,25 @@ static f = fn() -> str {
 }
 
 #[test]
-fn a_bless_is_foreign_to_a_live_borrow_of_a_byte_it_reads() {
+fn a_bless_judges_its_bytes_against_the_aliasing_tree() {
     // A bless reads its range through the aliasing tree, exactly as `copy`
-    // reads its source: blessing bytes is not a route around exclusivity,
-    // so a live exclusive borrow of one of them is suspended as `let v =
-    // a[0];` would suspend it.
+    // reads its source: blessing bytes through an invalidated pointer is
+    // detected UB, as `p.*` would be.
     check_run(
         r#"
 static f = fn () -> u8 {
     let mut a: [u8; 2] = [104, 105];
-    let m = a[0].&mut;
-    unsafe { str_from_utf8_unchecked(a[0].&raw, 2); };
-    m.* = 5;
-    a[0]
+    let p = a[0].&raw;
+    let m = a[1].&mut;
+    unsafe { str_from_utf8_unchecked(p, 2); };
+    m.*
 };
 "#,
         "f()",
         expect![[r#"
-            error[UndefinedBehavior]: write through a borrow that was suspended by a read of the same place while this borrow was live
+            error[UndefinedBehavior]: read through a borrow that is no longer valid: the value was borrowed again, written through another borrow, or moved away, while this borrow was still live
               note: this borrow was created here
-              note: suspended here — the place was read while this exclusive borrow was live
+              note: invalidated here — the value was borrowed again, written through another borrow, or moved away
         "#]],
     );
 }
@@ -7848,24 +7871,23 @@ static f = fn() -> u8 {
 }
 
 #[test]
-fn str_bytes_is_foreign_to_a_live_borrow_of_a_byte_it_writes() {
+fn str_bytes_judges_its_destination_against_the_aliasing_tree() {
     // The write-side mirror of the bless's read: `str_bytes` writes its
     // range through the aliasing tree, exactly as `copy`'s destination half
-    // does, so a live exclusive borrow of one of the bytes it overwrites is
-    // invalidated as `a[0] = 7;` would invalidate it. Writing bytes is not
-    // a route around exclusivity.
+    // does. Writing bytes is not a route around it.
     check_run(
         r#"
 static f = fn () -> u8 {
     let mut a: [u8; 4] = [1, 2, 3, 4];
-    let m = a[0].&mut;
-    unsafe { str_bytes("hi", a[0].&raw mut); };
+    let p = a[0].&raw mut;
+    let m = a[3].&mut;
+    unsafe { str_bytes("hi", p); };
     m.*
 };
 "#,
         "f()",
         expect![[r#"
-            error[UndefinedBehavior]: read through a borrow that is no longer valid: the value was borrowed again, written through another borrow, or moved away, while this borrow was still live
+            error[UndefinedBehavior]: write through a borrow that is no longer valid: the value was borrowed again, written through another borrow, or moved away, while this borrow was still live
               note: this borrow was created here
               note: invalidated here — the value was borrowed again, written through another borrow, or moved away
         "#]],
@@ -9881,4 +9903,298 @@ static main = fn() -> usize { print("a;"); one };
             error[Trap]: unexpected character `\`
         "#]],
     );
+}
+#[test]
+fn runtime_out_of_bounds_mut_borrow_panics_at_the_borrow() {
+    // Issue #184: `a[i].&mut` is `index_mut(a.&mut, i)`, so the bounds
+    // check panics at the borrow, never leaving an out-of-range borrow to
+    // deref.
+    check_run(
+        r#"
+static elem = fn (i: usize) -> usize {
+    let mut a: [usize; 3] = [7, 8, 9];
+    let e = a[i].&mut;
+    e.* = e.* + 1;
+    a[0]
+};
+"#,
+        "elem(3)",
+        expect![[r#"
+            error[Panic]: index out of bounds: the length is 3 but the index is 3
+        "#]],
+    );
+}
+
+#[test]
+fn runtime_out_of_bounds_shared_borrow_panics_at_the_borrow() {
+    check_run(
+        r#"
+static elem = fn (i: usize) -> usize {
+    let a: [usize; 3] = [7, 8, 9];
+    let e = a[i].&;
+    e.*
+};
+"#,
+        "elem(3)",
+        expect![[r#"
+            error[Panic]: index out of bounds: the length is 3 but the index is 3
+        "#]],
+    );
+}
+
+#[test]
+fn runtime_out_of_bounds_borrow_of_a_static_panics_at_the_borrow() {
+    check_run(
+        r#"
+static table: [usize; 3] = [7, 8, 9];
+static elem = fn (i: usize) -> usize {
+    let e = table[i].&;
+    e.*
+};
+"#,
+        "elem(3)",
+        expect![[r#"
+            error[Panic]: index out of bounds: the length is 3 but the index is 3
+        "#]],
+    );
+}
+
+#[test]
+fn in_bounds_borrow_of_a_static_reads_the_element() {
+    check_run(
+        r#"
+static table: [usize; 3] = [7, 8, 9];
+static elem = fn (i: usize) -> usize {
+    let e = table[i].&;
+    e.*
+};
+"#,
+        "elem(2)",
+        expect![[r#"
+            => 9
+        "#]],
+    );
+}
+
+#[test]
+fn runtime_out_of_bounds_borrow_of_a_static_field_panics_at_the_borrow() {
+    check_run(
+        r#"
+static s: struct { buf: [usize; 3] } = struct { buf = [7, 8, 9] };
+static elem = fn (i: usize) -> usize {
+    let e = s.buf[i].&;
+    e.*
+};
+"#,
+        "elem(3)",
+        expect![[r#"
+            error[Panic]: index out of bounds: the length is 3 but the index is 3
+        "#]],
+    );
+}
+
+#[test]
+fn in_bounds_borrow_of_a_static_field_reads_the_element() {
+    check_run(
+        r#"
+static s: struct { buf: [usize; 3] } = struct { buf = [7, 8, 9] };
+static elem = fn (i: usize) -> usize {
+    let e = s.buf[i].&;
+    e.*
+};
+"#,
+        "elem(1)",
+        expect![[r#"
+            => 8
+        "#]],
+    );
+}
+
+#[test]
+fn an_out_of_bounds_raw_address_of_a_static_element_panics() {
+    // The static twin: the element step goes through `index` too.
+    check_run(
+        r#"
+static table: [usize; 3] = [7, 8, 9];
+static elem = fn (i: usize) -> usize {
+    let p = table[i].&raw;
+    unsafe { p.* }
+};
+"#,
+        "elem(3)",
+        expect![[r#"
+            error[Panic]: index out of bounds: the length is 3 but the index is 3
+        "#]],
+    );
+}
+
+#[test]
+fn runtime_out_of_bounds_borrow_through_a_deref_panics_at_the_borrow() {
+    // `r.*[i]` checks `i` against the referent's length.
+    check_run(
+        r#"
+static elem = fn (i: usize) -> usize {
+    let mut a: [usize; 3] = [7, 8, 9];
+    let r = a.&mut;
+    let e = r.*[i].&mut;
+    e.*
+};
+"#,
+        "elem(3)",
+        expect![[r#"
+            error[Panic]: index out of bounds: the length is 3 but the index is 3
+        "#]],
+    );
+}
+
+#[test]
+fn in_bounds_mut_borrow_writes_through_to_the_array() {
+    check_run(
+        r#"
+static elem = fn (i: usize) -> usize {
+    let mut a: [usize; 3] = [7, 8, 9];
+    let e = a[i].&mut;
+    e.* = e.* + 1;
+    a[2]
+};
+"#,
+        "elem(2)",
+        expect![[r#"
+            => 10
+        "#]],
+    );
+}
+
+#[test]
+fn a_const_context_index_in_bounds_evaluates() {
+    check_run(
+        r#"
+static pick = const fn (a: [usize; 3], i: usize) -> usize { a[i] };
+static ok: usize = pick([7, 8, 9], 2);
+static main = fn () -> usize { ok + const { pick([1, 2, 3], 0) } };
+"#,
+        "main()",
+        expect![[r#"
+            => 10
+        "#]],
+    );
+}
+
+#[test]
+fn a_nested_index_checks_each_step() {
+    check_run(
+        r#"
+static at = fn (i: usize, j: usize) -> usize {
+    let mut m: [[usize; 2]; 3] = [[1, 2], [3, 4], [5, 6]];
+    m[i][j] = m[i][j] + 10;
+    m[i][j]
+};
+static main = fn () -> usize { at(2, 1) };
+"#,
+        "main()",
+        expect![[r#"
+            => 16
+        "#]],
+    );
+}
+
+#[test]
+fn a_nested_index_panics_at_the_inner_step_out_of_range() {
+    check_run(
+        r#"
+static at = fn (i: usize, j: usize) -> usize {
+    let m: [[usize; 2]; 3] = [[1, 2], [3, 4], [5, 6]];
+    m[i][j]
+};
+"#,
+        "at(1, 2)",
+        expect![[r#"
+            error[Panic]: index out of bounds: the length is 2 but the index is 2
+        "#]],
+    );
+}
+
+#[test]
+fn indexing_a_call_result_borrows_a_temporary() {
+    check_run(
+        r#"
+static mk = fn () -> [usize; 2] { [4, 5] };
+static get = fn (i: usize) -> usize { mk()[i] };
+"#,
+        "get(1)",
+        expect![[r#"
+            => 5
+        "#]],
+    );
+}
+
+#[test]
+fn indexing_through_a_const_param_length() {
+    check_run(
+        r#"
+static last = fn::<const N: usize>(a: [usize; N]) -> usize { a[N - 1] };
+static main = fn () -> usize { last::<3>([1, 2, 3]) + last::<1>([10]) };
+"#,
+        "main()",
+        expect![[r#"
+            => 13
+        "#]],
+    );
+}
+
+/// Runs `entry` against `text` with the cfg checkers off and returns the
+/// error with the source text each of its sites covers.
+fn run_error_sites(text: &str, entry: &str) -> (String, Vec<String>) {
+    let db = RootDatabase::default();
+    let source = format!("{text}\nstatic entrypoint = ({entry});\n");
+    let file = SourceFile::new(&db, "test.must".to_owned(), source.clone());
+    let entry_item = *hir::file_item_ids(&db, file)
+        .iter()
+        .find(|&&it| it.name(&db) == "entrypoint")
+        .expect("entrypoint item exists");
+    let mut machine = Machine::new(&db, RunMode::without_stdin(Vec::new()));
+    machine.check_traps = false;
+    let err = machine
+        .eval_root(&hir::item_loc(&db, entry_item))
+        .expect_err("the program fails");
+    let site = |origin: &Option<(hir::ItemLoc, hir::ExprId)>| {
+        let (loc, expr) = origin.clone().expect("a located site");
+        assert_eq!(loc.file, file, "a site outside the program's file");
+        let (_, map) = hir::body_with_source_map(&db, loc.to_id(&db));
+        let range = map.node_for_expr(expr).expect("a source node").text_range();
+        source[range].to_owned()
+    };
+    let notes = err.notes.iter().map(|note| site(&note.origin)).collect();
+    (site(&err.origin), notes)
+}
+
+#[test]
+fn an_index_panic_is_reported_at_the_programs_index_expression() {
+    // The panic happens inside the prelude's `index`; it is reported at
+    // the `a[i]` that called it.
+    let (at, notes) = run_error_sites(
+        "static get = fn (a: [usize; 2], i: usize) -> usize { a[i] };",
+        "get([1, 2], 2)",
+    );
+    assert_eq!(at, "a[i]");
+    assert!(notes.is_empty());
+}
+
+#[test]
+fn borrows_minted_inside_index_are_noted_at_the_programs_index_expression() {
+    // `b0` is reborrowed inside `index_mut`, and `a[1]` borrows inside
+    // `index`: both notes name the program's own expressions.
+    let (at, notes) = run_error_sites(
+        r#"
+static f = fn () -> usize {
+    let mut a: [usize; 2] = [1, 2];
+    let b0 = a[0].&mut;
+    let v = a[1];
+    b0.* = 9;
+    v
+};"#,
+        "f()",
+    );
+    assert_eq!(at, "9");
+    assert_eq!(notes, ["a[0].&mut", "a[1]"]);
 }

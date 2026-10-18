@@ -17686,3 +17686,24 @@ static one = 1;
     let item = crate::file_item_ids(&db, b)[0];
     assert_eq!(crate::trap_sites::range_traps(&db, item), &[]);
 }
+
+#[test]
+fn a_non_copyable_element_cannot_be_read_out_of_an_array() {
+    // `a[i]` is `index(a.&, i).*`, so reading an element out copies it out
+    // of a borrow, as `r.*` does: refused for a `usize.&mut` element. A
+    // place position projects instead, and copyable elements read fine.
+    check_diagnostics(
+        "static f = fn::<@a>(a: [usize.&mut::<@a>; 2]) -> () { let e = a[0]; };",
+        expect![[r#"
+            62..66: cannot move out of a borrow: `usize.&mut::<@a>` cannot be copied
+        "#]],
+    );
+    check_diagnostics(
+        "static f = fn::<@a>(a: [usize.&mut::<@a>; 2]) -> usize { a[0].* };",
+        expect![[r#""#]],
+    );
+    check_diagnostics(
+        "static f = fn (a: [struct { x: usize }; 2]) -> usize { a[1].x };",
+        expect![[r#""#]],
+    );
+}

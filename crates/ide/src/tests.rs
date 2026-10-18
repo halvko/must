@@ -6831,3 +6831,19 @@ fn the_prelude_has_no_diagnostics() {
     let prelude = base_db::prelude_file(&analysis.db);
     assert_eq!(analysis.diagnostics(prelude), Vec::new());
 }
+
+#[test]
+fn diagnostics_report_an_index_out_of_bounds_in_a_const_context() {
+    // `a[i]` calls the prelude's `index`, a const fn, so a const context
+    // may index, and an index out of range there is a compile error.
+    let src = r#"static pick = const fn (a: [usize; 3], i: usize) -> usize { a[i] };
+static bad: usize = pick([7, 8, 9], 3);"#;
+    let (analysis, file, _pos) = fixture(&format!("{src}$0"));
+    let diagnostics = analysis.diagnostics(file);
+    assert_eq!(diagnostics.len(), 1, "diagnostics: {diagnostics:?}");
+    assert_eq!(
+        diagnostics[0].message,
+        "constant evaluation panicked: index out of bounds: the length is 3 but the index is 3"
+    );
+    assert_eq!(&src[diagnostics[0].range], "a[i]");
+}

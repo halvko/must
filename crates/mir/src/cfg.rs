@@ -429,3 +429,82 @@ impl<'a, D> Findings<'a, D> {
             })
     }
 }
+
+/// One `a[i]` outside the prelude, as lowering spells it: `borrow =
+/// place.&` (or `.&mut`), `callee = index::<N>` (or `index_mut`), `dest =
+/// callee(borrow, i)`. The checks judge an access through `dest.*` as an
+/// access of `place[i]`, the element the user named, and the borrow handed
+/// to the call as no access of its own.
+pub(crate) struct IndexStep {
+    /// The temp holding the borrow of the array.
+    pub(crate) borrow: LocalId,
+    /// The temp holding the borrow of the element.
+    pub(crate) dest: LocalId,
+    /// The array's place, as borrowed.
+    pub(crate) place: Place,
+    pub(crate) index: Operand,
+}
+
+/// Every [`IndexStep`] in `body`. A step whose array is a `static`'s
+/// (borrowed through `AddrOfStatic`) is no step here: nothing can write
+/// to a static, so there is nothing for the checks to see through to.
+pub(crate) fn index_steps(db: &dyn base_db::Db, body: &MirBody) -> Vec<IndexStep> {
+    let index_fns = [
+        hir::prelude_index_loc(db, false),
+        hir::prelude_index_loc(db, true),
+    ];
+    // Each local's defining value, when it is defined exactly once.
+    let mut defs: Vec<(usize, Option<&ValueExpr>)> = vec![(0, None); body.locals.len()];
+    for (_, data) in body.blocks.iter() {
+        for stmt in &data.statements {
+            if let StatementKind::Assign { dest, value } = &stmt.kind
+                && dest.projection.is_empty()
+            {
+                let def = &mut defs[local_index(dest.local)];
+                *def = (def.0 + 1, Some(value));
+            }
+        }
+        if let TerminatorKind::Call { dest, .. } | TerminatorKind::Trap { dest, .. } =
+            &data.terminator.kind
+        {
+            defs[local_index(*dest)].0 += 1;
+        }
+    }
+    let single = |op: &Operand| match op {
+        Operand::Copy(place) if place.projection.is_empty() => {
+            match defs[local_index(place.local)] {
+                (1, Some(value)) => Some((place.local, value)),
+                _ => None,
+            }
+        }
+        _ => None,
+    };
+    let mut steps = Vec::new();
+    for (_, data) in body.blocks.iter() {
+        let TerminatorKind::Call {
+            callee, args, dest, ..
+        } = &data.terminator.kind
+        else {
+            continue;
+        };
+        let Some((_, ValueExpr::Instantiate { item, .. })) = single(callee) else {
+            continue;
+        };
+        if !index_fns.contains(item) {
+            continue;
+        }
+        let [array, index] = args.as_slice() else {
+            continue;
+        };
+        let Some((borrow, ValueExpr::Borrow { place, .. })) = single(array) else {
+            continue;
+        };
+        steps.push(IndexStep {
+            borrow,
+            dest: *dest,
+            place: place.clone(),
+            index: index.clone(),
+        });
+    }
+    steps
+}

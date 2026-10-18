@@ -1870,7 +1870,7 @@ static elem = fn(i: usize) -> usize {
     a[0] + a[1] + a[2]
 };
 "#;
-    for entry in ["go(1)", "go(3)", "go(4)", "elem(2)"] {
+    for entry in ["go(1)", "go(3)", "go(4)", "elem(2)", "elem(3)"] {
         check(PROGRAM, entry);
     }
 }
