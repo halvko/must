@@ -27,8 +27,8 @@ pub mod unsafe_check;
 mod tests;
 
 use base_db::{Db, SourceFile, parse};
-use syntax::TextRange;
 use syntax::ast::{self, AstNode as _};
+use syntax::{TextRange, TextSize};
 
 pub use body::{BindingId, Body, BodySourceMap, ExprId, PatId, body_with_source_map};
 pub use const_check::ConstCheckDiagnostic;
@@ -2436,12 +2436,13 @@ fn missing_members_fix(
     let stubs: Vec<String> = stubbed
         .iter()
         .filter_map(|req| member_stub(&mut speller, req))
+        .map(|stub| stub.text())
         .collect();
     if stubs.is_empty() {
         return None;
     }
     let mut fix = members_fix(element, file_text, &stubs)?;
-    fix.edits.splice(0..0, speller.imports_edit());
+    fix.edits.splice(0..0, speller.imports_edit(0));
     Some(fix)
 }
 
@@ -2479,20 +2480,44 @@ fn members_fix(
     ))
 }
 
-/// `name = fn::<binder>(a: T, b: U) -> R { panic("unimplemented name") };`,
-/// its types written as `speller` spells them. The parameters get plain
-/// names; the unused-binding warning and its rename fix cover them.
-/// `panic(..)` types as `!`, so the body adds no error of its own.
-fn member_stub(speller: &mut StubSpeller<'_>, req: &ast::Member) -> Option<String> {
-    let mark = speller.mark();
-    let stub = write_member_stub(speller, req);
-    if stub.is_none() {
-        speller.reset(mark);
-    }
-    stub
+/// An impl member written out from its requirement, for the "Add missing
+/// members" fix and for member completion in an impl body:
+/// `name = fn::<binder>(a: T, b: U) -> R { panic("unimplemented name") };`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MemberStub {
+    pub name: String,
+    /// The requirement's signature as written: `fn(Self) -> usize`.
+    pub requirement: String,
+    /// Everything before the body: `name = fn(a: Self) -> usize`.
+    pub head: String,
+    /// The body's one expression: `panic("unimplemented name")`.
+    pub body: String,
+    /// The edit adding the `use` items the stub's names need in the
+    /// impl's file, if they need any.
+    pub imports: Option<syntax::TextEdit>,
 }
 
-fn write_member_stub(speller: &mut StubSpeller<'_>, req: &ast::Member) -> Option<String> {
+impl MemberStub {
+    pub fn text(&self) -> String {
+        format!("{} {{ {} }};", self.head, self.body)
+    }
+}
+
+/// The stub for a requirement, its types written as `speller` spells them.
+/// The parameters get plain names; the unused-binding warning and its
+/// rename fix cover them. `panic(..)` types as `!`, so the body adds no
+/// error of its own.
+fn member_stub(speller: &mut StubSpeller<'_>, req: &ast::Member) -> Option<MemberStub> {
+    let mark = speller.mark();
+    let Some(mut stub) = write_member_stub(speller, req) else {
+        speller.reset(mark);
+        return None;
+    };
+    stub.imports = speller.imports_edit(mark);
+    Some(stub)
+}
+
+fn write_member_stub(speller: &mut StubSpeller<'_>, req: &ast::Member) -> Option<MemberStub> {
     let name = req.name()?.text();
     let Some(ast::Type::FnType(fn_type)) = req.ty() else {
         return None;
@@ -2522,9 +2547,51 @@ fn write_member_stub(speller: &mut StubSpeller<'_>, req: &ast::Member) -> Option
         .collect::<Option<Vec<_>>>()?
         .join(", ");
     let ret = speller.spell(fn_type.ret_type()?.ty()?.syntax(), &binder)?;
-    Some(format!(
-        "{name} = fn{binder_text}({params}) -> {ret} {{ panic(\"unimplemented {name}\") }};"
-    ))
+    Some(MemberStub {
+        requirement: fn_type.syntax().text().to_string(),
+        head: format!("{name} = fn{binder_text}({params}) -> {ret}"),
+        body: format!("panic(\"unimplemented {name}\")"),
+        name,
+        imports: None,
+    })
+}
+
+/// The stubs for the requirements the trait impl starting at `impl_start`
+/// (its `impl` keyword) does not implement yet and that spell their full
+/// signature, in requirement order, each written for `file` on its own.
+/// Empty for an inherent impl or one whose head does not resolve.
+pub fn missing_member_stubs(
+    db: &dyn Db,
+    file: SourceFile,
+    impl_start: TextSize,
+) -> Vec<MemberStub> {
+    let impls = traits::trait_impls(db, file);
+    let Some(site) = impls.sites_in(file).map(|(_, site)| site).find(|site| {
+        traits::impl_site_source(db, site)
+            .is_some_and(|element| element.syntax().text_range().start() == impl_start)
+    }) else {
+        return Vec::new();
+    };
+    let (Some(trait_loc), Some(_)) = (&site.trait_, &site.self_key) else {
+        return Vec::new();
+    };
+    let members = item_tree::type_members(db, site.owner.to_id(db));
+    let missing: Vec<&str> = item_tree::trait_requirements(db, trait_loc.to_id(db))
+        .iter()
+        .filter(|req| {
+            let qualified = format!("{}::{}", site.head, req.name);
+            req.sig.is_some()
+                && !members.iter().any(|m| {
+                    m.name == qualified
+                        && matches!(&m.home, item_tree::MemberHome::TraitImpl { head } if *head == site.head)
+                })
+        })
+        .map(|req| req.name.as_str())
+        .collect();
+    requirement_members(db, trait_loc, &missing)
+        .iter()
+        .filter_map(|req| member_stub(&mut StubSpeller::new(db, trait_loc.file, file), req))
+        .collect()
 }
 
 /// Writes a requirement's types for an impl in another file. A type or
@@ -2567,11 +2634,13 @@ impl<'db> StubSpeller<'db> {
         self.imports.truncate(mark);
     }
 
-    /// The edit adding the `use` items the stubs need, if they need any.
-    fn imports_edit(&self) -> Option<syntax::TextEdit> {
-        (!self.imports.is_empty()).then(|| {
+    /// The edit adding the `use` items for the imports from `mark` on, if
+    /// there are any.
+    fn imports_edit(&self, mark: usize) -> Option<syntax::TextEdit> {
+        let imports = &self.imports[mark..];
+        (!imports.is_empty()).then(|| {
             use_items_edit(
-                (self.imports.iter()).map(|import| (import.module.as_str(), import.name.as_str())),
+                (imports.iter()).map(|import| (import.module.as_str(), import.name.as_str())),
             )
         })
     }
