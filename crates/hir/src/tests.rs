@@ -13812,6 +13812,39 @@ fn wildcard_region_is_a_body_answer_not_a_signature_one() {
             28..30: `@_` cannot be used in a signature — declare the region in the binder (`fn::<@a>`) and name it here
         "#]],
     );
+    // A static's block initializer is a body: its region is inferred.
+    check_diagnostics(
+        "static a = { let n = 1; let r: usize.&::<@_> = n.&; r.* };",
+        expect![[r#""#]],
+    );
+    // TODO: halvko/must#207: no region can be written in an item's `: Type`
+    // annotation.
+    check_diagnostics(
+        "static n: usize = 1; static r: usize.&::<@_> = n.&;",
+        expect![[r#"
+            41..43: `@_` cannot be used in an item's type annotation: the item has no binder to declare a region in, so no region can be written there
+        "#]],
+    );
+    // Nothing infers a field's region.
+    check_diagnostics(
+        "type S = struct { r: usize.&::<@_> };",
+        expect![[r#"
+            31..33: `@_` cannot be used in a type declaration: nothing infers a field's region, and region parameters on type declarations are not supported
+        "#]],
+    );
+    // A member's signature is a signature, and its body a body.
+    check_diagnostics(
+        r#"
+type S = struct { n: usize } with {
+    impl Self {
+        get = fn(s: Self, r: usize.&::<@_>) -> usize { let m = 1; let q: usize.&::<@_> = m.&; q.* };
+    }
+};
+"#,
+        expect![[r#"
+            92..94: `@_` cannot be used in a signature — declare the region in the binder (`fn::<@a>`) and name it here
+        "#]],
+    );
 }
 
 #[test]

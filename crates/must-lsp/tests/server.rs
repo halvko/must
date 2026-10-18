@@ -943,7 +943,7 @@ fn run_lens_executes_the_buffer() {
 }
 
 #[test]
-fn completion_capability_is_advertised_with_dot_and_colon_triggers() {
+fn completion_capability_is_advertised_with_dot_colon_and_ampersand_triggers() {
     // `{` is deliberately NOT here: opening a `{` — a function body chief
     // among them — is exactly where predictions are least wanted. The
     // arm-list template at `match s {|}` still exists — see
@@ -957,7 +957,7 @@ fn completion_capability_is_advertised_with_dot_and_colon_triggers() {
     assert_eq!(completion.resolve_provider, Some(false));
     assert_eq!(
         completion.trigger_characters,
-        Some(vec![".".to_owned(), ":".to_owned()])
+        Some(vec![".".to_owned(), ":".to_owned(), "&".to_owned()])
     );
 }
 

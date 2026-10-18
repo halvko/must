@@ -125,6 +125,7 @@ fn completion_item_kind(kind: ide::CompletionItemKind) -> lsp_types::CompletionI
         ide::CompletionItemKind::Constant => lsp_types::CompletionItemKind::CONSTANT,
         ide::CompletionItemKind::Keyword => lsp_types::CompletionItemKind::KEYWORD,
         ide::CompletionItemKind::Snippet => lsp_types::CompletionItemKind::SNIPPET,
+        ide::CompletionItemKind::Region => lsp_types::CompletionItemKind::TYPE_PARAMETER,
     }
 }
 
@@ -159,6 +160,12 @@ pub(crate) fn completion_item(
             range: range(line_index, item.text_edit.range),
             new_text,
         })),
+        additional_text_edits: (!item.additional_edits.is_empty()).then(|| {
+            item.additional_edits
+                .iter()
+                .map(|edit| text_edit(line_index, edit))
+                .collect()
+        }),
         ..Default::default()
     }
 }
@@ -213,6 +220,57 @@ mod tests {
         assert_eq!(
             position(&index, TextSize::from(7)),
             lsp_types::Position::new(0, 4)
+        );
+    }
+
+    /// The completions at `$0` in `fixture`, as the client receives them.
+    fn proto_completions(fixture: &str) -> Vec<lsp_types::CompletionItem> {
+        let offset = fixture
+            .find("$0")
+            .expect("fixture needs a $0 cursor marker");
+        let mut host = ide::AnalysisHost::new();
+        let file = host.create_file("test.must".to_owned(), fixture.replace("$0", ""));
+        let analysis = host.snapshot();
+        let position = ide::FilePosition {
+            file,
+            offset: TextSize::new(offset as u32),
+        };
+        let line_index = analysis.line_index(file);
+        analysis
+            .completions(position)
+            .into_iter()
+            .map(|item| completion_item(line_index, item, true))
+            .collect()
+    }
+
+    #[test]
+    fn a_fresh_region_completion_carries_its_declaration() {
+        let items = proto_completions("static f = fn(x: usize.&::$0) -> usize { 0 };");
+        let fresh = items.iter().find(|item| item.label == "::<@a>").unwrap();
+        assert_eq!(
+            fresh.kind,
+            Some(lsp_types::CompletionItemKind::TYPE_PARAMETER)
+        );
+        assert_eq!(
+            fresh.additional_text_edits,
+            Some(vec![lsp_types::TextEdit {
+                range: lsp_types::Range::new(
+                    lsp_types::Position::new(0, 13),
+                    lsp_types::Position::new(0, 13)
+                ),
+                new_text: "::<@a>".to_owned(),
+            }])
+        );
+    }
+
+    #[test]
+    fn a_completion_without_other_edits_carries_none() {
+        let items = proto_completions("static f = fn { $0 };");
+        assert!(!items.is_empty());
+        assert!(
+            items
+                .iter()
+                .all(|item| item.additional_text_edits.is_none())
         );
     }
 }

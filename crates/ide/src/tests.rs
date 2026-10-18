@@ -3076,6 +3076,408 @@ static main = fn {
     );
 }
 
+// ---- turbofishes ----
+
+/// The fixture after accepting the completion labeled `label`: its own
+/// edit plus any additional edits (a fresh region's declaration).
+fn accept_completion(fixture_text: &str, label: &str) -> String {
+    let (analysis, _file, pos) = fixture(fixture_text);
+    let items = analysis.completions(pos);
+    let item = items
+        .iter()
+        .find(|c| c.label == label)
+        .unwrap_or_else(|| panic!("no completion labeled {label:?}: {items:?}"));
+    let insert = match &item.text_edit.insert {
+        crate::InsertText::Plain(text) => text.clone(),
+        crate::InsertText::Snippet { snippet, .. } => snippet.clone(),
+    };
+    let mut edits: Vec<(TextRange, String)> = item
+        .additional_edits
+        .iter()
+        .map(|edit| (edit.range, edit.insert.clone()))
+        .collect();
+    edits.push((item.text_edit.range, insert));
+    edits.sort_by_key(|(range, _)| std::cmp::Reverse(range.start()));
+    let mut text = fixture_text.replace("$0", "");
+    for (range, insert) in edits {
+        text.replace_range(std::ops::Range::<usize>::from(range), &insert);
+    }
+    text
+}
+
+#[test]
+fn completions_borrow_type_in_a_parameter_ranks_an_unnamed_region_first() {
+    check_completions(
+        "static f = fn::<@a, @b>(x: usize.&::<@a>, y: usize.&::$0) -> usize { 0 };",
+        expect_test::expect![[r#"
+            ::<@b> Region (region declared in the binder `@b`)
+            ::<@c> Region (new region, declared in the binder `@c`)
+            ::<@a> Region (region declared in the binder `@a`)
+        "#]],
+    );
+    // A region only the return type names is unnamed by the parameters.
+    check_completions(
+        "static f = fn::<@a>(x: usize.&::$0) -> usize.&::<@a> { x };",
+        expect_test::expect![[r#"
+            ::<@a> Region (region declared in the binder `@a`)
+            ::<@b> Region (new region, declared in the binder `@b`)
+        "#]],
+    );
+}
+
+#[test]
+fn completions_borrow_type_in_a_return_type_ranks_a_parameter_region_first() {
+    check_completions(
+        "static f = fn::<@a, @b>(x: usize.&::<@a>) -> usize.&::$0 { x };",
+        expect_test::expect![[r#"
+            ::<@a> Region (region declared in the binder `@a`)
+            ::<@b> Region (region declared in the binder `@b`)
+            ::<@c> Region (new region, declared in the binder `@c`)
+        "#]],
+    );
+}
+
+#[test]
+fn completions_borrow_type_after_the_dot_offers_whole_pointers() {
+    check_completions(
+        "static f = fn::<@a>(x: usize.$0) -> usize { 0 };",
+        expect_test::expect![[r#"
+            &::<@a> Region (region declared in the binder `@a`)
+            &mut::<@a> Region (region declared in the binder `@a`)
+            &::<@b> Region (new region, declared in the binder `@b`)
+            &mut::<@b> Region (new region, declared in the binder `@b`)
+            &raw Keyword (raw pointer, which takes no region)
+        "#]],
+    );
+    assert_eq!(
+        accept_completion(
+            "static f = fn::<@a>(x: usize.$0) -> usize { 0 };",
+            "&mut::<@a>"
+        ),
+        "static f = fn::<@a>(x: usize.&mut::<@a>) -> usize { 0 };",
+    );
+    assert_eq!(
+        accept_completion("static f = fn(x: usize.$0) -> usize { 0 };", "&::<@a>"),
+        "static f = fn::<@a>(x: usize.&::<@a>) -> usize { 0 };",
+    );
+}
+
+#[test]
+fn completions_borrow_type_after_a_partial_head_offers_its_pointers() {
+    check_completions(
+        "static f = fn::<@a>(x: usize.&m$0) -> usize { 0 };",
+        expect_test::expect![[r#"
+            &mut::<@a> Region (region declared in the binder `@a`)
+            &mut::<@b> Region (new region, declared in the binder `@b`)
+        "#]],
+    );
+    check_completions(
+        "static f = fn::<@a>(x: usize.&r$0) -> usize { 0 };",
+        expect_test::expect![[r#"
+            &raw Keyword (raw pointer, which takes no region)
+        "#]],
+    );
+}
+
+#[test]
+fn completions_borrow_type_in_a_body_after_the_dot_offers_the_wildcard() {
+    check_completions(
+        "static a = { let n = 1; let r: usize.$0 = n.&; r.* };",
+        expect_test::expect![[r#"
+            &::<@_> Region (infer the region)
+            &mut::<@_> Region (infer the region)
+            &raw Keyword (raw pointer, which takes no region)
+        "#]],
+    );
+}
+
+#[test]
+fn completions_after_a_binary_ampersand_offer_nothing() {
+    let (analysis, _file, pos) = fixture("static f = fn(a: bool, b: bool) -> bool { a &$0 };");
+    assert_eq!(analysis.completions(pos), Vec::new());
+}
+
+#[test]
+fn completions_after_an_expression_dot_offer_no_turbofish_pointers() {
+    for typed in ["", "&", "&m"] {
+        let fixture = format!("static f = fn {{ let n = 1; let r = n.{typed}$0; }};");
+        check_no_completion(&fixture, "&::<@_>");
+        check_no_completion(&fixture, "&mut::<@_>");
+    }
+}
+
+#[test]
+fn completions_borrow_expression_offers_its_heads_without_a_turbofish() {
+    check_completions(
+        "static f = fn { let mut n = 1; let r = n.&$0; };",
+        expect_test::expect![[r#"
+            & Keyword (shared borrow)
+            &mut Keyword (mutable borrow)
+            &raw Keyword (raw pointer)
+        "#]],
+    );
+    check_completions(
+        "static f = fn { let mut n = 1; let r = n.&m$0; };",
+        expect_test::expect![[r#"
+            &mut Keyword (mutable borrow)
+        "#]],
+    );
+    assert_eq!(
+        accept_completion("static f = fn { let mut n = 1; let r = n.&m$0; };", "&mut"),
+        "static f = fn { let mut n = 1; let r = n.&mut; };",
+    );
+    assert_eq!(
+        accept_completion("static f = fn { let n = 1; let r = n.&r$0; };", "&raw"),
+        "static f = fn { let n = 1; let r = n.&raw; };",
+    );
+}
+
+#[test]
+fn completions_borrow_type_raw_head_replaces_from_the_dot() {
+    assert_eq!(
+        accept_completion("static f = fn(x: usize.&r$0) -> usize { 0 };", "&raw"),
+        "static f = fn(x: usize.&raw) -> usize { 0 };",
+    );
+}
+
+#[test]
+fn completions_borrow_type_heads_follow_the_return_type_ranking() {
+    check_completions(
+        "static f = fn::<@a, @b>(x: usize.&::<@a>) -> usize.$0 { x };",
+        expect_test::expect![[r#"
+            &::<@a> Region (region declared in the binder `@a`)
+            &mut::<@a> Region (region declared in the binder `@a`)
+            &::<@b> Region (region declared in the binder `@b`)
+            &mut::<@b> Region (region declared in the binder `@b`)
+            &::<@c> Region (new region, declared in the binder `@c`)
+            &mut::<@c> Region (new region, declared in the binder `@c`)
+            &raw Keyword (raw pointer, which takes no region)
+        "#]],
+    );
+}
+
+#[test]
+fn completions_borrow_type_heads_in_a_member_signature() {
+    check_completions(
+        "trait Shape = requires { area: fn(Self.$0) -> usize; };",
+        expect_test::expect![[r#"
+            &::<@a> Region (new region, declared in the binder `@a`)
+            &mut::<@a> Region (new region, declared in the binder `@a`)
+            &raw Keyword (raw pointer, which takes no region)
+        "#]],
+    );
+}
+
+#[test]
+fn completions_borrow_type_answers_every_prefix_of_the_turbofish() {
+    for head in ["&", "&mut"] {
+        for typed in ["", ":", "::", "::<", "::<@", "::<@a"] {
+            let fixture =
+                format!("static f = fn::<@a>(x: usize.{head}{typed}$0) -> usize {{ 0 }};");
+            // Before the turbofish starts, the candidate rewrites the head.
+            let label = match typed {
+                "" => format!("{head}::<@a>"),
+                _ => "::<@a>".to_owned(),
+            };
+            assert_eq!(
+                accept_completion(&fixture, &label),
+                format!("static f = fn::<@a>(x: usize.{head}::<@a>) -> usize {{ 0 }};"),
+                "after {head}{typed:?}"
+            );
+        }
+    }
+}
+
+#[test]
+fn completions_borrow_type_replaces_an_editor_closed_angle() {
+    for typed in ["::<", "::<@", "::<@a"] {
+        let fixture = format!("static f = fn::<@a>(x: usize.&{typed}$0>) -> usize {{ 0 }};");
+        assert_eq!(
+            accept_completion(&fixture, "::<@a>"),
+            "static f = fn::<@a>(x: usize.&::<@a>) -> usize { 0 };",
+            "after {typed:?}"
+        );
+    }
+}
+
+#[test]
+fn completions_borrow_type_fresh_region_declares_itself_in_the_binder() {
+    // No binder: the region brings `::<@a>` after `fn`.
+    assert_eq!(
+        accept_completion("static f = fn(x: usize.&::$0) -> usize { 0 };", "::<@a>"),
+        "static f = fn::<@a>(x: usize.&::<@a>) -> usize { 0 };",
+    );
+    // After the last region: regions come first in a binder.
+    assert_eq!(
+        accept_completion(
+            "static f = fn::<@a, T>(x: usize.&::<@a>, y: T.&::$0) -> usize { 0 };",
+            "::<@b>"
+        ),
+        "static f = fn::<@a, @b, T>(x: usize.&::<@a>, y: T.&::<@b>) -> usize { 0 };",
+    );
+    // A binder with no region: at its front.
+    assert_eq!(
+        accept_completion("static f = fn::<T>(x: T.&::$0) -> usize { 0 };", "::<@a>"),
+        "static f = fn::<@a, T>(x: T.&::<@a>) -> usize { 0 };",
+    );
+}
+
+#[test]
+fn completions_borrow_type_in_a_member_signature_declares_in_its_binder() {
+    assert_eq!(
+        accept_completion(
+            "trait Shape = requires { area: fn(Self.&$0) -> usize; };",
+            "&::<@a>"
+        ),
+        "trait Shape = requires { area: fn::<@a>(Self.&::<@a>) -> usize; };",
+    );
+}
+
+#[test]
+fn completions_borrow_type_in_a_fn_typed_parameter_declares_in_the_item() {
+    // A fn type other than a member signature has no binder.
+    assert_eq!(
+        accept_completion(
+            "static apply = fn::<@a>(x: usize.&::<@a>, g: fn(usize.&::$0) -> usize) -> usize { 0 };",
+            "::<@b>"
+        ),
+        "static apply = fn::<@a, @b>(x: usize.&::<@a>, g: fn(usize.&::<@b>) -> usize) -> usize { 0 };",
+    );
+}
+
+#[test]
+fn completions_borrow_type_in_a_body_fn_type_offers_only_declared_regions() {
+    // A body declares no region, and `@_` is refused in a fn type.
+    check_completions(
+        r#"
+static apply = fn::<@a>(x: usize.&::<@a>) -> usize {
+    let h: fn(usize.&::$0) -> usize = fn(y: usize.&::<@_>) -> usize { 0 };
+    0
+};
+"#,
+        expect_test::expect![[r#"
+            ::<@a> Region (region declared in the binder `@a`)
+        "#]],
+    );
+}
+
+#[test]
+fn completions_borrow_type_in_a_body_offers_the_wildcard_first() {
+    check_completions(
+        r#"
+static f = fn::<@a>(x: usize.&::<@a>) -> usize {
+    let r: usize.&::$0 = x;
+    0
+};
+"#,
+        expect_test::expect![[r#"
+            ::<@_> Region (infer the region)
+            ::<@a> Region (region declared in the binder `@a`)
+        "#]],
+    );
+}
+
+#[test]
+fn completions_borrow_type_in_a_static_block_offers_the_wildcard() {
+    check_completions(
+        "static a = { let n = 1; let r: usize.&::$0 = n.&; r.* };",
+        expect_test::expect![[r#"
+            ::<@_> Region (infer the region)
+        "#]],
+    );
+}
+
+#[test]
+fn completions_borrow_type_in_a_field_offers_no_wildcard() {
+    // Nothing infers a region in a type declaration.
+    check_no_completion("type S = struct { r: usize.&::$0 };", "::<@_>");
+}
+
+#[test]
+fn completions_borrow_type_join_offers_the_regions_it_lacks() {
+    check_completions(
+        "static f = fn::<@a, @b>(x: usize.&::<@a + @b>, y: usize.&::<@a + @$0>) -> usize { 0 };",
+        expect_test::expect![[r#"
+            @c Region (new region, declared in the binder `@c`)
+            @b Region (region declared in the binder `@b`)
+        "#]],
+    );
+    assert_eq!(
+        accept_completion(
+            "static f = fn::<@a, @b>(y: usize.&::<@a + $0>) -> usize { 0 };",
+            "@b"
+        ),
+        "static f = fn::<@a, @b>(y: usize.&::<@a + @b>) -> usize { 0 };",
+    );
+    // The first member, before an existing `+`.
+    assert_eq!(
+        accept_completion(
+            "static f = fn::<@a, @b>(y: usize.&::<@$0 + @b>) -> usize { 0 };",
+            "@a"
+        ),
+        "static f = fn::<@a, @b>(y: usize.&::<@a + @b>) -> usize { 0 };",
+    );
+    check_no_completion(
+        "static f = fn::<@a, @b>(y: usize.&::<@$0 + @b>) -> usize { 0 };",
+        "@b",
+    );
+}
+
+#[test]
+fn completions_borrow_expression_offers_no_turbofish() {
+    // An operation never carries a region (G11).
+    check_no_completion("static f = fn { let n = 1; let r = n.&::$0; };", "::<@_>");
+}
+
+#[test]
+fn completions_generic_type_in_type_position_opens_its_turbofish() {
+    let fixture = r#"
+type Buf = struct::<const N: usize> { len: usize };
+type Wrap = struct::<T> { x: T };
+type Opt = enum::<T> { Some(T), None };
+type Point = struct { x: usize };
+static f = fn(b: $0) -> usize { 0 };
+"#;
+    for name in ["Buf", "Wrap", "Opt"] {
+        assert_eq!(
+            completion_insert(fixture, name),
+            crate::InsertText::Plain(format!("{name}::<"))
+        );
+    }
+    assert_eq!(
+        completion_insert(fixture, "Point"),
+        crate::InsertText::Plain("Point".to_owned())
+    );
+}
+
+#[test]
+fn completions_type_with_only_a_region_param_writes_no_turbofish() {
+    assert_eq!(
+        completion_insert(
+            r#"
+type Ref = struct::<@a> { n: usize };
+static f = fn(b: $0) -> usize { 0 };
+"#,
+            "Ref"
+        ),
+        crate::InsertText::Plain("Ref".to_owned())
+    );
+}
+
+#[test]
+fn completions_generic_type_before_a_written_turbofish_writes_none() {
+    assert_eq!(
+        completion_insert(
+            r#"
+type Buf = struct::<const N: usize> { len: usize };
+static f = fn(b: B$0::<2>) -> usize { 0 };
+"#,
+            "Buf"
+        ),
+        crate::InsertText::Plain("Buf".to_owned())
+    );
+}
+
 // ---- snippets ----
 
 /// The `InsertText` of the one completion labeled `label` (of any kind).
