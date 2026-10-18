@@ -124,6 +124,20 @@ impl MoveDiagnostic {
         }
     }
 
+    /// The binder parameter whose `forget` bound the message offers: a lost
+    /// value that is linear only because that parameter is.
+    pub fn forget_param(&self, db: &dyn Db, item: ItemId<'_>) -> Option<std::sync::Arc<str>> {
+        match self {
+            MoveDiagnostic::NotConsumed { .. }
+            | MoveDiagnostic::ValueNotConsumed { .. }
+            | MoveDiagnostic::AssignOverLive { .. } => {
+                let types = hir::infer::infer(db, item);
+                hir::capability::blaming_param(db, self.ty(types)?)
+            }
+            MoveDiagnostic::AlreadyConsumed { .. } | MoveDiagnostic::ReadUninit { .. } => None,
+        }
+    }
+
     /// The companion sites: the binding's declaration (or the expression
     /// that made the value), then the move that explains the finding, when
     /// it has one.
