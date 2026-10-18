@@ -3,7 +3,7 @@
 //! message. The corpus is `examples/` plus every program the hir and syntax
 //! diagnostic tests and mir's loan tests check.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, HashSet};
 
 use base_db::{RootDatabase, SourceFile};
 use expect_test::expect;
@@ -46,13 +46,14 @@ fn untrapped(text: &str) -> Vec<String> {
         }
     }
     let owned = hir::error_owners(&db, file);
+    let spelled = spelled_names(&db, file);
     for (loc, messages) in &owned.decls {
-        if !declaration_spelled(&db, file, loc) {
+        if !declaration_spelled(&db, &spelled, loc) {
             traps.extend(messages.iter().cloned());
         }
     }
     for named in &owned.named {
-        if !named.names.iter().any(|name| name_spelled(&db, file, name)) {
+        if !named.names.iter().any(|name| spelled.names.contains(name)) {
             traps.insert(named.message.clone());
         }
     }
@@ -70,36 +71,33 @@ fn untrapped(text: &str) -> Vec<String> {
 /// anywhere, or one of its members' names after a `.`. Read off the syntax
 /// alone, apart from the walk that plants the traps, so a mention that walk
 /// misses fails the guard instead of exempting the error.
-fn declaration_spelled(db: &RootDatabase, file: SourceFile, loc: &hir::ItemLoc) -> bool {
+fn declaration_spelled(db: &RootDatabase, spelled: &Spelled, loc: &hir::ItemLoc) -> bool {
     let Some(decl) = hir::item_source(db, loc.to_id(db)) else {
         return false;
     };
-    let members: Vec<String> = decl
-        .syntax()
-        .descendants()
-        .filter(|node| node.kind() == SyntaxKind::MEMBER)
-        .filter_map(|member| first_ident(&member))
-        .collect();
-    spelled_names(db, file).any(|(text, name_ref)| {
-        *text == *loc.name
-            || (name_ref
-                .parent()
-                .is_some_and(|parent| parent.kind() == SyntaxKind::FIELD_EXPR)
-                && members.contains(&text))
-    })
+    spelled.names.contains(&*loc.name)
+        || decl
+            .syntax()
+            .descendants()
+            .filter(|node| node.kind() == SyntaxKind::MEMBER)
+            .filter_map(|member| first_ident(&member))
+            .any(|member| spelled.after_dot.contains(&member))
 }
 
-/// Whether an item with a body spells `name` anywhere.
-fn name_spelled(db: &RootDatabase, file: SourceFile, name: &str) -> bool {
-    spelled_names(db, file).any(|(text, _)| text == name)
+/// The names the items with a body spell.
+struct Spelled {
+    /// Every name spelled anywhere.
+    names: HashSet<String>,
+    /// The names spelled right after a `.`.
+    after_dot: HashSet<String>,
 }
 
-/// Every name an item with a body spells, with its `NAME_REF`.
-fn spelled_names(
-    db: &RootDatabase,
-    file: SourceFile,
-) -> impl Iterator<Item = (String, SyntaxNode)> {
-    hir::all_checkable_items(db, file)
+fn spelled_names(db: &RootDatabase, file: SourceFile) -> Spelled {
+    let mut spelled = Spelled {
+        names: HashSet::new(),
+        after_dot: HashSet::new(),
+    };
+    let name_refs = hir::all_checkable_items(db, file)
         .into_iter()
         .filter(|&item| hir::body::body(db, item).root.is_some())
         .filter_map(|item| match item.member(db) {
@@ -107,8 +105,20 @@ fn spelled_names(
             None => hir::item_source(db, item).map(|it| it.syntax().clone()),
         })
         .flat_map(|syntax| syntax.descendants())
-        .filter(|node| node.kind() == SyntaxKind::NAME_REF)
-        .filter_map(|name_ref| Some((first_ident(&name_ref)?, name_ref)))
+        .filter(|node| node.kind() == SyntaxKind::NAME_REF);
+    for name_ref in name_refs {
+        let Some(text) = first_ident(&name_ref) else {
+            continue;
+        };
+        if name_ref
+            .parent()
+            .is_some_and(|parent| parent.kind() == SyntaxKind::FIELD_EXPR)
+        {
+            spelled.after_dot.insert(text.clone());
+        }
+        spelled.names.insert(text);
+    }
+    spelled
 }
 
 fn first_ident(node: &SyntaxNode) -> Option<String> {
@@ -189,10 +199,27 @@ fn every_error_traps() {
         "check_errors(",
     ));
     corpus.extend(programs(include_str!("tests.rs"), "check_loans("));
-    let mut gaps = BTreeSet::new();
-    for text in &corpus {
-        gaps.extend(untrapped(text));
-    }
+    // Each program builds its own database, so the corpus splits cleanly
+    // across threads.
+    let threads = std::thread::available_parallelism().map_or(1, |n| n.get());
+    let chunk = corpus.len().div_ceil(threads).max(1);
+    let gaps: BTreeSet<String> = std::thread::scope(|scope| {
+        let workers: Vec<_> = corpus
+            .chunks(chunk)
+            .map(|programs| {
+                scope.spawn(|| {
+                    programs
+                        .iter()
+                        .flat_map(|text| untrapped(text))
+                        .collect::<Vec<_>>()
+                })
+            })
+            .collect();
+        workers
+            .into_iter()
+            .flat_map(|worker| worker.join().unwrap())
+            .collect()
+    });
     let rendered: String = gaps.iter().map(|message| format!("{message}\n")).collect();
     expect![[r#""#]].assert_eq(&rendered);
 }
