@@ -6427,18 +6427,7 @@ fn a_variant_in_type_position_offers_the_use_enum_fix() {
 type Shape = enum { Circle(usize), Point };
 static wants_circle = fn (s: Shape::Circle) {};
 "#;
-    let db = RootDatabase::default();
-    let file = SourceFile::new(&db, "test.must".to_owned(), text.to_owned());
-    let diagnostics = crate::file_diagnostics(&db, file);
-    assert_eq!(diagnostics.len(), 1, "diagnostics: {diagnostics:?}");
-    let fix = diagnostics[0].fix.as_ref().expect("diagnostic has a fix");
-    assert_eq!(fix.label, "Use `Shape`");
-    assert_eq!(fix.edits.len(), 1);
-    let mut fixed = text.to_owned();
-    fixed.replace_range(
-        std::ops::Range::<usize>::from(fix.edits[0].range),
-        &fix.edits[0].insert,
-    );
+    let fixed = apply_fix(text, "Use `Shape`");
     expect![[r#"
 
         type Shape = enum { Circle(usize), Point };
@@ -15627,28 +15616,9 @@ static f = fn() -> usize {
     );
 }
 
-/// Applies the single diagnostic's fix to `text`, checking its label, and
-/// returns the fixed program.
-fn apply_insertion_fix(text: &str, label: &str) -> String {
-    let db = RootDatabase::default();
-    let file = SourceFile::new(&db, "test.must".to_owned(), text.to_owned());
-    let diagnostics = crate::file_diagnostics(&db, file);
-    assert_eq!(diagnostics.len(), 1, "diagnostics: {diagnostics:?}");
-    let fix = diagnostics[0].fix.as_ref().expect("diagnostic has a fix");
-    assert_eq!(fix.label, label);
-    assert_eq!(fix.edits.len(), 1);
-    assert!(fix.edits[0].range.is_empty());
-    let mut fixed = text.to_owned();
-    fixed.insert_str(
-        u32::from(fix.edits[0].range.start()) as usize,
-        &fix.edits[0].insert,
-    );
-    fixed
-}
-
 #[test]
 fn an_owned_receiver_offers_the_insert_borrow_fix() {
-    let fixed = apply_insertion_fix(
+    let fixed = apply_fix(
         r#"
 type Counter = struct { n: usize } with {
     impl Self {
@@ -15670,7 +15640,7 @@ static f = fn () -> usize {
 fn an_owned_receiver_of_an_exclusive_member_offers_the_insert_borrow_mut_fix() {
     // The borrow lands right before the call's own `.`, so a call chained
     // onto a new line keeps its layout and a temporary receiver works too.
-    let fixed = apply_insertion_fix(
+    let fixed = apply_fix(
         r#"
 type Cell = struct { n: usize } with {
     impl Self {
@@ -16650,6 +16620,273 @@ fn a_borrow_where_the_owned_value_is_wanted_names_both_ways_out() {
         expect![[r#"
             119..120: type mismatch: expected `usize`, found `usize.&`; a borrow is not the value — write `.*` to read through it (a copy, so the referent must be copyable), or use the owned value instead of a borrow of it (expected `usize` because of this return type at 85..93)
         "#]],
+    );
+}
+
+/// The fix on `text`'s only diagnostic, if any.
+fn fix_of(text: &str) -> Option<syntax::Fix> {
+    let db = RootDatabase::default();
+    let file = SourceFile::new(&db, "test.must".to_owned(), text.to_owned());
+    let diagnostics = crate::file_diagnostics(&db, file);
+    assert_eq!(diagnostics.len(), 1, "diagnostics: {diagnostics:?}");
+    diagnostics[0].fix.clone()
+}
+
+/// The program `text` becomes once the fix labelled `label` on its only
+/// diagnostic is applied.
+fn apply_fix(text: &str, label: &str) -> String {
+    let fix = fix_of(text).expect("diagnostic has a fix");
+    assert_eq!(fix.label, label);
+    let mut edits = fix.edits;
+    edits.sort_by_key(|edit| std::cmp::Reverse(edit.range.start()));
+    let mut fixed = text.to_owned();
+    for edit in edits {
+        fixed.replace_range(std::ops::Range::<usize>::from(edit.range), &edit.insert);
+    }
+    fixed
+}
+
+#[test]
+fn a_borrow_where_a_copyable_value_is_wanted_is_read_through() {
+    let fixed = apply_fix(
+        "static f = fn::<@a>(r: usize.&::<@a>) -> usize { let x: usize = r; x };",
+        "Read through the borrow with `.*`",
+    );
+    assert!(fixed.contains("let x: usize = r.*;"), "fixed: {fixed}");
+    check_diagnostics(&fixed, expect![[r#""#]]);
+    // A binding made by matching through a borrow.
+    let fixed = apply_fix(
+        &[
+            OPT,
+            r#"
+static f = fn::<@a>(s: Opt::<usize>.&::<@a>) -> usize {
+    match s { ::Some(t) => t, ::None => 0 }
+};
+"#,
+        ]
+        .concat(),
+        "Read through the borrow with `.*`",
+    );
+    assert!(fixed.contains("::Some(t) => t.*,"), "fixed: {fixed}");
+    check_diagnostics(&fixed, expect![[r#""#]]);
+    // `.*` goes after the whole operand.
+    let fixed = apply_fix(
+        "static f = fn::<@a>(p: struct { b: usize.&::<@a> }) -> usize { let x: usize = p.b; x };",
+        "Read through the borrow with `.*`",
+    );
+    assert!(fixed.contains("let x: usize = p.b.*;"), "fixed: {fixed}");
+    check_diagnostics(&fixed, expect![[r#""#]]);
+}
+
+#[test]
+fn a_borrow_broken_out_of_a_loop_is_read_through_at_the_break() {
+    let fixed = apply_fix(
+        "static f = fn::<@a>(r: usize.&::<@a>) -> usize { let x: usize = loop { break r; }; x };",
+        "Read through the borrow with `.*`",
+    );
+    assert!(fixed.contains("break r.*;"), "fixed: {fixed}");
+    check_diagnostics(&fixed, expect![[r#""#]]);
+}
+
+#[test]
+fn a_dot_through_a_borrow_to_a_missing_field_has_no_deref_fix() {
+    // `.*` would only reach the next error.
+    assert_eq!(
+        fix_of(
+            r#"
+type P = struct { x: usize };
+static f = fn::<@a>(p: P.&::<@a>) -> usize { p.z };
+"#
+        ),
+        None
+    );
+}
+
+#[test]
+fn a_borrow_written_where_the_value_is_wanted_is_removed() {
+    // The owned value is right there, so it wins over a copy through the
+    // borrow, and needs no copyable referent.
+    let fixed = apply_fix(
+        "static f = fn (n: usize) -> usize { let x: usize = n.&; x };",
+        "Remove the borrow",
+    );
+    assert!(fixed.contains("let x: usize = n;"), "fixed: {fixed}");
+    check_diagnostics(&fixed, expect![[r#""#]]);
+}
+
+#[test]
+fn a_borrow_of_a_value_that_cannot_be_copied_has_no_read_through_fix() {
+    // `.*` would copy a `T`, which may not be copied; giving up the
+    // borrow is a change to the caller, not a mechanical edit here.
+    assert_eq!(
+        fix_of("static f = fn::<@a, T>(r: T.&::<@a>) -> T { r };"),
+        None
+    );
+    // Undoing a borrow of a place reached through `.*` reads through the
+    // deref, which copies just the same.
+    assert_eq!(
+        fix_of("static f = fn::<@a, T>(r: T.&::<@a>) -> T { r.*.& };"),
+        None
+    );
+    // However far into the place the deref sits.
+    assert_eq!(
+        fix_of(
+            r#"
+type P = struct::<T> { t: T };
+static f = fn::<@a, T>(p: P::<T>.&::<@a>) -> T { p.*.t.& };
+"#
+        ),
+        None
+    );
+    assert_eq!(
+        fix_of("static f = fn::<@a, T>(r: T.&::<@a>) -> T { (r.*).& };"),
+        None
+    );
+    assert_eq!(
+        fix_of("static f = fn::<@a, T>(r: [T; 2].&::<@a>) -> T { r.*[0].& };"),
+        None
+    );
+}
+
+#[test]
+fn a_dot_through_a_borrow_offers_the_deref() {
+    // A dot-call reaching a value `Self` through a borrow of a copyable
+    // referent.
+    let fixed = apply_fix(
+        r#"
+type Counter = struct { n: usize } with {
+    impl Self { get = fn (c: Self) -> usize { c.n }; }
+};
+static f = fn::<@a>(c: Counter.&::<@a>) -> usize { c.get() };
+"#,
+        "Insert `.*` before `.get`",
+    );
+    assert!(fixed.contains("{ c.*.get() }"), "fixed: {fixed}");
+    check_diagnostics(&fixed, expect![[r#""#]]);
+    // A builtin member, which takes its receiver by value too.
+    let fixed = apply_fix(
+        "static f = fn::<@a>(r: str.&::<@a>) -> () { let n = r.next_char(0); };",
+        "Insert `.*` before `.next_char`",
+    );
+    assert!(fixed.contains("r.*.next_char(0)"), "fixed: {fixed}");
+    check_diagnostics(&fixed, expect![[r#""#]]);
+    // A field read.
+    let fixed = apply_fix(
+        r#"
+type Counter = struct { n: usize };
+static f = fn::<@a>(c: Counter.&::<@a>) -> usize { c.n };
+"#,
+        "Insert `.*` before `.n`",
+    );
+    assert!(fixed.contains("{ c.*.n }"), "fixed: {fixed}");
+    check_diagnostics(&fixed, expect![[r#""#]]);
+}
+
+#[test]
+fn a_dot_through_a_borrow_of_a_non_copyable_referent_offers_the_deref_when_nothing_is_copied() {
+    // A field read copies only the field, so a copyable field of a
+    // referent that cannot be copied still gets the deref...
+    let fixed = apply_fix(
+        r#"
+type W = struct::<T> { t: T, n: usize };
+static f = fn::<@a, T>(w: W::<T>.&::<@a>) -> usize { w.n };
+"#,
+        "Insert `.*` before `.n`",
+    );
+    assert!(fixed.contains("{ w.*.n }"), "fixed: {fixed}");
+    check_diagnostics(&fixed, expect![[r#""#]]);
+    // ...and a read through a borrow held in the field, which copies what
+    // that borrow leads to...
+    let fixed = apply_fix(
+        r#"
+type B = struct::<T> { r: T };
+static f = fn::<@a, @b>(w: B::<usize.&mut::<@b>>.&::<@a>) -> usize { w.r.* };
+"#,
+        "Insert `.*` before `.r`",
+    );
+    assert!(fixed.contains("{ w.*.r.* }"), "fixed: {fixed}");
+    check_diagnostics(&fixed, expect![[r#""#]]);
+    // ...and a borrow in the field passed on, which is reborrowed...
+    let fixed = apply_fix(
+        r#"
+type B = struct::<T> { r: T };
+static set = fn::<@a>(_r: usize.&mut::<@a>) -> () {};
+static f = fn::<@a, @b>(w: B::<usize.&mut::<@b>>.&mut::<@a>) -> () { set(w.r) };
+"#,
+        "Insert `.*` before `.r`",
+    );
+    assert!(fixed.contains("set(w.*.r)"), "fixed: {fixed}");
+    check_diagnostics(&fixed, expect![[r#""#]]);
+    // ...and a copyable element further down the place.
+    let fixed = apply_fix(
+        r#"
+type W = struct::<T> { t: T, a: [usize; 2] };
+static f = fn::<@a, T>(w: W::<T>.&::<@a>) -> usize { w.a[0] };
+"#,
+        "Insert `.*` before `.a`",
+    );
+    assert!(fixed.contains("{ w.*.a[0] }"), "fixed: {fixed}");
+    check_diagnostics(&fixed, expect![[r#""#]]);
+    // Written through or borrowed, the field is a place and nothing is
+    // copied, however far the place goes on...
+    let fixed = apply_fix(
+        r#"
+type W = struct::<T> { t: T, n: usize };
+static f = fn::<@a, T>(mut w: W::<T>.&mut::<@a>) -> () { w.n = 1; };
+"#,
+        "Insert `.*` before `.n`",
+    );
+    assert!(fixed.contains("{ w.*.n = 1; }"), "fixed: {fixed}");
+    check_diagnostics(&fixed, expect![[r#""#]]);
+    let fixed = apply_fix(
+        r#"
+type W = struct::<T> { t: T, n: usize };
+static f = fn::<@a, T>(w: W::<T>.&::<@a>) -> T.&::<@a> { w.t.& };
+"#,
+        "Insert `.*` before `.t`",
+    );
+    assert!(fixed.contains("{ w.*.t.& }"), "fixed: {fixed}");
+    check_diagnostics(&fixed, expect![[r#""#]]);
+    let fixed = apply_fix(
+        r#"
+type W = struct::<T> { t: [T; 2] };
+static f = fn::<@a, T: forget>(mut w: W::<T>.&mut::<@a>, x: T) -> () { w.t[0] = x; };
+"#,
+        "Insert `.*` before `.t`",
+    );
+    assert!(fixed.contains("{ w.*.t[0] = x; }"), "fixed: {fixed}");
+    check_diagnostics(&fixed, expect![[r#""#]]);
+    let fixed = apply_fix(
+        r#"
+type W = struct::<T> { t: T };
+static f = fn::<@a, T>(w: W::<T>.&::<@a>) -> () { let p = unsafe { w.t.&raw }; };
+"#,
+        "Insert `.*` before `.t`",
+    );
+    assert!(fixed.contains("w.*.t.&raw"), "fixed: {fixed}");
+    // ...but read as a value it would be moved out of the borrow, and a
+    // member taking `Self` by value copies the whole referent.
+    assert_eq!(
+        fix_of(
+            r#"
+type W = struct::<T> { t: T };
+static f = fn::<@a, T>(w: W::<T>.&::<@a>) -> T { w.t };
+"#
+        ),
+        None
+    );
+    assert_eq!(
+        fix_of(
+            r#"
+type W = struct::<T> { t: T } with {
+    impl Self { take = fn (w: Self) -> Self { w }; }
+};
+static f = fn::<@a>(w: W::<str.&mut::<@a>>.&::<@a>) -> W::<str.&mut::<@a>> {
+    w.take()
+};
+"#
+        ),
+        None
     );
 }
 
