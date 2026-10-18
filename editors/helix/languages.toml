@@ -22,12 +22,11 @@
 #   ln -s <this repo>/editors/tree-sitter-must/queries \
 #       ~/.config/helix/runtime/queries/must
 #
-# The grammar is built from the pinned `rev`, the queries are read from the
-# checkout through that link. After a grammar change both `rev`s (here and
-# editors/zed/extension.toml) are bumped to a pushed commit and the grammar
-# is rebuilt; until then a query can name a node the built parser lacks,
-# which shows as an uncolored buffer and a query error in `hx --log`. To
-# use the checkout's grammar directly, replace the source with
+# The grammar is built from the pinned `rev`, the commit of the grammar
+# sources (.github/scripts/grammar-pin.sh); the queries are read from the
+# checkout through that link. A parser built from an older `rev` than the
+# queries shows an uncolored buffer and a query error in `hx --log`: rebuild
+# it. To use the checkout's grammar directly, replace the source with
 # `source = { path = "<this repo>/editors/tree-sitter-must" }` and run
 # `hx --grammar build` after every `npm run generate`.
 
@@ -82,4 +81,4 @@ args = { program = "{0}", stopOnEntry = true }
 
 [[grammar]]
 name = "must"
-source = { git = "https://github.com/halvko/must", rev = "dc73d9496fe57d1487ace30cadf05d179f80e4c2", subpath = "editors/tree-sitter-must" }
+source = { git = "https://github.com/halvko/must", rev = "48dd75a3c10cd6d699e361ca3e33e3a3ad8580d5", subpath = "editors/tree-sitter-must" }

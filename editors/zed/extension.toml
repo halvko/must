@@ -6,16 +6,14 @@ authors = ["Erik Funder Carstensen <fundererik@gmail.com>"]
 description = "Must language support (dev)"
 repository = "https://github.com/halvko/must-lsp-server"
 
-# The grammar is built from `editors/tree-sitter-must` at `rev`, which must
-# be a pushed commit and is bumped (here and in editors/helix/languages.toml)
-# after every change to the grammar; the queries in `languages/must/` are
-# read from this directory, so a stale `rev` shows as an uncolored buffer
-# and a query error in the Zed log. To try an unpushed grammar, point
-# `repository` at a local checkout (`file:///abs/path/to/must`)
-# and `rev` at a commit in it, then reinstall the dev extension.
+# The grammar is built from `editors/tree-sitter-must` at `rev`, the commit of
+# the grammar sources (.github/scripts/grammar-pin.sh). The queries come from
+# `languages/must/`, so a stale `rev` shows as an uncolored buffer and a query
+# error in the Zed log. To try an unpushed grammar, point `repository` at a
+# local checkout (`file:///abs/path/to/must`) and `rev` at a commit in it.
 [grammars.must]
 repository = "https://github.com/halvko/must"
-rev = "dc73d9496fe57d1487ace30cadf05d179f80e4c2"
+rev = "48dd75a3c10cd6d699e361ca3e33e3a3ad8580d5"
 path = "editors/tree-sitter-must"
 
 [language_servers.must-lsp]

@@ -141,13 +141,16 @@ After editing `queries/highlights.scm`, regenerate Zed's copy with
 
 Both editors build the grammar from a pinned commit (`rev` in
 `editors/zed/extension.toml` and `editors/helix/languages.toml`) but read
-the queries from the checkout. A commit cannot name itself, so a grammar
-change lands in two steps: push the change, then bump both `rev`s to it and
-rebuild (`hx --grammar fetch && hx --grammar build`; reinstall the Zed dev
-extension). In between, a query may name a node the pinned parser lacks;
-the symptom is an uncolored buffer and a query error in `hx --log` or the
-Zed log, and `cargo test` cannot see it. When working on the grammar, build
-from the checkout instead: in Helix
+the queries from the checkout. The pinned commit is not one of main's: it
+holds only `src/`, with fixed metadata, so its hash follows from the grammar
+sources, and a grammar change pins it in the same commit with
+`.github/scripts/grammar-pin.sh pin`. CI fails on a pin that does not match
+`src/`, and on main tags the commit `grammar/<rev>` so the editors can fetch
+it. After a grammar change, rebuild (`hx --grammar fetch && hx --grammar
+build`; reinstall the Zed dev extension). A parser built from an older `rev`
+than the queries may lack a node a query names; the symptom is an uncolored
+buffer and a query error in `hx --log` or the Zed log. When working on
+the grammar, build from the checkout instead: in Helix
 `source = { path = "/abs/path/editors/tree-sitter-must" }`, in Zed
 `repository = "file:///abs/path/to/this/repo"` with `rev` a local commit.
 Either way the editor rebuilds only when asked: `hx --grammar build`, or
