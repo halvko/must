@@ -1185,7 +1185,7 @@ static f = fn (n: usize) -> () {
 }
 "#,
         expect![[r#"
-            93..121: every branch produces `str`, but `usize` is needed (this call requires `usize` at 127..138) (this argument needs to be `usize` at 143..144)
+            93..95: every branch produces `str`, but `usize` is needed (this call requires `usize` at 127..138) (this argument needs to be `usize` at 143..144)
         "#]],
     );
 }
@@ -1303,7 +1303,7 @@ static f = fn (n: usize) -> () {
 }
 "#,
         expect![[r#"
-            53..110: every branch produces `str`, but `usize` is needed (expected `usize` because of this annotation at 45..50)
+            53..55: every branch produces `str`, but `usize` is needed (expected `usize` because of this annotation at 45..50)
         "#]],
     );
 }
@@ -1463,7 +1463,7 @@ fn agreeing_branches_against_return_annotation_get_one_diagnostic() {
     check_diagnostics(
         r#"static f = fn (n: usize) -> usize { if n == 0 { "a" } else { "b" } };"#,
         expect![[r#"
-            36..66: every branch produces `str`, but `usize` is needed (expected `usize` because of this return type at 25..33)
+            36..38: every branch produces `str`, but `usize` is needed (expected `usize` because of this return type at 25..33)
         "#]],
     );
 }
@@ -1499,8 +1499,8 @@ fn if_without_else_is_unit() {
     check_diagnostics(
         r#"static f = fn (n: usize) -> usize { if n > 0 { n } };"#,
         expect![[r#"
-            36..50: type mismatch: expected `usize`, found `()` (expected `usize` because of this return type at 25..33)
             47..48: type mismatch: expected `()`, found `usize` (this `if` has no `else`, so its value is `()` at 36..38)
+            49..50: type mismatch: expected `usize`, found `()` (expected `usize` because of this return type at 25..33)
         "#]],
     );
 }
@@ -4069,7 +4069,7 @@ static f = fn () -> usize {
 };
 "#,
         expect![[r#"
-            33..67: type mismatch: expected `usize`, found `str` (expected `usize` because of this return type at 18..26)
+            54..60: type mismatch: expected `usize`, found `str` (expected `usize` because of this return type at 18..26)
         "#]],
     );
 }
@@ -12605,7 +12605,7 @@ type Option = enum::<T> { Some(T), None };
 static f: fn(bool) -> Option::<usize> = fn(b) { if b { 1 } else { ::None } };
 "#,
         expect![[r#"
-            92..118: every branch produces `{number}`, but `Option::<usize>` is needed (expected `Option::<usize>` because of this annotation at 54..81)
+            92..94: every branch produces `{number}`, but `Option::<usize>` is needed (expected `Option::<usize>` because of this annotation at 54..81)
             110..116: cannot resolve `::None` without an expected type — write `Enum::None`
         "#]],
     );
@@ -16863,7 +16863,7 @@ static f = fn (n: usize) -> usize {
 }
 "#,
         expect![[r#"
-            41..85: every branch produces `()`, but `fn(usize) -> usize` is needed
+            41..43: every branch produces `()`, but `fn(usize) -> usize` is needed
             90..91: this `(` continues the expression that ends with the `}` above, rather than starting a new statement; write `;` after that `}` to split them, or move the `(` up onto the same line (or parenthesize the whole expression) if one expression is what you meant
         "#]],
     );
@@ -18105,6 +18105,144 @@ static y = fn(ptr: u8.&raw mut, n: usize) { p(ptr, n); read };
 static p = fn(ptr: u8.&raw mut, n: usize) -> () { x(y(ptr, n), ptr, n); };"#,
         expect![[r#"
             333..342: type mismatch: expected `fn(u8.&raw mut, usize) -> isize`, found `unsafe fn(u8.&raw mut, usize) -> isize`
+        "#]],
+    );
+}
+
+#[test]
+fn unfinished_body_squiggles_only_its_closing_brace() {
+    // The diagnostic inside the body keeps its own squiggle.
+    check_diagnostics(
+        r#"
+type Point = struct { x: usize, y: usize } with {
+    impl Self {
+        d = fn::<@a>(other: Self.&::<@a>, self: Self.&::<@a>) -> usize {
+            let n = other.z;
+        }
+    }
+};
+"#,
+        expect![[r#"
+            160..167: `Point.&::<@a>` is a borrow, so `.z` does not reach through it — there is no auto-deref; write `.*.z`
+            177..178: type mismatch: expected `usize`, found `()` (expected `usize` because of this return type at 129..137)
+        "#]],
+    );
+}
+
+#[test]
+fn unit_valued_block_squiggles_only_its_closing_brace() {
+    // A plain, `const` and `unsafe` block, and the empty `then` branch of
+    // an `if`/`else`.
+    check_diagnostics(
+        r#"
+static x: usize = { };
+static y: usize = const { };
+static f = fn (b: bool) -> usize { if b { } else { 3 } };
+static g = fn () -> usize { unsafe { } };
+"#,
+        expect![[r#"
+            21..22: type mismatch: expected `usize`, found `()` (expected `usize` because of this annotation at 11..16)
+            50..51: type mismatch: expected `usize`, found `()` (expected `usize` because of this annotation at 34..39)
+            95..96: type mismatch: expected `usize`, found `()` (expected `usize` because of this return type at 77..85)
+            148..149: type mismatch: expected `usize`, found `()` (expected `usize` because of this return type at 128..136)
+        "#]],
+    );
+}
+
+#[test]
+fn mismatched_block_with_a_tail_squiggles_the_tail() {
+    // The pointer check blames the `{ p }` argument; the squiggle lands on
+    // its tail.
+    check_diagnostics(
+        r#"static f = fn (p: u16.&raw) -> () { unsafe { str_from_utf8({ p }, 1); }; };"#,
+        expect![[r#"
+            61..62: type mismatch: expected `u8.&raw`, found `u16.&raw`
+        "#]],
+    );
+}
+
+#[test]
+fn unclosed_block_squiggles_the_whole_block() {
+    check_diagnostics(
+        r#"static f = fn () -> usize { let x = 1;"#,
+        expect![[r#"
+            26..38: type mismatch: expected `usize`, found `()` (expected `usize` because of this return type at 17..25)
+            36..37: cannot infer the type of this number: it has no defining use — add a type annotation
+            37..38: expected `}`
+        "#]],
+    );
+}
+
+#[test]
+fn if_without_else_squiggles_its_last_closing_brace() {
+    // The `()` comes from the missing final `else`, after the last branch.
+    check_diagnostics(
+        r#"static f = fn (n: usize) -> usize { if n > 0 { 1 } else if n > 1 { 2 } };"#,
+        expect![[r#"
+            67..68: type mismatch: expected `()`, found `{number}` (this `if` has no `else`, so its value is `()` at 56..58)
+            69..70: type mismatch: expected `usize`, found `()` (expected `usize` because of this return type at 25..33)
+        "#]],
+    );
+}
+
+#[test]
+fn mismatched_if_with_a_diverging_else_squiggles_the_other_branch() {
+    // The `if`'s value is the `then` branch's: the `else` never produces one.
+    check_diagnostics(
+        r#"static f = fn (b: bool) -> usize { if b { true } else { return 1; } };"#,
+        expect![[r#"
+            42..46: type mismatch: expected `usize`, found `bool` (expected `usize` because of this return type at 24..32)
+        "#]],
+    );
+}
+
+#[test]
+fn mismatched_match_with_diverging_arms_squiggles_the_live_arm() {
+    // The `match`'s value is the `_` arm's: the other arm never produces one.
+    check_diagnostics(
+        r#"static f = fn (n: usize) -> usize { match n { 0 => return 1, _ => "x" } };"#,
+        expect![[r#"
+            66..69: type mismatch: expected `usize`, found `str` (expected `usize` because of this return type at 25..33)
+        "#]],
+    );
+}
+
+#[test]
+fn mismatch_every_branch_shares_squiggles_the_keyword() {
+    // No one branch is to blame when they all agree with each other.
+    check_diagnostics(
+        r#"
+static f = fn (b: bool) -> usize { if b { "a" } else { "b" } };
+static g = fn (n: usize) -> usize { match n { 0 => "a", _ => "b" } };
+static h = fn (b: bool) -> usize { loop { if b { break "a"; }; break "b"; } };
+"#,
+        expect![[r#"
+            36..38: every branch produces `str`, but `usize` is needed (expected `usize` because of this return type at 25..33)
+            101..106: every branch produces `str`, but `usize` is needed (expected `usize` because of this return type at 90..98)
+            170..174: every branch produces `str`, but `usize` is needed (expected `usize` because of this return type at 159..167)
+        "#]],
+    );
+}
+
+#[test]
+fn dropped_value_squiggles_its_semicolon() {
+    // The `;` after `x` drops the value the body was meant to return.
+    check_diagnostics(
+        r#"static f = fn (x: usize) -> usize { x; };"#,
+        expect![[r#"
+            37..38: type mismatch: expected `usize`, found `()` (expected `usize` because of this return type at 25..33)
+        "#]],
+    );
+}
+
+#[test]
+fn block_around_an_if_with_one_live_branch_squiggles_that_branch() {
+    // The pointer check blames the `{ .. }` argument whole; its value is
+    // `p`, since the `else` diverges.
+    check_diagnostics(
+        r#"static f = fn (p: u16.&raw, b: bool) -> () { unsafe { str_from_utf8({ if b { p } else { return; } }, 1); }; };"#,
+        expect![[r#"
+            77..78: type mismatch: expected `u8.&raw`, found `u16.&raw`
         "#]],
     );
 }
