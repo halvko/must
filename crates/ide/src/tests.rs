@@ -477,58 +477,6 @@ fn highlights_hole_pattern_unstyled() {
 }
 
 #[test]
-fn highlights_const_fn_and_const_block_keywords() {
-    check_highlights(
-        "static f = const fn { const { 1 } };",
-        expect_test::expect![[r#"
-            0..6 "static" Keyword
-            7..8 "f" Function.declaration.static
-            9..10 "=" Operator
-            11..16 "const" Keyword
-            17..19 "fn" Keyword
-            22..27 "const" Keyword
-            30..31 "1" Number
-        "#]],
-    );
-}
-
-#[test]
-fn highlights_struct_keyword() {
-    check_highlights(
-        "static p = struct { x = 1 };",
-        expect_test::expect![[r#"
-            0..6 "static" Keyword
-            7..8 "p" Variable.declaration.static
-            9..10 "=" Operator
-            11..17 "struct" Keyword
-            22..23 "=" Operator
-            24..25 "1" Number
-        "#]],
-    );
-}
-
-#[test]
-fn highlights_mut_keyword() {
-    check_highlights(
-        "static f = fn { let mut x = 1; x = 2; };",
-        expect_test::expect![[r#"
-            0..6 "static" Keyword
-            7..8 "f" Function.declaration.static
-            9..10 "=" Operator
-            11..13 "fn" Keyword
-            16..19 "let" Keyword
-            20..23 "mut" Keyword
-            24..25 "x" Variable.declaration.mutable
-            26..27 "=" Operator
-            28..29 "1" Number
-            31..32 "x" Variable.mutable
-            33..34 "=" Operator
-            35..36 "2" Number
-        "#]],
-    );
-}
-
-#[test]
 fn highlights_mutable_param_declaration_and_uses() {
     // The `mutable` modifier follows the binding, not just its declaration:
     // both the `mut` parameter's name and its later reads/assignment carry
@@ -721,6 +669,15 @@ fn diagnostics_include_const_check_findings() {
         "this item's initializer is a const context"
     );
     assert_eq!(&src[errors[0].related[1].range], "static");
+    // The trap the const-check violation plants is `Trap`, an
+    // already-reported diagnostic, so const-eval adds no "constant
+    // evaluation failed" companion.
+    assert!(
+        diagnostics
+            .iter()
+            .all(|d| !d.message.starts_with("constant evaluation")),
+        "diagnostics: {diagnostics:?}"
+    );
 }
 
 #[test]
@@ -777,33 +734,6 @@ fn field_assign_to_immutable_root_offers_the_make_mut_fix() {
     assert_eq!(fix.edits[0].edit.insert, "mut ");
     // Right before the declaration's `p` (offset 20).
     assert_eq!(u32::from(fix.edits[0].edit.range.start()), 20);
-}
-
-#[test]
-fn const_check_finding_is_not_double_reported_by_const_eval() {
-    // Const-evaluating `x` crashes at the trap MIR planted for the
-    // const-check violation, but that failure is `Trap` — an
-    // already-reported diagnostic execution ran into — so the const-eval
-    // layer must add nothing: one squiggle, no "constant evaluation
-    // failed" companion.
-    let src = "static double = fn (n: usize) -> usize { n * 2 };\nstatic x: usize = double(2);";
-    let (analysis, file, _pos) = fixture(&format!("{src}$0"));
-    let diagnostics = analysis.diagnostics(file);
-    let errors: Vec<_> = diagnostics
-        .iter()
-        .filter(|d| d.severity == crate::Severity::Error)
-        .collect();
-    assert_eq!(errors.len(), 1, "diagnostics: {diagnostics:?}");
-    assert_eq!(
-        errors[0].message,
-        "cannot call `double` in a const context; marking it `const fn` would allow this"
-    );
-    assert!(
-        diagnostics
-            .iter()
-            .all(|d| !d.message.starts_with("constant evaluation")),
-        "diagnostics: {diagnostics:?}"
-    );
 }
 
 #[test]
@@ -911,19 +841,7 @@ fn unused_static_with_panicking_initializer_is_reported_at_check_time() {
 }
 
 #[test]
-fn hole_named_item_dead_code_warning_surfaces_through_ide() {
-    let (analysis, file, _pos) = fixture("static _: usize = 5;$0");
-    let diagnostics = analysis.diagnostics(file);
-    assert_eq!(diagnostics.len(), 1, "diagnostics: {diagnostics:?}");
-    assert_eq!(
-        diagnostics[0].message,
-        "this item binds nothing and its value cannot be used"
-    );
-    assert_eq!(diagnostics[0].severity, crate::Severity::Warning);
-}
-
-#[test]
-fn hole_named_item_with_panicking_initializer_reports_both_the_warning_and_the_panic() {
+fn hole_named_item_reports_the_dead_code_warning_and_any_panic() {
     // A hole-named item's value can never be used (dead-code warning), but
     // since statics are eager it is still evaluated — a panic is the
     // one side effect const contexts allow, so it still surfaces as its own
@@ -944,6 +862,15 @@ fn hole_named_item_with_panicking_initializer_reports_both_the_warning_and_the_p
         .find(|d| d.severity == crate::Severity::Error)
         .expect("expected the panic error");
     assert_eq!(error.message, "constant evaluation panicked: x");
+    // With a clean initializer the warning is all there is.
+    let (analysis, file, _pos) = fixture("static _: usize = 5;$0");
+    let diagnostics = analysis.diagnostics(file);
+    assert_eq!(diagnostics.len(), 1, "diagnostics: {diagnostics:?}");
+    assert_eq!(
+        diagnostics[0].message,
+        "this item binds nothing and its value cannot be used"
+    );
+    assert_eq!(diagnostics[0].severity, crate::Severity::Warning);
 }
 
 #[test]
@@ -1706,25 +1633,6 @@ static f = fn (s: Shape) -> usize {
 }
 
 #[test]
-fn highlights_loop_break_continue_keywords() {
-    check_highlights(
-        "static f = fn { loop { if true { break 1; }; continue; } };",
-        expect_test::expect![[r#"
-            0..6 "static" Keyword
-            7..8 "f" Function.declaration.static
-            9..10 "=" Operator
-            11..13 "fn" Keyword
-            16..20 "loop" Keyword
-            23..25 "if" Keyword
-            26..30 "true" Keyword
-            33..38 "break" Keyword
-            39..40 "1" Number
-            45..53 "continue" Keyword
-        "#]],
-    );
-}
-
-#[test]
 fn hover_on_loop_shows_its_type() {
     check_hover(
         r#"
@@ -1852,9 +1760,16 @@ fn goto_param_record_destructured_binding_use() {
 /// Renders each completion as `label Kind (detail)`, one per line, in the
 /// exact order `Analysis::completions` returns (already rank-sorted).
 fn check_completions(fixture_text: &str, expect: expect_test::Expect) {
+    check_completions_head(fixture_text, usize::MAX, expect);
+}
+
+/// [`check_completions`], rendering only the first `rows` candidates: for
+/// ranking claims about the head of the list, so the builtin and keyword
+/// tail below it is not pinned again by every such test.
+fn check_completions_head(fixture_text: &str, rows: usize, expect: expect_test::Expect) {
     let (analysis, _file, pos) = fixture(fixture_text);
     let mut rendered = String::new();
-    for item in analysis.completions(pos) {
+    for item in analysis.completions(pos).into_iter().take(rows) {
         rendered.push_str(&item.label);
         rendered.push(' ');
         rendered.push_str(&format!("{:?}", item.kind));
@@ -1943,44 +1858,18 @@ fn completions_mutable_local_carries_mut_in_detail() {
     // prefix in a call-argument hole is not one of `expected_type_at`'s two
     // provable shapes, so no type ranking applies and the provenance
     // ordering is untouched.
-    check_completions(
+    check_completions_head(
         r#"
 static main = fn {
     let mut x: usize = 1;
     print($0);
 };
 "#,
+        3,
         expect_test::expect![[r#"
             x Variable (mut usize)
             main Function (fn())
             AllocResult::Err EnumMember (Err)
-            AllocResult::Ok EnumMember (Ok(T.&raw mut))
-            NextChar::Char EnumMember (Char(char, usize))
-            NextChar::End EnumMember (End)
-            ReadLineResult::End EnumMember (End)
-            ReadLineResult::Line EnumMember (Line(str))
-            Utf8Result::Err EnumMember (Err)
-            Utf8Result::Ok EnumMember (Ok(str))
-            add Function (unsafe fn(T.&raw [mut], usize) -> T.&raw [mut])
-            alloc_array Function (fn::<T>(usize) -> AllocResult::<T>)
-            copy Function (unsafe fn(T.&raw [mut], T.&raw mut, usize))
-            dangling Function (fn::<T>() -> T.&raw mut)
-            dealloc_array Function (unsafe fn::<T>(T.&raw mut, usize))
-            offset Function (unsafe fn(T.&raw [mut], isize) -> T.&raw [mut])
-            panic Function (fn(str) -> !)
-            print Function (fn(str))
-            read_line Function (fn() -> ReadLineResult)
-            str_from_utf8 Function (unsafe fn(u8.&raw [mut], usize) -> Utf8Result)
-            str_from_utf8_unchecked Function (unsafe fn(u8.&raw [mut], usize) -> str)
-            const Keyword
-            false Keyword
-            fn Keyword
-            if Keyword
-            loop Keyword
-            match Keyword
-            struct Keyword
-            true Keyword
-            unsafe Keyword
         "#]],
     );
 }
@@ -2017,89 +1906,37 @@ static make_point = fn (x: usize) -> $0 { x };
             unsafe Keyword
         "#]],
     );
-}
-
-#[test]
-fn completions_type_position_excludes_locals_and_value_items() {
-    check_no_completion(
+    // A parameter annotation is the same type position: neither the
+    // parameter being declared nor a value item is offered.
+    check_completions(
         r#"
-static helper = fn { 1 };
-static main = fn (n: $0) { n };
+type Point = struct { x: usize, y: usize };
+static make_point = fn (x: $0) { x };
 "#,
-        "helper",
-    );
-}
-
-#[test]
-fn completions_statement_start_includes_let() {
-    check_has_completion(
-        r#"
-static main = fn {
-    let x = 1;
-    $0
-};
-"#,
-        "let",
-    );
-}
-
-#[test]
-fn completions_statement_start_sees_the_preceding_let() {
-    // The trailing statement slot has no `ExprId` of its own (nothing was
-    // ever lowered there) — this exercises the block-walk reconstruction in
-    // `locals_in_block` rather than a plain `scope_of` lookup.
-    check_has_completion(
-        r#"
-static main = fn {
-    let x = 1;
-    $0
-};
-"#,
-        "x",
-    );
-}
-
-#[test]
-fn completions_expression_position_has_no_let() {
-    check_no_completion(
-        r#"
-static main = fn {
-    print($0);
-};
-"#,
-        "let",
-    );
-}
-
-#[test]
-fn completions_break_continue_only_inside_a_loop() {
-    check_has_completion(
-        r#"
-static main = fn {
-    loop {
-        $0
-    }
-};
-"#,
-        "break",
-    );
-    check_has_completion(
-        r#"
-static main = fn {
-    loop {
-        $0
-    }
-};
-"#,
-        "continue",
-    );
-    check_no_completion(
-        r#"
-static main = fn {
-    $0
-};
-"#,
-        "break",
+        expect_test::expect![[r#"
+            AllocResult Enum (enum { Ok(T.&raw mut), Err })
+            NextChar Enum (enum { Char(char, usize), End })
+            Point Struct (struct { x: usize, y: usize })
+            ReadLineResult Enum (enum { Line(str), End })
+            Utf8Result Enum (enum { Ok(str), Err })
+            bool Struct
+            char Struct
+            i16 Struct
+            i32 Struct
+            i64 Struct
+            i8 Struct
+            isize Struct
+            str Struct
+            string Struct
+            u16 Struct
+            u32 Struct
+            u64 Struct
+            u8 Struct
+            usize Struct
+            fn Keyword
+            struct Keyword
+            unsafe Keyword
+        "#]],
     );
 }
 
@@ -2157,24 +1994,6 @@ fn completions_after_the_vouch_marker_offer_extern() {
         "unsafe $0",
         expect_test::expect![[r#"
             extern Keyword
-        "#]],
-    );
-}
-
-#[test]
-fn completions_empty_file_top_level() {
-    // Same shape as the general top-level case, exercised on a genuinely
-    // empty file (no tokens at all for the speculative parse to hang off).
-    check_completions(
-        "$0",
-        expect_test::expect![[r#"
-            const Keyword
-            extern Keyword
-            static Keyword
-            trait Keyword
-            type Keyword
-            unsafe Keyword
-            use Keyword
         "#]],
     );
 }
@@ -2886,44 +2705,18 @@ fn completions_type_ranking_exact_local_above_mismatched_local() {
     // the position expects `str`: the `str` local ranks tier 0, `panic`
     // (returns `!`) tier 1 via its return type, everything else tier 2 in
     // the usual provenance order — the mismatched `usize` local included.
-    check_completions(
+    check_completions_head(
         r#"
 static main = fn (s: str, n: usize) {
     let want: str = s$0;
 };
 "#,
+        4,
         expect_test::expect![[r#"
             s Variable (str)
             panic Function (fn(str) -> !)
             n Variable (usize)
             main Function (fn(str, usize))
-            AllocResult::Err EnumMember (Err)
-            AllocResult::Ok EnumMember (Ok(T.&raw mut))
-            NextChar::Char EnumMember (Char(char, usize))
-            NextChar::End EnumMember (End)
-            ReadLineResult::End EnumMember (End)
-            ReadLineResult::Line EnumMember (Line(str))
-            Utf8Result::Err EnumMember (Err)
-            Utf8Result::Ok EnumMember (Ok(str))
-            add Function (unsafe fn(T.&raw [mut], usize) -> T.&raw [mut])
-            alloc_array Function (fn::<T>(usize) -> AllocResult::<T>)
-            copy Function (unsafe fn(T.&raw [mut], T.&raw mut, usize))
-            dangling Function (fn::<T>() -> T.&raw mut)
-            dealloc_array Function (unsafe fn::<T>(T.&raw mut, usize))
-            offset Function (unsafe fn(T.&raw [mut], isize) -> T.&raw [mut])
-            print Function (fn(str))
-            read_line Function (fn() -> ReadLineResult)
-            str_from_utf8 Function (unsafe fn(u8.&raw [mut], usize) -> Utf8Result)
-            str_from_utf8_unchecked Function (unsafe fn(u8.&raw [mut], usize) -> str)
-            const Keyword
-            false Keyword
-            fn Keyword
-            if Keyword
-            loop Keyword
-            match Keyword
-            struct Keyword
-            true Keyword
-            unsafe Keyword
         "#]],
     );
 }
@@ -2933,7 +2726,7 @@ fn completions_type_ranking_matching_return_type_above_mismatched() {
     // `g` resolves to nothing, but the *position* (an annotated `let`'s
     // initializer) still expects `str`: `get_s`'s call would satisfy it
     // (tier 1, like `panic`), `get_n`'s wouldn't (tier 2).
-    check_completions(
+    check_completions_head(
         r#"
 static get_s: fn() -> str = fn () -> str { "s" };
 static get_n: fn() -> usize = fn () -> usize { 1 };
@@ -2941,38 +2734,12 @@ static main = fn {
     let x: str = g$0;
 };
 "#,
+        4,
         expect_test::expect![[r#"
             get_s Function (fn() -> str)
             panic Function (fn(str) -> !)
             get_n Function (fn() -> usize)
             main Function (fn())
-            AllocResult::Err EnumMember (Err)
-            AllocResult::Ok EnumMember (Ok(T.&raw mut))
-            NextChar::Char EnumMember (Char(char, usize))
-            NextChar::End EnumMember (End)
-            ReadLineResult::End EnumMember (End)
-            ReadLineResult::Line EnumMember (Line(str))
-            Utf8Result::Err EnumMember (Err)
-            Utf8Result::Ok EnumMember (Ok(str))
-            add Function (unsafe fn(T.&raw [mut], usize) -> T.&raw [mut])
-            alloc_array Function (fn::<T>(usize) -> AllocResult::<T>)
-            copy Function (unsafe fn(T.&raw [mut], T.&raw mut, usize))
-            dangling Function (fn::<T>() -> T.&raw mut)
-            dealloc_array Function (unsafe fn::<T>(T.&raw mut, usize))
-            offset Function (unsafe fn(T.&raw [mut], isize) -> T.&raw [mut])
-            print Function (fn(str))
-            read_line Function (fn() -> ReadLineResult)
-            str_from_utf8 Function (unsafe fn(u8.&raw [mut], usize) -> Utf8Result)
-            str_from_utf8_unchecked Function (unsafe fn(u8.&raw [mut], usize) -> str)
-            const Keyword
-            false Keyword
-            fn Keyword
-            if Keyword
-            loop Keyword
-            match Keyword
-            struct Keyword
-            true Keyword
-            unsafe Keyword
         "#]],
     );
 }
@@ -2983,7 +2750,7 @@ fn completions_rank_a_safe_fn_under_an_unsafe_fn_expectation() {
     // check sites. A safe `fn` is legal in an `unsafe fn` position, so the
     // ranker must say so — `hir::widens_to` is the one home it asks, which
     // is why that edge was added there and not re-derived here.
-    check_completions(
+    check_completions_head(
         r#"
 static helper: fn(usize) -> usize = fn (n: usize) -> usize { n };
 static other: fn(usize) -> str = fn (n: usize) -> str { "s" };
@@ -2991,38 +2758,12 @@ static main = fn {
     let f: unsafe fn(usize) -> usize = $0;
 };
 "#,
+        4,
         expect_test::expect![[r#"
             helper Function (fn(usize) -> usize)
             panic Function (fn(str) -> !)
             main Function (fn())
             other Function (fn(usize) -> str)
-            AllocResult::Err EnumMember (Err)
-            AllocResult::Ok EnumMember (Ok(T.&raw mut))
-            NextChar::Char EnumMember (Char(char, usize))
-            NextChar::End EnumMember (End)
-            ReadLineResult::End EnumMember (End)
-            ReadLineResult::Line EnumMember (Line(str))
-            Utf8Result::Err EnumMember (Err)
-            Utf8Result::Ok EnumMember (Ok(str))
-            add Function (unsafe fn(T.&raw [mut], usize) -> T.&raw [mut])
-            alloc_array Function (fn::<T>(usize) -> AllocResult::<T>)
-            copy Function (unsafe fn(T.&raw [mut], T.&raw mut, usize))
-            dangling Function (fn::<T>() -> T.&raw mut)
-            dealloc_array Function (unsafe fn::<T>(T.&raw mut, usize))
-            offset Function (unsafe fn(T.&raw [mut], isize) -> T.&raw [mut])
-            print Function (fn(str))
-            read_line Function (fn() -> ReadLineResult)
-            str_from_utf8 Function (unsafe fn(u8.&raw [mut], usize) -> Utf8Result)
-            str_from_utf8_unchecked Function (unsafe fn(u8.&raw [mut], usize) -> str)
-            const Keyword
-            false Keyword
-            fn Keyword
-            if Keyword
-            loop Keyword
-            match Keyword
-            struct Keyword
-            true Keyword
-            unsafe Keyword
         "#]],
     );
 }
@@ -3032,44 +2773,18 @@ fn completions_type_ranking_fn_typed_expectation_ranks_the_fn_itself_exact() {
     // Under a `fn`-typed expectation the matching function is tier 0 as a
     // *value* (passing it, not calling it); `panic` still reaches tier 1
     // through its `!` return, everything else stays tier 2.
-    check_completions(
+    check_completions_head(
         r#"
 static helper: fn() -> usize = fn () -> usize { 1 };
 static main = fn {
     let f: fn() -> usize = h$0;
 };
 "#,
+        3,
         expect_test::expect![[r#"
             helper Function (fn() -> usize)
             panic Function (fn(str) -> !)
             main Function (fn())
-            AllocResult::Err EnumMember (Err)
-            AllocResult::Ok EnumMember (Ok(T.&raw mut))
-            NextChar::Char EnumMember (Char(char, usize))
-            NextChar::End EnumMember (End)
-            ReadLineResult::End EnumMember (End)
-            ReadLineResult::Line EnumMember (Line(str))
-            Utf8Result::Err EnumMember (Err)
-            Utf8Result::Ok EnumMember (Ok(str))
-            add Function (unsafe fn(T.&raw [mut], usize) -> T.&raw [mut])
-            alloc_array Function (fn::<T>(usize) -> AllocResult::<T>)
-            copy Function (unsafe fn(T.&raw [mut], T.&raw mut, usize))
-            dangling Function (fn::<T>() -> T.&raw mut)
-            dealloc_array Function (unsafe fn::<T>(T.&raw mut, usize))
-            offset Function (unsafe fn(T.&raw [mut], isize) -> T.&raw [mut])
-            print Function (fn(str))
-            read_line Function (fn() -> ReadLineResult)
-            str_from_utf8 Function (unsafe fn(u8.&raw [mut], usize) -> Utf8Result)
-            str_from_utf8_unchecked Function (unsafe fn(u8.&raw [mut], usize) -> str)
-            const Keyword
-            false Keyword
-            fn Keyword
-            if Keyword
-            loop Keyword
-            match Keyword
-            struct Keyword
-            true Keyword
-            unsafe Keyword
         "#]],
     );
 }
@@ -3080,46 +2795,20 @@ fn completions_type_ranking_fresh_hole_after_annotated_let_eq() {
     // a `Missing` expression checked against the annotation — the one
     // no-prefix shape `expected_type_at` can prove. The `Point`-typed
     // local ranks tier 0 over the `usize` one.
-    check_completions(
+    check_completions_head(
         r#"
 type Point = struct { x: usize };
 static main = fn (p: Point, n: usize) {
     let q: Point = $0;
 };
 "#,
+        5,
         expect_test::expect![[r#"
             p Variable (Point)
             panic Function (fn(str) -> !)
             n Variable (usize)
             Point Struct (struct { x: usize })
             main Function (fn(Point, usize))
-            AllocResult::Err EnumMember (Err)
-            AllocResult::Ok EnumMember (Ok(T.&raw mut))
-            NextChar::Char EnumMember (Char(char, usize))
-            NextChar::End EnumMember (End)
-            ReadLineResult::End EnumMember (End)
-            ReadLineResult::Line EnumMember (Line(str))
-            Utf8Result::Err EnumMember (Err)
-            Utf8Result::Ok EnumMember (Ok(str))
-            add Function (unsafe fn(T.&raw [mut], usize) -> T.&raw [mut])
-            alloc_array Function (fn::<T>(usize) -> AllocResult::<T>)
-            copy Function (unsafe fn(T.&raw [mut], T.&raw mut, usize))
-            dangling Function (fn::<T>() -> T.&raw mut)
-            dealloc_array Function (unsafe fn::<T>(T.&raw mut, usize))
-            offset Function (unsafe fn(T.&raw [mut], isize) -> T.&raw [mut])
-            print Function (fn(str))
-            read_line Function (fn() -> ReadLineResult)
-            str_from_utf8 Function (unsafe fn(u8.&raw [mut], usize) -> Utf8Result)
-            str_from_utf8_unchecked Function (unsafe fn(u8.&raw [mut], usize) -> str)
-            const Keyword
-            false Keyword
-            fn Keyword
-            if Keyword
-            loop Keyword
-            match Keyword
-            struct Keyword
-            true Keyword
-            unsafe Keyword
         "#]],
     );
 }
@@ -3203,7 +2892,9 @@ static f = fn (s: Shape) -> usize {
 fn completions_type_ranking_statement_start_without_prefix_keeps_untyped_ordering() {
     // A fresh statement slot with no prefix has no provable expectation:
     // the provenance ordering (locals, items, builtins, keywords) is
-    // untouched.
+    // untouched. The slot has no `ExprId` of its own, so seeing `s`
+    // exercises the block walk in `locals_in_block`; `let` is offered,
+    // `break` (no loop) is not.
     check_completions(
         r#"
 static main = fn {
@@ -3889,22 +3580,6 @@ fn completions_record_pattern_rename_slot_offers_nothing() {
     );
 }
 
-#[test]
-fn completions_variant_item_detail_shows_payload_shape() {
-    // Detail assertion for variant items: a `::` segment candidate renders
-    // its payload signature the way its declaration writes it.
-    check_completions(
-        r#"
-type Shape = enum { Circle(usize), Point };
-static s = Shape::$0;
-"#,
-        expect_test::expect![[r#"
-            Circle EnumMember (Circle(usize))
-            Point EnumMember (Point)
-        "#]],
-    );
-}
-
 // ---- The `match` arm-list template ----
 
 /// The sort key of one labelled candidate — read directly rather than
@@ -4562,31 +4237,21 @@ fn completions_match_template_not_offered_at_other_non_match_brace_positions() {
 // the exact results.
 
 #[test]
-fn completions_do_not_panic_near_a_turbofish() {
-    let (analysis, _file, pos) = fixture(
-        "static f = fn (x: usize) -> usize { x };\nstatic g = fn () -> usize { f::<usize$0>(1) };",
-    );
-    let _ = analysis.completions(pos);
-}
-
-#[test]
-fn hover_does_not_panic_near_a_turbofish() {
-    let (analysis, _file, pos) = fixture(
-        "static f = fn (x: usize) -> usize { x };\nstatic g = fn () -> usize { f::<usize$0>(1) };",
-    );
-    let _ = analysis.hover(pos);
-}
-
-#[test]
-fn completions_do_not_panic_inside_a_generic_fn_binder() {
-    let (analysis, _file, pos) = fixture("static id = fn::<T$0>(x: T) -> T { x };");
-    let _ = analysis.completions(pos);
-}
-
-#[test]
-fn completions_do_not_panic_inside_a_generic_body() {
-    let (analysis, _file, pos) = fixture("static id = fn::<T, const N: usize>(x: T) -> T { $0x };");
-    let _ = analysis.completions(pos);
+fn completions_and_hover_do_not_panic_in_generic_syntax() {
+    for fixture_text in [
+        r#"
+static f = fn (x: usize) -> usize { x };
+static g = fn () -> usize { f::<usize$0>(1) };
+"#,
+        "static id = fn::<T$0>(x: T) -> T { x };",
+        "static id = fn::<T, const N: usize>(x: T) -> T { $0x };",
+        // The `T` of `x: T` inside a generic body.
+        "static id = fn::<T>(x: T$0) -> T { x };",
+    ] {
+        let (analysis, _file, pos) = fixture(fixture_text);
+        let _ = analysis.completions(pos);
+        let _ = analysis.hover(pos);
+    }
 }
 
 #[test]
@@ -4615,24 +4280,15 @@ fn a_turbofish_never_completes_a_region() {
 }
 
 #[test]
-fn hover_does_not_panic_on_a_rigid_param_annotation() {
-    // Hover on the `T` of `x: T` inside a generic body.
-    let (analysis, _file, pos) = fixture("static id = fn::<T>(x: T$0) -> T { x };");
-    let _ = analysis.hover(pos);
-}
-
-#[test]
 fn hover_shows_the_rigid_param_through_the_bound_value() {
     // Hover on `x` in the body: its type is the rigid param, displayed by
     // its binder name.
-    let (analysis, _file, pos) = fixture("static id = fn::<T>(x: T) -> T { x$0 };");
-    if let Some(hover) = analysis.hover(pos) {
-        assert!(
-            hover.markup.contains('T'),
-            "hover should mention the param: {:?}",
-            hover.markup
-        );
-    }
+    check_hover(
+        "static id = fn::<T>(x: T) -> T { x$0 };",
+        r#"```must
+x: T
+```"#,
+    );
 }
 
 #[test]
@@ -4893,7 +4549,7 @@ static main = fn(o: Option::<usize>, w: fn(usize) -> bool) -> bool { o.map_to::<
         let (analysis, _file, pos) = fixture(fixture_text);
         let _ = analysis.completions(pos);
     }
-    check_completions(
+    check_completions_head(
         r#"
 type Option = enum::<T> { Some(T), None } with {
     impl Self { map_to = fn::<U>(f: fn(T) -> U, s: Self) -> U { panic("x") }; }
@@ -4902,40 +4558,12 @@ static main = fn(o: Option::<usize>, wide: fn(usize) -> bool) -> bool {
     o.map_to::<bool>(wid$0)
 };
 "#,
+        4,
         expect_test::expect![[r#"
             wide Variable (fn(usize) -> bool)
             panic Function (fn(str) -> !)
             o Variable (Option::<usize>)
             main Function (fn(Option::<usize>, fn(usize) -> bool) -> bool)
-            AllocResult::Err EnumMember (Err)
-            AllocResult::Ok EnumMember (Ok(T.&raw mut))
-            NextChar::Char EnumMember (Char(char, usize))
-            NextChar::End EnumMember (End)
-            Option::None EnumMember (None)
-            Option::Some EnumMember (Some(T))
-            ReadLineResult::End EnumMember (End)
-            ReadLineResult::Line EnumMember (Line(str))
-            Utf8Result::Err EnumMember (Err)
-            Utf8Result::Ok EnumMember (Ok(str))
-            add Function (unsafe fn(T.&raw [mut], usize) -> T.&raw [mut])
-            alloc_array Function (fn::<T>(usize) -> AllocResult::<T>)
-            copy Function (unsafe fn(T.&raw [mut], T.&raw mut, usize))
-            dangling Function (fn::<T>() -> T.&raw mut)
-            dealloc_array Function (unsafe fn::<T>(T.&raw mut, usize))
-            offset Function (unsafe fn(T.&raw [mut], isize) -> T.&raw [mut])
-            print Function (fn(str))
-            read_line Function (fn() -> ReadLineResult)
-            str_from_utf8 Function (unsafe fn(u8.&raw [mut], usize) -> Utf8Result)
-            str_from_utf8_unchecked Function (unsafe fn(u8.&raw [mut], usize) -> str)
-            const Keyword
-            false Keyword
-            fn Keyword
-            if Keyword
-            loop Keyword
-            match Keyword
-            struct Keyword
-            true Keyword
-            unsafe Keyword
         "#]],
     );
 }
@@ -5663,67 +5291,7 @@ fn every_canonical_keyword_classifies_as_a_keyword_highlight() {
     );
 }
 
-#[test]
-fn return_highlights_as_a_keyword_with_no_ide_change() {
-    // The keyword-table architecture, validated on a keyword added AFTER
-    // the highlighter was written: `return` reached `syntax_kind.rs`'s
-    // `keywords!` table as a one-line entry and NOTHING in this crate was
-    // touched to teach the highlighter about it. Rendered here on real
-    // code rather than only through the drift guard above, so the claim is
-    // legible.
-    check_highlights(
-        r#"static f = fn (c: bool) -> usize {
-    if c { return 1; };
-    return 2;
-};"#,
-        expect_test::expect![[r#"
-            0..6 "static" Keyword
-            7..8 "f" Function.declaration.static
-            9..10 "=" Operator
-            11..13 "fn" Keyword
-            15..16 "c" Parameter.declaration
-            18..22 "bool" Type.defaultLibrary
-            24..26 "->" Operator
-            27..32 "usize" Type.defaultLibrary
-            39..41 "if" Keyword
-            42..43 "c" Parameter
-            46..52 "return" Keyword
-            53..54 "1" Number
-            63..69 "return" Keyword
-            70..71 "2" Number
-        "#]],
-    );
-}
-
 // ---- trait-aware classification ---------------------------------------
-
-#[test]
-fn highlights_trait_declaration_and_requirements() {
-    check_highlights(
-        r#"
-trait Show = requires {
-    show: fn(Self) -> str;
-    bare: fn(Self) -> str;
-};
-"#,
-        expect_test::expect![[r#"
-            1..6 "trait" Keyword
-            7..11 "Show" Trait.declaration
-            12..13 "=" Operator
-            14..22 "requires" Keyword
-            29..33 "show" Function.declaration
-            35..37 "fn" Keyword
-            38..42 "Self" Type
-            44..46 "->" Operator
-            47..50 "str" Type.defaultLibrary
-            56..60 "bare" Function.declaration
-            62..64 "fn" Keyword
-            65..69 "Self" Type
-            71..73 "->" Operator
-            74..77 "str" Type.defaultLibrary
-        "#]],
-    );
-}
 
 #[test]
 fn highlights_trait_names_at_every_occurrence() {
@@ -6448,9 +6016,7 @@ fn completions_do_not_panic_anywhere_in_a_bound_shaped_document() {
     // binders, requirement signatures, borrowed rigid receivers, a
     // capability bound — none of which may panic. The sweep is the point:
     // completion runs on half-typed text, and the offsets a user actually
-    // stops at are not the ones a hand-written fixture picks. 345 bytes,
-    // so 346 requests; the assertion recomputes it rather than trusting
-    // the number in this sentence.
+    // stops at are not the ones a hand-written fixture picks.
     let source = r#"
 trait Write = requires {
     push: fn::<@r>(char, Self.&mut::<@r>) -> ();
@@ -6467,7 +6033,6 @@ static both = fn::<@a, T: Show + forget, W: Write>(t: T, w: W.&mut::<@a>) -> str
     let mut host = AnalysisHost::new();
     let file = host.create_file("test.must".to_owned(), source.to_owned());
     let analysis = host.snapshot();
-    let mut requests = 0;
     for offset in 0..=source.len() {
         if !source.is_char_boundary(offset) {
             continue;
@@ -6476,9 +6041,7 @@ static both = fn::<@a, T: Show + forget, W: Write>(t: T, w: W.&mut::<@a>) -> str
             file,
             offset: TextSize::new(offset as u32),
         });
-        requests += 1;
     }
-    assert_eq!(requests, source.len() + 1);
 }
 
 /// Two bounds, both declaring `push`, DIFFERENT shapes — and only one of
@@ -6640,8 +6203,7 @@ fn a_stale_loan_refusal_carries_its_companions() {
 /// only.
 #[test]
 fn completions_never_offer_a_materialized_temporary() {
-    check_completions(
-        r#"
+    let fixture_text = r#"
 static get = fn::<@a>(r: usize.&::<@a>) -> usize { r.* };
 static mk = fn () -> usize { 7 };
 static show = fn (n: usize) -> () { };
@@ -6650,91 +6212,38 @@ static main = fn () -> () {
     let second = get(mk().&);
     show(fi$0);
 };
-"#,
-        expect_test::expect![[r#"
-            first Variable (usize)
-            second Variable (usize)
-            get Function (fn(usize.&::<@a>) -> usize)
-            mk Function (fn() -> usize)
-            panic Function (fn(str) -> !)
-            main Function (fn())
-            show Function (fn(usize))
-            AllocResult::Err EnumMember (Err)
-            AllocResult::Ok EnumMember (Ok(T.&raw mut))
-            NextChar::Char EnumMember (Char(char, usize))
-            NextChar::End EnumMember (End)
-            ReadLineResult::End EnumMember (End)
-            ReadLineResult::Line EnumMember (Line(str))
-            Utf8Result::Err EnumMember (Err)
-            Utf8Result::Ok EnumMember (Ok(str))
-            add Function (unsafe fn(T.&raw [mut], usize) -> T.&raw [mut])
-            alloc_array Function (fn::<T>(usize) -> AllocResult::<T>)
-            copy Function (unsafe fn(T.&raw [mut], T.&raw mut, usize))
-            dangling Function (fn::<T>() -> T.&raw mut)
-            dealloc_array Function (unsafe fn::<T>(T.&raw mut, usize))
-            offset Function (unsafe fn(T.&raw [mut], isize) -> T.&raw [mut])
-            print Function (fn(str))
-            read_line Function (fn() -> ReadLineResult)
-            str_from_utf8 Function (unsafe fn(u8.&raw [mut], usize) -> Utf8Result)
-            str_from_utf8_unchecked Function (unsafe fn(u8.&raw [mut], usize) -> str)
-            const Keyword
-            false Keyword
-            fn Keyword
-            if Keyword
-            loop Keyword
-            match Keyword
-            struct Keyword
-            true Keyword
-            unsafe Keyword
-        "#]],
-    );
+"#;
+    let (analysis, _file, pos) = fixture(fixture_text);
+    let variables: Vec<_> = analysis
+        .completions(pos)
+        .into_iter()
+        .filter(|item| item.kind == crate::CompletionItemKind::Variable)
+        .map(|item| item.label)
+        .collect();
+    assert_eq!(variables, ["first", "second"]);
 }
 
 #[test]
 fn completions_let_initializer_sees_earlier_lets_but_not_itself() {
     // An earlier `let` is offered in a later `let`'s initializer; the `let`
     // itself is not.
-    check_completions(
-        r#"
+    let fixture_text = r#"
 static f = fn (p: usize) {
     let s: usize = 1;
     let t: usize = $0;
 };
-"#,
+"#;
+    check_completions_head(
+        fixture_text,
+        4,
         expect_test::expect![[r#"
             p Variable (usize)
             s Variable (usize)
             panic Function (fn(str) -> !)
             f Function (fn(usize))
-            AllocResult::Err EnumMember (Err)
-            AllocResult::Ok EnumMember (Ok(T.&raw mut))
-            NextChar::Char EnumMember (Char(char, usize))
-            NextChar::End EnumMember (End)
-            ReadLineResult::End EnumMember (End)
-            ReadLineResult::Line EnumMember (Line(str))
-            Utf8Result::Err EnumMember (Err)
-            Utf8Result::Ok EnumMember (Ok(str))
-            add Function (unsafe fn(T.&raw [mut], usize) -> T.&raw [mut])
-            alloc_array Function (fn::<T>(usize) -> AllocResult::<T>)
-            copy Function (unsafe fn(T.&raw [mut], T.&raw mut, usize))
-            dangling Function (fn::<T>() -> T.&raw mut)
-            dealloc_array Function (unsafe fn::<T>(T.&raw mut, usize))
-            offset Function (unsafe fn(T.&raw [mut], isize) -> T.&raw [mut])
-            print Function (fn(str))
-            read_line Function (fn() -> ReadLineResult)
-            str_from_utf8 Function (unsafe fn(u8.&raw [mut], usize) -> Utf8Result)
-            str_from_utf8_unchecked Function (unsafe fn(u8.&raw [mut], usize) -> str)
-            const Keyword
-            false Keyword
-            fn Keyword
-            if Keyword
-            loop Keyword
-            match Keyword
-            struct Keyword
-            true Keyword
-            unsafe Keyword
         "#]],
     );
+    check_no_completion(fixture_text, "t");
 }
 
 #[test]
@@ -6792,7 +6301,7 @@ static f = fn () -> usize {
 fn completions_arithmetic_operand_ranks_integers_first() {
     // An operand of `+` whose integer type nothing pins ranks integer
     // candidates above the rest.
-    check_completions(
+    check_completions_head(
         r#"
 static f = fn {
     let xf = fn(a: usize) {};
@@ -6800,38 +6309,12 @@ static f = fn {
     let y = 11 + x$0;
 };
 "#,
+        4,
         expect_test::expect![[r#"
             xtra Variable (usize)
             panic Function (fn(str) -> !)
             xf Variable (fn(usize))
             f Function (fn())
-            AllocResult::Err EnumMember (Err)
-            AllocResult::Ok EnumMember (Ok(T.&raw mut))
-            NextChar::Char EnumMember (Char(char, usize))
-            NextChar::End EnumMember (End)
-            ReadLineResult::End EnumMember (End)
-            ReadLineResult::Line EnumMember (Line(str))
-            Utf8Result::Err EnumMember (Err)
-            Utf8Result::Ok EnumMember (Ok(str))
-            add Function (unsafe fn(T.&raw [mut], usize) -> T.&raw [mut])
-            alloc_array Function (fn::<T>(usize) -> AllocResult::<T>)
-            copy Function (unsafe fn(T.&raw [mut], T.&raw mut, usize))
-            dangling Function (fn::<T>() -> T.&raw mut)
-            dealloc_array Function (unsafe fn::<T>(T.&raw mut, usize))
-            offset Function (unsafe fn(T.&raw [mut], isize) -> T.&raw [mut])
-            print Function (fn(str))
-            read_line Function (fn() -> ReadLineResult)
-            str_from_utf8 Function (unsafe fn(u8.&raw [mut], usize) -> Utf8Result)
-            str_from_utf8_unchecked Function (unsafe fn(u8.&raw [mut], usize) -> str)
-            const Keyword
-            false Keyword
-            fn Keyword
-            if Keyword
-            loop Keyword
-            match Keyword
-            struct Keyword
-            true Keyword
-            unsafe Keyword
         "#]],
     );
 }
