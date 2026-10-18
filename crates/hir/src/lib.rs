@@ -49,7 +49,9 @@ pub use scopes::{
     alloc_result_loc, expr_scopes, file_scope, next_char_loc, read_line_result_loc, resolutions,
     synthetic_decl_loc, synthetic_decl_named, synthetic_decls, type_scope, utf8_result_loc,
 };
-pub use traits::{BoundDotOffer, BoundSlot, bound_dot_offers, bound_slots, dict_param_count};
+pub use traits::{
+    BoundDotOffer, BoundSlot, bound_dot_offers, bound_slots, dict_param_count, impl_dot_offers,
+};
 pub use trap_sites::{
     BodyError, ErrorOwners, TrapSite, error_owners, range_traps, trap_sites_for_pats,
 };
@@ -340,6 +342,21 @@ pub fn member_item_ids<'db>(db: &'db dyn Db, owner: ItemId<'db>) -> Vec<ItemId<'
                 owner.disambiguator(db),
                 Some((m.name.clone(), m.disambiguator)),
             )
+        })
+        .collect()
+}
+
+/// The INHERENT members of a type item (`impl Self { ... }`): the ones a
+/// dot-call resolves by their own name. A trait impl's members (`impl Ord`
+/// in the type's chain) are named `Ord::ord` and are reached through the
+/// trait instead ([`impl_dot_offers`]).
+pub fn inherent_member_ids<'db>(db: &'db dyn Db, owner: ItemId<'db>) -> Vec<ItemId<'db>> {
+    member_item_ids(db, owner)
+        .into_iter()
+        .filter(|id| {
+            id.member(db)
+                .as_ref()
+                .is_some_and(|(name, _)| !name.contains("::"))
         })
         .collect()
 }

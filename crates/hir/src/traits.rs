@@ -760,3 +760,99 @@ pub fn bound_dot_offers<'db>(
     }
     out
 }
+
+/// Every trait member a CONCRETE receiver's dot can take, impl-directed:
+/// the requirements of each trait implemented for the receiver's type, at
+/// that impl's own member — the enumeration
+/// [`InferCtx::trait_call_candidates`](crate::infer) resolves a call from,
+/// read for every name at once. `receiver_ty` is the receiver members are
+/// looked up on (owned, or the innermost borrow of
+/// [`crate::deref_receiver`]); its referent is the impl's `Self`. Each
+/// offer's signature is the impl member's own.
+///
+/// What resolution would refuse is not offered:
+///
+/// - an impl member whose signature isn't fully written (its definition
+///   carries the diagnostic, and the call is an error);
+/// - a name more than one candidate carries, whether two traits or a trait
+///   and an inherent member: the call is ambiguous on that name, and no
+///   spelling after the dot picks one. The inherent member's own row is
+///   the inherent loop's, which does not ask this.
+pub fn impl_dot_offers(
+    db: &dyn Db,
+    file: SourceFile,
+    receiver_ty: &Ty,
+    exclusive: bool,
+) -> Vec<BoundDotOffer> {
+    let self_ty = match receiver_ty {
+        Ty::Borrow { referent, .. } => &**referent,
+        _ => receiver_ty,
+    };
+    let Some(self_key) = SelfKey::for_ty(self_ty) else {
+        return Vec::new();
+    };
+    let offer_of = |member: &ItemLoc| {
+        let id = member.to_id(db);
+        crate::ty::member_self_position(db, id)
+            .and_then(|position| crate::ty::dot_offer(receiver_ty, exclusive, position))
+    };
+    let impls = trait_impls(db, file);
+    let mut candidates: Vec<(String, ItemLoc)> = Vec::new();
+    for trait_ in &impls.traits {
+        let Some(members) = impls
+            .impl_for(trait_, &self_key)
+            .and_then(|site| impl_dict_members(db, trait_, site))
+        else {
+            continue;
+        };
+        let requirements = item_tree::trait_requirements(db, trait_.to_id(db));
+        for (index, req) in requirements.iter().enumerate() {
+            // Resolution reads a trait's FIRST requirement of a name.
+            if requirements[..index]
+                .iter()
+                .any(|earlier| earlier.name == req.name)
+            {
+                continue;
+            }
+            if let Some(member) = members.get(index) {
+                candidates.push((req.name.clone(), member.clone()));
+            }
+        }
+    }
+    let inherent_carries = |name: &str| match self_ty {
+        Ty::Named(named) if named.decl.member.is_none() => {
+            item_tree::type_members(db, named.decl.to_id(db))
+                .iter()
+                .filter(|m| m.name == name)
+                .any(|m| {
+                    offer_of(&ItemLoc {
+                        member: Some((std::sync::Arc::from(m.name.as_str()), m.disambiguator)),
+                        ..named.decl.clone()
+                    })
+                    .is_some()
+                })
+        }
+        _ => false,
+    };
+    let mut out = Vec::new();
+    for (name, member) in &candidates {
+        let carriers = candidates.iter().filter(|(other, _)| other == name).count();
+        if carriers > 1 || inherent_carries(name) {
+            continue;
+        }
+        let sig = crate::ty::signature(db, member.to_id(db));
+        if sig.contains_error() {
+            continue;
+        }
+        let Some(offer) = offer_of(member) else {
+            continue;
+        };
+        out.push(BoundDotOffer {
+            name: name.clone(),
+            sig,
+            reach: offer.reach,
+            refused: offer.refused,
+        });
+    }
+    out
+}

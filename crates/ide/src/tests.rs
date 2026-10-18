@@ -6977,3 +6977,107 @@ static main = fn { g(h, 1); };
         );
     }
 }
+
+const ORD_FIXTURE: &str = r#"
+type Cmp = enum { Less, Eq, Greater };
+trait Ord = requires {
+    ord: fn::<@a>(Self.&::<@a>, Self.&::<@a>) -> Cmp;
+} with {
+    impl usize {
+        ord = fn::<@a>(other: Self.&::<@a>, self: Self.&::<@a>) -> Cmp { Cmp::Eq };
+    }
+};
+"#;
+
+#[test]
+fn dot_completions_offer_trait_impl_members_inside_the_impl() {
+    // The trait's own chain implements it for `usize`, so a `usize.&`
+    // receiver in a sibling member's body reaches `ord` through that impl.
+    check_completion_applied(
+        r#"
+type Cmp = enum { Less, Eq, Greater };
+trait Ord = requires {
+    ord: fn::<@a>(Self.&::<@a>, Self.&::<@a>) -> Cmp;
+    min: fn::<@a>(Self.&::<@a>, Self.&::<@a>) -> Self.&::<@a>;
+} with {
+    impl usize {
+        ord = fn::<@a>(other: Self.&::<@a>, self: Self.&::<@a>) -> Cmp { Cmp::Eq };
+        min = fn::<@a>(other: Self.&::<@a>, self: Self.&::<@a>) -> Self.&::<@a> {
+            match self.$0
+        };
+    }
+};
+"#,
+        "ord",
+        expect_test::expect![[r#"
+            match self.ord($1)
+            filter: ord
+        "#]],
+    );
+}
+
+#[test]
+fn dot_completions_offer_trait_impl_members_on_builtin_receivers() {
+    check_completions(
+        &format!("{ORD_FIXTURE}static g = fn::<@a>(x: usize.&::<@a>) -> () {{ let y = x.$0; }};\n"),
+        expect_test::expect![[r#"
+            ord Function (fn(usize.&::<@a>, usize.&::<@a>) -> Cmp)
+        "#]],
+    );
+    // An owned receiver reaches the borrow-taking member through a written
+    // borrow.
+    check_completion_applied(
+        &format!("{ORD_FIXTURE}static g = fn (x: usize) -> () {{ let y = x.$0; }};\n"),
+        "ord",
+        expect_test::expect![[r#"
+            static g = fn (x: usize) -> () { let y = x.&.ord($1); };
+            filter: .ord
+        "#]],
+    );
+}
+
+#[test]
+fn dot_completions_name_a_type_side_trait_member_by_its_requirement() {
+    // `impl Ord` in a type's chain names its members `Ord::ord`; the dot
+    // reaches them as `ord`, through the trait, not as inherent members.
+    check_completions(
+        r#"
+type Cmp = enum { Less, Eq, Greater };
+trait Ord = requires {
+    ord: fn::<@a>(Self.&::<@a>, Self.&::<@a>) -> Cmp;
+};
+type P = struct { n: usize } with {
+    impl Ord {
+        ord = fn::<@a>(o: Self.&::<@a>, s: Self.&::<@a>) -> Cmp { Cmp::Eq };
+    }
+};
+static g = fn::<@a>(x: P.&::<@a>) -> () { let y = x.$0; };
+"#,
+        expect_test::expect![[r#"
+            *.n Field (usize)
+            ord Function (fn(P.&::<@a>, P.&::<@a>) -> Cmp)
+        "#]],
+    );
+}
+
+#[test]
+fn dot_completions_skip_a_trait_member_name_two_impls_carry() {
+    // `x.ord(y)` is ambiguous between `Ord` and `Ord2`, so neither is offered.
+    let text = format!(
+        "{ORD_FIXTURE}{}",
+        r#"
+trait Ord2 = requires {
+    ord: fn::<@a>(Self.&::<@a>, Self.&::<@a>) -> Cmp;
+    other: fn::<@a>(Self.&::<@a>) -> ();
+} with {
+    impl usize {
+        ord = fn::<@a>(a: Self.&::<@a>, b: Self.&::<@a>) -> Cmp { Cmp::Eq };
+        other = fn::<@a>(a: Self.&::<@a>) -> () { () };
+    }
+};
+static g = fn::<@a>(x: usize.&::<@a>) -> () { let y = x.$0; };
+"#
+    );
+    check_no_completion(&text, "ord");
+    check_has_completion(&text, "other");
+}

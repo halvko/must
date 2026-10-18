@@ -1580,6 +1580,11 @@ fn dispatch_ty(ty: &hir::Ty) -> &hir::Ty {
 /// documented at that function: a nested body still gets offers for what
 /// the captured-dictionary reservation refuses, and a name carried by two
 /// bounds is offered by neither.
+///
+/// A CONCRETE receiver (a named type, or a builtin scalar) also reaches the
+/// members of every trait implemented for its type, from
+/// [`hir::impl_dot_offers`], the enumeration impl-directed resolution picks
+/// from.
 fn field_items(
     db: &RootDatabase,
     file: SourceFile,
@@ -1641,7 +1646,7 @@ fn field_items(
         _ => None,
     };
     if let Some(decl) = decl {
-        for member_id in hir::member_item_ids(db, decl.to_id(db)) {
+        for member_id in hir::inherent_member_ids(db, decl.to_id(db)) {
             let Some(position) = hir::member_self_position(db, member_id) else {
                 continue;
             };
@@ -1675,6 +1680,23 @@ fn field_items(
         // A requirement is fn-shaped like a member, so it earns the same
         // ranking and the same call-shaped insert (its receiver — `Self`
         // — does not count toward the written arity either).
+        let item = fn_shaped_item(
+            offer.name,
+            Provenance::Item,
+            &offer.sig,
+            Some(&offer.sig),
+            expected,
+            edit_range,
+        );
+        let item = member_item(item, offer.reach, dot, &derefs);
+        items.push(if refused { refuse(item) } else { item });
+    }
+    // A CONCRETE receiver's trait members, through the impls for its type
+    // (`impl usize` in a trait's chain, `impl Ord` in a type's). Which
+    // ones a call would resolve to is `impl_dot_offers`', for the same
+    // reason the bound offers are `bound_dot_offers`'.
+    for offer in hir::impl_dot_offers(db, file, &member_receiver, exclusive) {
+        let refused = offer.refused;
         let item = fn_shaped_item(
             offer.name,
             Provenance::Item,
