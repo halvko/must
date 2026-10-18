@@ -13213,6 +13213,25 @@ static on_a_value = fn(n: usize) -> usize { n.oops::<const { 1 + true }>(); 0 };
     );
 }
 
+/// An impl missing one member implements its trait: the members it
+/// provides resolve, even from inside the impl, and a use of the missing
+/// one adds no error to the impl's own.
+#[test]
+fn an_incomplete_impl_implements_its_trait() {
+    check_diagnostics(
+        r#"
+trait D = requires { m: fn(Self) -> usize; n: fn(Self) -> usize; } with {
+    impl usize { m = fn(x: Self) -> usize { x.m() }; }
+};
+static present = fn(x: usize) -> usize { x.m() + D::m(x) + D::<Self = usize>::m(x) };
+static missing = fn(x: usize) -> usize { x.n() + D::n(x) + D::<Self = usize>::n(x) };
+"#,
+        expect![[r#"
+            84..89: this impl of `D` is missing the member `n` (required by the trait here at 44..45)
+        "#]],
+    );
+}
+
 #[test]
 fn a_refused_member_turbofish_says_nothing_it_cannot_back_up() {
     // The other half of the invariant: the const arguments are consumed

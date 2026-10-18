@@ -290,23 +290,66 @@ pub(crate) fn impl_dict_members(
     trait_: &ItemLoc,
     site: &ImplSite,
 ) -> Option<Vec<ItemLoc>> {
-    let requirements = item_tree::trait_requirements(db, trait_.to_id(db));
-    let members = item_tree::type_members(db, site.owner.to_id(db));
-    requirements
+    item_tree::trait_requirements(db, trait_.to_id(db))
         .iter()
-        .map(|req| {
-            let qualified = format!("{}::{}", site.head, req.name);
-            members
-                .iter()
-                .find(|m| m.name == qualified)
-                .map(|m| ItemLoc {
-                    file: site.owner.file,
-                    name: site.owner.name.clone(),
-                    disambiguator: site.owner.disambiguator,
-                    member: Some((std::sync::Arc::from(m.name.as_str()), m.disambiguator)),
-                })
+        .map(|req| match site_member(db, site, &req.name) {
+            ImplMember::Found(loc) => Some(loc),
+            ImplMember::Missing { .. } => None,
         })
         .collect()
+}
+
+/// What the impl at `site` holds for the requirement `name`.
+fn site_member(db: &dyn Db, site: &ImplSite, name: &str) -> ImplMember {
+    let qualified = format!("{}::{name}", site.head);
+    let members = item_tree::type_members(db, site.owner.to_id(db));
+    let Some(member) = members.iter().find(|m| m.name == qualified) else {
+        return ImplMember::Missing {
+            owner: site.owner.clone(),
+        };
+    };
+    ImplMember::Found(ItemLoc {
+        file: site.owner.file,
+        name: site.owner.name.clone(),
+        disambiguator: site.owner.disambiguator,
+        member: Some((
+            std::sync::Arc::from(member.name.as_str()),
+            member.disambiguator,
+        )),
+    })
+}
+
+/// What an impl holds for one requirement.
+#[derive(Debug, Clone)]
+pub(crate) enum ImplMember {
+    /// The impl's member.
+    Found(ItemLoc),
+    /// The impl lacks the member; it counts as implementing the trait.
+    /// `owner` is the impl's owner item, whose errors include the
+    /// missing-member one.
+    Missing { owner: ItemLoc },
+}
+
+impl ImplMember {
+    pub(crate) fn found(&self) -> Option<&ItemLoc> {
+        match self {
+            ImplMember::Found(loc) => Some(loc),
+            ImplMember::Missing { .. } => None,
+        }
+    }
+}
+
+/// What `ty`'s impl of `trait_` holds for the requirement `name`; `None`
+/// when `ty` has no impl of `trait_`.
+pub(crate) fn impl_member(
+    db: &dyn Db,
+    file: SourceFile,
+    trait_: &ItemLoc,
+    ty: &Ty,
+    name: &str,
+) -> Option<ImplMember> {
+    let site = SelfKey::for_ty(ty).and_then(|key| trait_impls(db, file).impl_for(trait_, &key))?;
+    Some(site_member(db, site, name))
 }
 
 /// The number of hidden dictionary parameters a binder's bounds add to a
@@ -321,23 +364,24 @@ pub fn dict_param_count(db: &dyn Db, file: SourceFile, generics: &[GenericParamD
 
 /// The traits that can answer a dot-call `recv.name(...)` on a concrete
 /// receiver keyed `self_key`: every trait with a requirement named `name`
-/// AND an impl for the receiver. Returned in library order (ambiguity — more
-/// than one — is the caller's diagnostic).
+/// AND an impl for the receiver, with what that impl holds for `name`.
+/// Returned in library order (ambiguity — more than one — is the caller's
+/// diagnostic).
 pub(crate) fn traits_providing_member(
     db: &dyn Db,
     file: SourceFile,
     self_key: &SelfKey,
     name: &str,
-) -> Vec<(ItemLoc, u32)> {
+) -> Vec<(ItemLoc, ImplMember)> {
     let impls = trait_impls(db, file);
     let mut out = Vec::new();
     for trait_loc in &impls.traits {
         let requirements = item_tree::trait_requirements(db, trait_loc.to_id(db));
-        let Some(index) = requirements.iter().position(|req| req.name == name) else {
+        if !requirements.iter().any(|req| req.name == name) {
             continue;
-        };
-        if impls.impl_for(trait_loc, self_key).is_some() {
-            out.push((trait_loc.clone(), index as u32));
+        }
+        if let Some(site) = impls.impl_for(trait_loc, self_key) {
+            out.push((trait_loc.clone(), site_member(db, site, name)));
         }
     }
     out

@@ -387,6 +387,12 @@ fn declaration_mentions(
                 .push((bound.trait_.clone(), ptr.text_range()));
         }
     }
+    // A use of a member its impl lacks traps with the impl's errors.
+    for (call, owner) in inference.incomplete_impl_of_expr.iter() {
+        if let Some(ptr) = source_map.node_for_expr(call) {
+            mentions.decls.push((owner.clone(), ptr.text_range()));
+        }
+    }
     // A bound resolved at an instantiation reaches the implementer's impl
     // without spelling it; a broken one traps there with its own errors.
     for (key, entries) in inference.bound_dicts_of_expr.iter() {
