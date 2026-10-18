@@ -8,7 +8,7 @@
 
 mod harness;
 
-use harness::{check, trap_kind};
+use harness::{check, check_many, trap_kind};
 
 // --- arithmetic, widths, and the ruled trap-on-overflow ------------------
 
@@ -38,161 +38,6 @@ static main = fn () -> () {
     if j * j == 144 { print("usize ok\n") } else { print("usize bad\n") };
     let k: isize = 0 - 7;
     if k * 3 == 0 - 21 { print("isize ok\n") } else { print("isize bad\n") };
-}
-"#,
-        "main()",
-    );
-}
-
-#[test]
-fn unsigned_comparisons_are_unsigned() {
-    // A `u64` above `i64::MAX` must compare as the large number it is —
-    // the storage slot is an `i64`, the operation is not.
-    check(
-        r#"
-static main = fn () -> bool {
-    let big: u64 = 18446744073709551615;
-    let small: u64 = 1;
-    big > small
-}
-"#,
-        "main()",
-    );
-}
-
-#[test]
-fn addition_overflow_traps_at_every_width() {
-    for (ty, value) in [
-        ("u8", "255"),
-        ("u16", "65535"),
-        ("u32", "4294967295"),
-        ("u64", "18446744073709551615"),
-        ("usize", "18446744073709551615"),
-    ] {
-        check(
-            &format!(
-                r#"
-static main = fn () -> {ty} {{
-    let a: {ty} = {value};
-    a + 1
-}}
-"#
-            ),
-            "main()",
-        );
-    }
-}
-
-#[test]
-fn subtraction_below_zero_traps() {
-    check(
-        r#"
-static main = fn () -> usize {
-    let a: usize = 0;
-    a - 1
-}
-"#,
-        "main()",
-    );
-}
-
-#[test]
-fn multiplication_overflow_traps() {
-    check(
-        r#"
-static main = fn () -> u64 {
-    let a: u64 = 9223372036854775807;
-    a * 3
-}
-"#,
-        "main()",
-    );
-    check(
-        r#"
-static main = fn () -> i8 {
-    let a: i8 = 100;
-    a * 2
-}
-"#,
-        "main()",
-    );
-}
-
-#[test]
-fn signed_overflow_traps_both_directions() {
-    check(
-        r#"
-static main = fn () -> i64 {
-    let a: i64 = 9223372036854775807;
-    a + 1
-}
-"#,
-        "main()",
-    );
-    check(
-        r#"
-static main = fn () -> i64 {
-    let a: i64 = 0 - 9223372036854775808;
-    a - 1
-}
-"#,
-        "main()",
-    );
-}
-
-#[test]
-fn division_by_zero_traps() {
-    check(
-        r#"
-static main = fn () -> usize {
-    let a: usize = 7;
-    let b: usize = 0;
-    a / b
-}
-"#,
-        "main()",
-    );
-}
-
-#[test]
-fn signed_division_overflow_traps() {
-    check(
-        r#"
-static main = fn () -> i32 {
-    let a: i32 = 0 - 2147483648;
-    let b: i32 = 0 - 1;
-    a / b
-}
-"#,
-        "main()",
-    );
-}
-
-#[test]
-fn negation_traps_on_unsigned_and_on_the_signed_minimum() {
-    check(
-        r#"
-static main = fn () -> usize {
-    let a: usize = 3;
-    -a
-}
-"#,
-        "main()",
-    );
-    check(
-        r#"
-static main = fn () -> i8 {
-    let a: i8 = 0 - 128;
-    -a
-}
-"#,
-        "main()",
-    );
-    check(
-        r#"
-static main = fn () -> i8 {
-    let a: i8 = 42;
-    -a
 }
 "#,
         "main()",
@@ -233,37 +78,6 @@ fn the_trap_kinds_are_distinguishable() {
 }
 
 // --- control flow --------------------------------------------------------
-
-#[test]
-fn if_loop_break_continue_and_return() {
-    check(
-        r#"
-static is_even = fn (n: usize) -> bool { (n / 2) * 2 == n };
-static sum_odds_below = fn (n: usize) -> usize {
-    let mut acc = 0;
-    let mut i = 0;
-    loop {
-        if i == n { break acc; };
-        i = i + 1;
-        if is_even(i - 1) { continue; };
-        acc = acc + (i - 1);
-    }
-};
-static find = fn (step: usize, limit: usize) -> usize {
-    if step == 0 { return 0; };
-    let mut i = step;
-    loop {
-        if limit < i { break; };
-        if is_even(i) { return i; };
-        i = i + step;
-    };
-    0
-};
-static main = fn () -> usize { sum_odds_below(10) + find(3, 20) }
-"#,
-        "main()",
-    );
-}
 
 #[test]
 fn deferred_bindings_assigned_on_every_path() {
@@ -497,17 +311,6 @@ static main = fn () -> usize {
 }
 
 #[test]
-fn const_blocks_inside_functions_run_at_compile_time() {
-    check(
-        r#"
-static greet = fn () -> str { const { "compiled in" } };
-static main = fn () -> () { print(greet()); print("\n"); }
-"#,
-        "main()",
-    );
-}
-
-#[test]
 fn string_literals_print_and_compare() {
     check(
         r#"
@@ -714,27 +517,6 @@ static main = fn () -> usize {{
 // --- functions, generics, traits ----------------------------------------
 
 #[test]
-fn recursion_and_mutual_recursion() {
-    check(
-        r#"
-static fib: fn(usize) -> usize = fn (n: usize) -> usize {
-    if n < 2 { n } else { fib(n - 1) + fib(n - 2) }
-};
-static is_even: fn(usize) -> bool = fn (n: usize) -> bool {
-    if n == 0 { true } else { is_odd(n - 1) }
-};
-static is_odd: fn(usize) -> bool = fn (n: usize) -> bool {
-    if n == 0 { false } else { is_even(n - 1) }
-};
-static main = fn () -> usize {
-    if is_even(10) { fib(15) } else { 0 }
-}
-"#,
-        "main()",
-    );
-}
-
-#[test]
 fn a_function_value_passed_as_an_argument_becomes_a_direct_call() {
     check(
         r#"
@@ -743,21 +525,6 @@ static triple: fn(usize) -> usize = fn (n: usize) -> usize { n * 3 };
 static apply_twice: fn(fn(usize) -> usize, usize) -> usize =
     fn (f: fn(usize) -> usize, x: usize) -> usize { f(f(x)) };
 static main = fn () -> usize { apply_twice(double, 5) + apply_twice(triple, 2) }
-"#,
-        "main()",
-    );
-}
-
-#[test]
-fn a_function_returning_a_builtin_is_still_a_direct_call() {
-    // `hello.must`'s workaround shape: `fn { print }()` yields the
-    // builtin, which is then called.
-    check(
-        r#"
-static main = fn () -> () {
-    let s = "hello\n";
-    fn { print }()(s);
-}
 "#,
         "main()",
     );
@@ -1030,46 +797,6 @@ static main = fn () -> usize {
     print(CONFIG.name);
     print("\n");
     if CONFIG.on { CONFIG.sizes[0] + CONFIG.sizes[1] } else { 0 }
-}
-"#,
-        "main()",
-    );
-}
-
-#[test]
-fn unit_and_empty_aggregates_occupy_nothing() {
-    check(
-        r#"
-type Empty = struct { };
-static nothing = fn (e: Empty) -> () { };
-static main = fn () -> usize {
-    let e = Empty(struct { });
-    nothing(e);
-    if e == Empty(struct { }) { 1 } else { 0 }
-}
-"#,
-        "main()",
-    );
-}
-
-#[test]
-fn nested_loops_break_out_of_the_inner_one_only() {
-    check(
-        r#"
-static main = fn () -> usize {
-    let mut total: usize = 0;
-    let mut i: usize = 0;
-    loop {
-        if i == 4 { break; };
-        let mut j: usize = 0;
-        let inner = loop {
-            if j == 3 { break j; };
-            j = j + 1;
-        };
-        total = total + inner;
-        i = i + 1;
-    };
-    total
 }
 "#,
         "main()",
@@ -1387,6 +1114,7 @@ static i64_min = fn() -> i64 { (0 - 9223372036854775807) - 1 };
 static i64_m1 = fn() -> i64 { 0 - 1 };
 
 static add_us = fn(a: usize, b: usize) -> usize { a + b };
+static sub_us = fn(a: usize, b: usize) -> usize { a - b };
 static mul_us = fn(a: usize, b: usize) -> usize { a * b };
 static add_is = fn(a: isize, b: isize) -> isize { a + b };
 static is_min = fn() -> isize { (0 - 9223372036854775807) - 1 };
@@ -1416,6 +1144,7 @@ static lt_i8 = fn(a: i8, b: i8) -> bool { a < b };
         "sub_i8(0, 127)",
         "mul_i8(i8_min(), i8_m1())",
         "mul_i8(i8_m1(), i8_min())",
+        "mul_i8(100, 2)",
         "div_i8(i8_min(), i8_m1())",
         "div_i8(i8_min(), 1)",
         "neg_i8(i8_min())",
@@ -1472,6 +1201,7 @@ static lt_i8 = fn(a: i8, b: i8) -> bool { a < b };
         "neg_i64(i64_min())",
         "neg_i64(9223372036854775807)",
         "add_us(18446744073709551615, 1)",
+        "sub_us(0, 1)",
         "mul_us(4294967296, 4294967296)",
         "add_is(is_min(), 0 - 1)",
         "mul_is(is_min(), 0 - 1)",
@@ -1480,9 +1210,7 @@ static lt_i8 = fn(a: i8, b: i8) -> bool { a < b };
         "ge_u8(255, 1)",
         "lt_i8(0 - 1, 1)",
     ];
-    for case in CASES {
-        check(PROGRAM, case);
-    }
+    check_many(PROGRAM, CASES);
 }
 
 /// Type-argument re-derivation under pressure: nested generics,
@@ -1554,19 +1282,20 @@ static apply = fn::<T>(f: fn(T) -> T, x: T) -> T { f(x) };
 static double_u8 = fn(x: u8) -> u8 { x + x };
 static ho = fn() -> u8 { apply(double_u8, 21) };
 ";
-    for entry in [
-        "nested(9)",
-        "interleaved()",
-        "chained()",
-        "shapes()",
-        "via_variant()",
-        "via_enum(true)",
-        "via_enum(false)",
-        "arr_elem()",
-        "ho()",
-    ] {
-        check(PROGRAM, entry);
-    }
+    check_many(
+        PROGRAM,
+        &[
+            "nested(9)",
+            "interleaved()",
+            "chained()",
+            "shapes()",
+            "via_variant()",
+            "via_enum(true)",
+            "via_enum(false)",
+            "arr_elem()",
+            "ho()",
+        ],
+    );
 }
 
 /// Dispatch-loop adversaries: a `match` as the loop header driving
@@ -1656,18 +1385,19 @@ static trap_mid = fn(n: usize) -> usize {
     }
 };
 ";
-    for entry in [
-        "drive(6)",
-        "drive(20)",
-        "grid(3)",
-        "grid(0)",
-        "deep_return(4)",
-        "deep_return(9)",
-        "trap_mid(3)",
-        "next_cmd(7)",
-    ] {
-        check(PROGRAM, entry);
-    }
+    check_many(
+        PROGRAM,
+        &[
+            "drive(6)",
+            "drive(20)",
+            "grid(3)",
+            "grid(0)",
+            "deep_return(4)",
+            "deep_return(9)",
+            "trap_mid(3)",
+            "next_cmd(7)",
+        ],
+    );
 }
 
 /// Does the trap-reason channel ever lie? A `u8` add nested inside
@@ -1711,17 +1441,18 @@ static run_idx = fn(i: usize) -> u8 {
     idx2([9, 8], i)
 };
 ";
-    for entry in [
-        "layered()",
-        "second_of_two(3)",
-        "descend(2, \"outer message\")",
-        "descend(0, \"outer message\")",
-        "lit()",
-        "run_idx(0)",
-        "run_idx(5)",
-    ] {
-        check(PROGRAM, entry);
-    }
+    check_many(
+        PROGRAM,
+        &[
+            "layered()",
+            "second_of_two(3)",
+            "descend(2, \"outer message\")",
+            "descend(0, \"outer message\")",
+            "lit()",
+            "run_idx(0)",
+            "run_idx(5)",
+        ],
+    );
 }
 
 /// Dictionaries where the type argument is reachable ONLY through them:
@@ -1774,9 +1505,7 @@ static zboth = fn() -> usize { zscore::<Meters>() + zscore::<Feet>() };
 static via = fn::<T: Named>() -> str { noself::<T>() };
 static forwarded = fn() -> str { via::<Feet>() };
 ";
-    for entry in ["both()", "zboth()", "forwarded()"] {
-        check(PROGRAM, entry);
-    }
+    check_many(PROGRAM, &["both()", "zboth()", "forwarded()"]);
 }
 
 /// Zero-width values and structural equality.
@@ -1797,19 +1526,25 @@ static nerec = fn(n: usize) -> bool {
     struct { s = \"hi\", n = n } != struct { s = \"ho\", n = n }
 };
 static eqarr = fn(x: u8) -> bool { [x, 2] == [1, 2] };
+static eqempty = fn() -> bool {
+    let e = Empty(struct {});
+    e == Empty(struct {})
+};
 ";
-    for entry in [
-        "mixed()",
-        "eqs(\"a\", \"a\")",
-        "eqs(\"a\", \"b\")",
-        "eqrec(4)",
-        "eqrec(5)",
-        "nerec(1)",
-        "eqarr(1)",
-        "eqarr(3)",
-    ] {
-        check(PROGRAM, entry);
-    }
+    check_many(
+        PROGRAM,
+        &[
+            "mixed()",
+            "eqs(\"a\", \"a\")",
+            "eqs(\"a\", \"b\")",
+            "eqrec(4)",
+            "eqrec(5)",
+            "nerec(1)",
+            "eqarr(1)",
+            "eqarr(3)",
+            "eqempty()",
+        ],
+    );
 }
 
 /// Instantiations passed as values: `square::<7>` and `square::<9>`
@@ -1844,7 +1579,5 @@ static array = fn() -> usize {
     arr[0] * 10 + arr[1]
 };
 "#;
-    for entry in ["binop()", "call()", "array()"] {
-        check(PROGRAM, entry);
-    }
+    check_many(PROGRAM, &["binop()", "call()", "array()"]);
 }

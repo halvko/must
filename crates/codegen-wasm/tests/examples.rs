@@ -229,7 +229,8 @@ fn example_files() -> Vec<String> {
 
 #[test]
 fn every_example_is_classified() {
-    for file in example_files() {
+    let files = example_files();
+    for file in &files {
         let classified = SUPPORTED.iter().any(|(name, _)| *name == file)
             || UNSUPPORTED.iter().any(|(name, _, _)| *name == file);
         assert!(
@@ -239,11 +240,25 @@ fn every_example_is_classified() {
              this backend's coverage stays honest about its edges"
         );
     }
-    assert!(!NOT_RUN.is_empty(), "the exclusion list documents itself");
+    // An exclusion has to name a real file that still has entries run
+    // instead, or it documents nothing.
+    for (file, why) in NOT_RUN {
+        assert!(
+            files.iter().any(|name| name == file),
+            "NOT_RUN names examples/{file}, which does not exist ({why})"
+        );
+        assert!(
+            SUPPORTED.iter().any(|(name, _)| name == file),
+            "NOT_RUN excludes an entry of examples/{file}, but none of its \
+             entries are in SUPPORTED ({why})"
+        );
+    }
 }
 
 #[test]
 fn supported_examples_agree_with_the_interpreter() {
+    // One `check` per entry, not `check_many`: each entry has to type
+    // the file exactly as `must run -e` does.
     for (file, entry) in SUPPORTED {
         let text = source(file);
         println!("checking examples/{file} -e '{entry}'");
