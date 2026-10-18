@@ -315,6 +315,7 @@ fn errors_checks_dirty_with_the_documented_count() {
                 |
             106 |     p.*
                 |     ^^^
+               = help: Wrap in `unsafe { }`
 
             error: cannot take `.&raw mut` of `x`: it is not declared `mut`
               --> examples/errors.must:118:13
@@ -423,6 +424,7 @@ fn errors_checks_dirty_with_the_documented_count() {
                 |
             280 | static undeclared_outlives = fn::<@a, @b>(x: usize.&::<@a>) -> usize.&::<@b> { x };
                 |                                                                                ^
+               = help: Declare `@a: @b`
 
             error: cannot resolve `::Point` without an expected type — write `Enum::Point`
               --> examples/errors.must:290:53
@@ -464,6 +466,7 @@ fn errors_checks_dirty_with_the_documented_count() {
                 |
             341 | static call_outside_unsafe = fn (p: u8.&raw mut) -> isize { host_read(p, 8) };
                 |                                                             ^^^^^^^^^^^^^^^
+               = help: Wrap in `unsafe { }`
 
             error: an `extern static` has no initializer: the declaration is the whole contract, and an `extern` item sets nothing to anything
               --> examples/errors.must:350:69
