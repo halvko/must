@@ -30,10 +30,10 @@
 - **G08** Deref is postfix: `p.*`, chaining with `.field` and call parens without
   parentheses, which removes the wrong spelling: `p.*.hp = 0` is the only way to write it.
   Address-of is postfix too: `x.&raw`, with the type twin `T.&raw` — no prefix place
-  adaptor (deref, address-of) exists in the grammar. The retired prefix `&raw x` (and the
-  type twin) superset-parse into the same
-  nodes with a targeted migration diagnostic, never a silent reinterpretation, and the
-  retired prefix safe borrows `&x`/`&mut x`, `&T`/`&mut T` migrate the same way (G26).
+  adaptor (deref, address-of) exists in the grammar. A retired spelling is an ordinary parse
+  error (see Discarded), with three exceptions that #220 removes: the prefix spellings
+  `&raw x`, `&x`/`&mut x` and their type twins, which superset-parse into the postfix node
+  with a migration diagnostic; `name: value` (G12); and `without forget` (G21).
   Plain `x.&` / `x.&mut` and the type twins `T.&` / `T.&mut`, with no `raw`, are the SAFE
   borrows; the type form carries the region turbofish (`T.&::<@a>`), required everywhere,
   since no elision exists yet for a hand-written type, and the expression form carries none
@@ -55,7 +55,7 @@
   `struct { a: usize = 10 }`. Colon means has-type, everywhere, so a field's annotation is a
   real type and fn, pointer and array field types are first class. Shorthand `struct { x }` is
   `struct { x = x }`. The retired `name: value` spelling is a targeted error, never a silent
-  reinterpretation.
+  reinterpretation (a G08 leftover).
 - **G20** Block comments nest. Both comment spellings lex to one `COMMENT` kind. An unclosed
   `/*` swallows the rest of the file; every still-open `/*` gets its own diagnostic, and only
   the innermost gets a fix, because nothing in the file says where the others were meant to
@@ -110,13 +110,6 @@
   expression position as reject-only sugar: it reads the position's expected type (T05) and
   nothing else, so it resolves wherever an expectation reaches and is refused elsewhere
   with the qualified spelling named. The qualified spelling stays canonical.
-- **G26** A retired spelling migrates; it never reinterprets. Prefix `&x`, `&mut x`, `&T`
-  and `&mut T` superset-parse into the same node the postfix form produces, with a
-  corrective diagnostic and a rewriting fix — withheld where no postfix text means the
-  same thing, as for a borrow of a `fn(..) -> T`. The parser does not chase a retired
-  spelling across token kinds: in `&'a T` the `&` fires its own migration and the freed
-  `'` is an ordinary unterminated character literal. That recovery is diagnostics-layer
-  work.
 - **G27** `mut` before a binding name in a pattern (`::Char(mut c, _)`, `mut x =>`,
   `[a, mut b]`) marks that one binding assignable, exactly as `let mut` and a `mut` parameter
   do. It is about the binding, not the matched data's shape, so it changes neither dispatch
@@ -151,8 +144,8 @@
   ordinary name refs composed with `+`, and `+` here names one ceiling per ladder, so two
   rungs of one ladder contradict rather than accumulate. A ceiling is written once per
   declaration per ladder; a generic parameter takes no capability clause.
-  The retired `without forget` is still recognized in both old homes and consumed, so each site
-  is one diagnostic and the item after it still parses.
+  The retired `without forget` is recognized in both old homes and consumed, so each site
+  is one diagnostic and the item after it parses (a G08 leftover).
 - **G18** A character literal holds one Unicode scalar value; escapes are the string set
   with the quote swapped, so only the delimiter that would end the literal needs one. The
   scan is line-bounded, unlike a string's, so a half-typed quote costs one odd token on its
@@ -204,6 +197,10 @@
 
 ## Discarded
 
+- **Migrating retired spellings** — a retired spelling superset-parsed into the
+  live node with a migration diagnostic and a rewriting fix. Dropped while the language
+  moves fast and has no users to migrate: a retired spelling is an ordinary parse error.
+  Worth revisiting once there are users. **G08 G12 G21**
 - **`const { }` bounding `return` the way it bounds `break`** — reachable (a `const` block
   is a separate MIR body) but a different construct wearing the same spelling; the exit
   should leave the outer fn. **G15**
@@ -294,9 +291,9 @@
   and counts in the arity message rather than getting the call-site refusal. **G10**
 - **Someone wants a pointer or borrow to a fn type** — unspellable postfix
   (`fn() -> usize.&raw`, `fn() -> usize.&` bind to the return type) and there is no type
-  grouping (`(...)` is unit). Inherent to the design; for now the retired prefix spelling
-  still builds such a type, and its migration reports without offering the rewrite, since
-  no postfix text means the same thing. **G08 G26**
+  grouping (`(...)` is unit). Inherent to the design; the retired prefix spelling builds
+  such a type, and its migration reports without offering the rewrite, since no
+  postfix text means the same thing. **G08**
 - **`only` as a global keyword becomes a problem** — it cannot be an identifier anywhere,
   though the language reads it in one slot; the contextual alternative is one line, at the
   cost of a clause head that lexes as an identifier. **G21**

@@ -1514,8 +1514,7 @@ fn generic_param(p: &mut Parser<'_>) {
         // refused in the words of the ruling that left it no home (T22)
         // rather than as two "expected `,`" errors at tokens that are each
         // individually fine. Consumes the whole clause, so the binder list
-        // after it still parses — recovery for a retired spelling is
-        // diagnostics-layer work (G26).
+        // after it still parses.
         //
         // Superset, as the retired grammar itself was: the REVERSE order
         // (`T without forget: Bound`) parsed into the same node, so the
@@ -1552,8 +1551,7 @@ fn at_param_capability_clause(p: &Parser<'_>) -> bool {
 /// spellings' meanings went. All three parameter KINDS reach it: the
 /// retired clause was superset-parsed on region and const params too, and
 /// consuming it there keeps their refusal one sentence instead of two
-/// "expected `,`" errors at tokens that are each individually fine (G26:
-/// recovery for a retired spelling is diagnostics-layer work).
+/// "expected `,`" errors at tokens that are each individually fine.
 ///
 /// Both spellings are recognized because a reader who learns the new one
 /// first will write it in the old one's home, and a ceiling written on a
@@ -1624,8 +1622,7 @@ fn param_capability_clause(p: &mut Parser<'_>, kind: SyntaxKind) {
 /// capability names — so the refusal is ONE sentence instead of the
 /// three-error desync a stranded identifier produced (the item ends at the
 /// word, then the file-level loop reports `expected an item` and bumps,
-/// twice). That is diagnostics-layer work, which is exactly where G26 puts
-/// recovery for a retired spelling — and it costs the language nothing,
+/// twice). It costs the language nothing,
 /// because it reserves no word and deletes cleanly the day nobody has the
 /// old form left.
 ///
@@ -2366,7 +2363,7 @@ fn type_core(p: &mut Parser<'_>) -> Option<CompletedMarker> {
         // how to handle. The migration diagnostic is validation's job, keyed
         // off the missing leading `DOT`. Legacy `&'a T` is NOT recognized
         // here: the `&` fires its own migration and the freed `'` lexes as
-        // an unterminated character literal (G26).
+        // an unterminated character literal.
         AMP => {
             let m = p.start();
             p.bump(AMP);
