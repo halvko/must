@@ -145,6 +145,19 @@
   `static`, a shared or raw step). Examples: `.&mut.add()` on an immutable root, `add()` on
   `Counter.&`, `*.add()` on `Counter.&mut.&`, and `s.*.c.add()` with `c: Counter.&mut` and
   `s: S.&`.
+- **P17** Completion writes turbofishes the grammar requires, whole or up to `::<`. After a
+  type's `.`, or a partial head such as `&` (a trigger character) or `&m`, a borrow pointer
+  completes whole (`&::<@a>`, `&mut::<@a>`; a region is required everywhere), one candidate
+  per head and declared region, plus `&raw`, which takes no region. An expression's `.&`
+  offers the same heads with no turbofish, since an operation never carries a region (G11).
+  Once the turbofish has begun (`&mut:`), candidates are a complete `::<@a>`, and a join
+  member (`@˽ + @b`, `@a + @˽`) a bare region the join lacks. In a signature a fresh region
+  is offered too, declared in the binder of the item's fn literal or the member's fn type
+  (after its last region, or a new `fn::<@a>`); no other fn type has a binder. A parameter
+  ranks first a region no other parameter names, a return type one a parameter names. Where a
+  region is inferred, `@_` leads. A generic type named as a type (`Buf`, an arity error
+  alone) inserts `Buf::<` and stops: a `>` a completion writes is not one the editor pairs.
+  Generic `fn` mentions get no turbofish, since inference normally supplies it.
 - **P13** The examples smoke target checks and runs every example against recorded snapshots
   under a timeout, so a hang fails naming the file, and a coverage guard fails if an example
   ships untested.
