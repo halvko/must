@@ -525,6 +525,55 @@ fn is_trait(kind: ItemKind) -> bool {
     matches!(kind, ItemKind::Trait)
 }
 
+/// Where a block-shaped expression's value comes from: a block's tail, else
+/// the `;` that drops its last expression statement, else its closing brace;
+/// for an `if` without a final `else`, the last branch's closing brace.
+/// `None` for an `if` with `else`, other expressions and unclosed blocks.
+fn value_range(node: &syntax::SyntaxNode) -> Option<TextRange> {
+    let end = |block: ast::BlockExpr| {
+        // Only a dropped value's `;` is to blame; a `let`'s is its own.
+        let semicolon = (block.statements().last())
+            .filter(|stmt| matches!(stmt, ast::Stmt::ExprStmt(_)))
+            .and_then(|stmt| stmt.syntax().last_token())
+            .filter(|t| t.kind() == syntax::SyntaxKind::SEMICOLON);
+        semicolon
+            .or_else(|| block.r_brace_token())
+            .map(|t| t.text_range())
+    };
+    if let Some(block) = ast::BlockExpr::cast(node.clone()) {
+        // Blocks are transparent, as in `infer::peel_blocks`.
+        return match block.tail_expr() {
+            Some(tail) => Some(value_range(tail.syntax()).unwrap_or(tail.syntax().text_range())),
+            None if block.r_brace_token().is_none() => None,
+            None => end(block),
+        };
+    }
+    let mut if_expr = ast::IfExpr::cast(node.clone())?;
+    loop {
+        match if_expr.else_branch() {
+            None => {
+                return ast::BlockExpr::cast(if_expr.then_branch()?.syntax().clone())
+                    .and_then(|block| block.r_brace_token())
+                    .map(|t| t.text_range());
+            }
+            Some(ast::Expr::IfExpr(else_if)) => if_expr = else_if,
+            Some(_) => return None,
+        }
+    }
+}
+
+/// The keyword of a joining construct (`if`, `match`, `loop`): a mismatch
+/// every branch shares squiggles it, not the whole construct.
+fn join_keyword(node: &syntax::SyntaxNode) -> Option<TextRange> {
+    let token = match ast::Expr::cast(node.clone())? {
+        ast::Expr::IfExpr(it) => it.if_token(),
+        ast::Expr::MatchExpr(it) => it.match_token(),
+        ast::Expr::LoopExpr(it) => it.loop_token(),
+        _ => None,
+    };
+    token.map(|t| t.text_range())
+}
+
 /// All semantic diagnostics for a file. This is the one place that converts
 /// range-free facts back into text ranges (via the source maps).
 pub fn file_diagnostics(db: &dyn Db, file: SourceFile) -> Vec<Diagnostic> {
@@ -651,6 +700,16 @@ pub fn file_diagnostics(db: &dyn Db, file: SourceFile) -> Vec<Diagnostic> {
                         .and_then(|it| it.match_token())
                         .map(|t| t.text_range())
                         .unwrap_or(range)
+                }
+                // Squiggle where the value comes from (see `value_range`),
+                // since the whole expression would hide the diagnostics
+                // inside it.
+                InferenceDiagnostic::TypeMismatch { .. } => {
+                    value_range(&ptr.to_node(&syntax_root)).unwrap_or(range)
+                }
+                // Every branch agrees, so no one branch is to blame.
+                InferenceDiagnostic::AllBranchesMismatch { .. } => {
+                    join_keyword(&ptr.to_node(&syntax_root)).unwrap_or(range)
                 }
                 _ => range,
             };

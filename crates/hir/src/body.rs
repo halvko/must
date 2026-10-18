@@ -555,20 +555,25 @@ pub struct BodySourceMap {
     pat_map: FxHashMap<SyntaxNodePtr, PatId>,
 }
 
-/// Where control leaves `expr`: the closing brace when it is a block, else
-/// `expr` itself.
+/// Where control leaves `expr`: its exit brace when it has one (see
+/// [`exit_brace`]), else `expr` itself.
 pub fn exit_range(db: &dyn Db, item: ItemId<'_>, expr: ExprId) -> Option<TextRange> {
-    let (body, source_map) = body_with_source_map(db, item);
+    let (_, source_map) = body_with_source_map(db, item);
     let ptr = source_map.node_for_expr(expr)?;
-    if matches!(body.exprs[expr], ExprData::Block { .. }) {
-        let root = base_db::parse(db, item.file(db)).syntax_node();
-        if let Some(brace) =
-            ast::BlockExpr::cast(ptr.to_node(&root)).and_then(|b| b.r_brace_token())
-        {
-            return Some(brace.text_range());
-        }
+    let root = base_db::parse(db, item.file(db)).syntax_node();
+    Some(exit_brace(&ptr.to_node(&root)).map_or(ptr.text_range(), |brace| brace.text_range()))
+}
+
+/// The `}` control leaves a block-shaped expression through: a block's own,
+/// or an `if`'s last branch's. `None` for other expressions and for a block
+/// the parser never closed.
+pub fn exit_brace(node: &syntax::SyntaxNode) -> Option<syntax::SyntaxToken> {
+    if let Some(block) = ast::BlockExpr::cast(node.clone()) {
+        return block.r_brace_token();
     }
-    Some(ptr.text_range())
+    let if_expr = ast::IfExpr::cast(node.clone())?;
+    let last = if_expr.else_branch().or_else(|| if_expr.then_branch())?;
+    exit_brace(last.syntax())
 }
 
 impl BodySourceMap {

@@ -2645,6 +2645,11 @@ pub(crate) struct InferCtx<'db> {
     /// own); a `break`/`continue` with this empty is the outside-a-loop
     /// error.
     loop_sinks: Vec<usize>,
+    /// For an `if`, `match` or `loop` whose leaves all diverge but one, that
+    /// leaf (blocks peeled): where the construct's value comes from, and so
+    /// where [`Self::resolve_diagnostic_types`] moves a mismatch blamed on
+    /// the construct.
+    sole_leaf_of_join: FxHashMap<ExprId, ExprId>,
     /// The return-target stack: for each BODY currently being inferred
     /// (innermost last) — a `fn` literal or a `const` block — the type its
     /// value must have, plus the [`Cause`] that made it expected. A
@@ -2902,6 +2907,7 @@ impl<'db> InferCtx<'db> {
             in_unsafe: false,
             safe_calls: Vec::new(),
             loop_sinks: Vec::new(),
+            sole_leaf_of_join: FxHashMap::default(),
             return_targets: Vec::new(),
             type_params: ParamScope::default(),
             own_generics: &[],
@@ -3774,6 +3780,17 @@ impl<'db> InferCtx<'db> {
     /// body (and its group) decided. Idempotent: what it renders holds no
     /// variable.
     fn resolve_diagnostic_types(&mut self) {
+        // A mismatch blamed on a join with one live leaf belongs to that
+        // leaf, where the value is made. Done in this pass because several
+        // sites push a `TypeMismatch` (`check`, the pointer check of
+        // `str_from_utf8`), and this pass sees all of them.
+        for diag in self.result.diagnostics.iter_mut() {
+            if let InferenceDiagnostic::TypeMismatch { expr, .. } = diag
+                && let Some(&leaf) = self.sole_leaf_of_join.get(&peel_blocks(self.body, *expr))
+            {
+                *expr = leaf;
+            }
+        }
         for diag in self.result.diagnostics.iter_mut() {
             match diag {
                 InferenceDiagnostic::TypeMismatch {
@@ -4572,9 +4589,7 @@ impl<'db> InferCtx<'db> {
                         // defer. Unified into `result` so nested `if`s that
                         // routed the leaf here still resolve.
                         1 => {
-                            let ty = witnesses.into_iter().next().unwrap().ty;
-                            self.adopt(&result, &ty);
-                            ty
+                            self.sole_witness(expr, &result, witnesses.into_iter().next().unwrap())
                         }
                         // Leaf agreement is a join: deferred so axioms
                         // arriving later in the traversal (an annotation
@@ -5406,9 +5421,7 @@ impl<'db> InferCtx<'db> {
                             Ty::Never
                         }
                         1 => {
-                            let ty = witnesses.into_iter().next().unwrap().ty;
-                            self.adopt(&result, &ty);
-                            ty
+                            self.sole_witness(expr, &result, witnesses.into_iter().next().unwrap())
                         }
                         _ => {
                             self.constraints.push_join(Join {
@@ -9319,11 +9332,7 @@ impl<'db> InferCtx<'db> {
                     self.adopt(&result, &Ty::Never);
                     Ty::Never
                 }
-                1 => {
-                    let ty = witnesses.into_iter().next().unwrap().ty;
-                    self.adopt(&result, &ty);
-                    ty
-                }
+                1 => self.sole_witness(expr, &result, witnesses.into_iter().next().unwrap()),
                 _ => {
                     self.constraints.push_join(Join {
                         expr,
@@ -10484,6 +10493,14 @@ impl<'db> InferCtx<'db> {
             blame,
             ty: ty.clone(),
         });
+    }
+
+    /// A join with one live leaf: the leaf's type is the construct's
+    /// outright, with no agreement left to defer.
+    fn sole_witness(&mut self, join: ExprId, result: &Ty, witness: Witness) -> Ty {
+        self.sole_leaf_of_join.insert(join, witness.blame);
+        self.adopt(result, &witness.ty);
+        witness.ty
     }
 
     /// Check `actual` against `expected`; on mismatch, report on `expr` and
