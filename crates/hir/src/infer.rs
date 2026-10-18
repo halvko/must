@@ -7343,7 +7343,7 @@ impl<'db> InferCtx<'db> {
             .insert(callee, callee_expectation.clone());
         // A RESERVED generic trait: nothing on it may go semantically
         // live (reserved for generic traits).
-        if crate::traits::trait_is_generic(self.db, &trait_loc) {
+        if crate::traits::item_is_generic(self.db, &trait_loc) {
             self.result
                 .diagnostics
                 .push(InferenceDiagnostic::GenericTraitReserved {
@@ -7858,7 +7858,7 @@ impl<'db> InferCtx<'db> {
             // while a bare `Display::fmt` names no one function.
             Some(Resolution::TraitItem(loc)) => {
                 let loc = loc.clone();
-                if crate::traits::trait_is_generic(self.db, &loc) {
+                if crate::traits::item_is_generic(self.db, &loc) {
                     // A RESERVED generic trait: nothing on it may go live.
                     self.result
                         .diagnostics
@@ -8737,7 +8737,7 @@ impl<'db> InferCtx<'db> {
             // still not a value — only `Trait::<...>::member` names one. A
             // RESERVED generic trait's own reservation wins.
             Some(Resolution::TraitItem(loc)) => {
-                if crate::traits::trait_is_generic(self.db, loc) {
+                if crate::traits::item_is_generic(self.db, loc) {
                     self.result
                         .diagnostics
                         .push(InferenceDiagnostic::GenericTraitReserved {

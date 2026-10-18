@@ -67,6 +67,9 @@
 //!   `name($1)`, or the bare name when the position expects the `fn`
 //!   itself as a value;
 //! - a `type X = …` RHS: `struct { $1 }` / `enum { $1 }`;
+//! - `requires $0` on a `trait X = …` RHS and `with $0` after a braced
+//!   `type`/`trait` value, which, like `if`/`match`, write no braces: the
+//!   user types the `{` so the editor pairs it;
 //! - a payload-carrying variant pattern in a match arm: `::Circle($1)` /
 //!   `Pair($1, $2)`, one tab stop per payload, because `check_match_pat`
 //!   counts bindings against payloads;
@@ -198,6 +201,8 @@ pub enum CompletionItemKind {
     EnumMember,
     Struct,
     Enum,
+    /// A `trait` declaration (LSP's `INTERFACE`).
+    Trait,
     Constant,
     Keyword,
     /// A multi-token template rather than a name — the `match` arm list.
@@ -440,8 +445,27 @@ enum Context {
     ItemKeywordAfterExtern,
     /// `unsafe ⟨caret⟩`: only `extern` may follow.
     ExternAfterUnsafe,
+    /// File scope right after a `type`/`trait` item whose braced value is
+    /// not yet closed by `;`: a new item may start, or the item goes on with a
+    /// trailing clause (`with { … }`, and `only move` on a `type`).
+    AfterBracedItem {
+        /// The item is a `type` declaration (the one home of `only`) with
+        /// no ceiling written yet.
+        ceiling_open: bool,
+        /// The cursor is on the line of the item's closing `}`, where the
+        /// clause is the likelier thing to be typing.
+        same_line: bool,
+    },
+    /// A `trait X = ⟨caret⟩` right-hand side: `requires { … }` is the one
+    /// supported form (an alias composition parses but is reserved).
+    TraitRhs,
+    /// A fresh element slot in a `with { … }` group: `impl`.
+    WithElement,
     /// The first segment of a `PathType`.
     TypePosition,
+    /// The head of an `impl` element in a `with` group, with its home;
+    /// `None` in reserved territory, where no head is valid.
+    ImplHead(Option<syntax::ImplHome>),
     /// The first segment of a single-segment `PathExpr`.
     Expression {
         /// Sits directly under a `BlockExpr` (or an `ExprStmt` that does):
@@ -572,12 +596,30 @@ pub(crate) fn completions(
             keyword_items(&[SyntaxKind::STATIC_KW], edit_range)
         }
         Some(Context::ExternAfterUnsafe) => keyword_items(&[SyntaxKind::EXTERN_KW], edit_range),
+        Some(Context::AfterBracedItem {
+            ceiling_open,
+            same_line,
+        }) => {
+            let mut items = keyword_items(ITEM_KEYWORDS, edit_range);
+            items.extend(trailing_clause_items(ceiling_open, same_line, edit_range));
+            items
+        }
+        Some(Context::TraitRhs) => vec![keyword_snippet_item(
+            "requires",
+            "requires $0".to_owned(),
+            "requires".to_owned(),
+            edit_range,
+        )],
+        Some(Context::WithElement) => keyword_items(&[SyntaxKind::IMPL_KW], edit_range),
         Some(Context::TypePosition) => {
-            let mut items = type_scope_items(db, file, edit_range);
-            items.extend(builtin_type_items(edit_range));
+            let mut items = type_scope_items(db, file, |_| true, edit_range);
+            items.extend(builtin_type_items(|_| true, edit_range));
             items.extend(keyword_items(TYPE_KEYWORDS, edit_range));
             items
         }
+        Some(Context::ImplHead(home)) => home
+            .map(|home| impl_head_items(db, file, home, edit_range))
+            .unwrap_or_default(),
         Some(Context::Expression {
             statement_start,
             in_loop,
@@ -830,7 +872,11 @@ fn classify(parent: &SyntaxNode) -> Option<Context> {
     if parent.kind() == SyntaxKind::ERROR {
         let grandparent = parent.parent()?;
         if grandparent.kind() == SyntaxKind::SOURCE_FILE {
-            return Some(Context::ItemKeyword);
+            return Some(after_braced_item(parent).unwrap_or(Context::ItemKeyword));
+        }
+        // `with { ⟨caret⟩ }`: the element loop bumps a stray word as `ERROR`.
+        if grandparent.kind() == SyntaxKind::WITH_GROUP {
+            return Some(Context::WithElement);
         }
         // `unsafe ⟨caret⟩` offers `extern`; `extern ⟨caret⟩` offers `static`.
         let item = ast::StaticItem::cast(grandparent).filter(|item| item.kind().is_none())?;
@@ -883,10 +929,21 @@ fn classify(parent: &SyntaxNode) -> Option<Context> {
     if let Some(path_type) = ast::PathType::cast(grandparent.clone()) {
         // Only the first segment: the second segment of `Shape::Circle`
         // names a variant, which is a value and never a type.
-        if path_type.name_ref().as_ref() == Some(&name_ref) {
-            return Some(Context::TypePosition);
+        if path_type.name_ref().as_ref() != Some(&name_ref) {
+            return None;
         }
-        return None;
+        // The first type of a `trait` RHS: the parser read the word as the
+        // start of an alias composition, but `requires` is what goes here.
+        let alias = path_type.syntax().parent();
+        if let Some(alias) = alias.filter(|a| a.kind() == SyntaxKind::TRAIT_ALIAS)
+            && alias.first_child().as_ref() == Some(path_type.syntax())
+        {
+            return Some(Context::TraitRhs);
+        }
+        if let Some(element) = path_type.syntax().parent().and_then(ast::ImplElement::cast) {
+            return Some(Context::ImplHead(syntax::impl_element_home(&element)));
+        }
+        return Some(Context::TypePosition);
     }
 
     if let Some(field_expr) = ast::FieldExpr::cast(grandparent.clone()) {
@@ -967,6 +1024,34 @@ fn classify(parent: &SyntaxNode) -> Option<Context> {
     })
 }
 
+/// The trailing-clause slot after the `type` or `trait` item before
+/// `error`, or `None` when that item takes no more clauses.
+fn after_braced_item(error: &SyntaxNode) -> Option<Context> {
+    let item = error.prev_sibling()?;
+    let type_item = match item.kind() {
+        SyntaxKind::TYPE_ITEM => true,
+        SyntaxKind::TRAIT_ITEM => false,
+        _ => return None,
+    };
+    // Still open: its value or last `with` group ended in `}`, or it ends
+    // in a ceiling (`} only move`), and no `;` closed it.
+    let ceiling = |n: &SyntaxNode| n.kind() == SyntaxKind::ONLY_CLAUSE;
+    if item.last_token()?.kind() != SyntaxKind::R_BRACE
+        && !item.last_child().is_some_and(|n| ceiling(&n))
+    {
+        return None;
+    }
+    let ceiling_open = type_item && !item.children().any(|n| ceiling(&n));
+    let same_line =
+        std::iter::successors(error.prev_sibling_or_token(), |t| t.prev_sibling_or_token())
+            .map_while(|t| t.into_token())
+            .all(|t| !t.text().contains('\n'));
+    Some(Context::AfterBracedItem {
+        ceiling_open,
+        same_line,
+    })
+}
+
 /// Whether `node` sits inside a `loop` body without crossing a fn-literal
 /// or `const` block boundary first — the same reach `break`/`continue`
 /// actually have (see `hir::infer`'s `loop_sinks` save/restore around both
@@ -996,6 +1081,57 @@ fn prefix_range(text: &str, offset: TextSize) -> TextRange {
         }
     }
     TextRange::new(TextSize::new(start as u32), offset)
+}
+
+/// The heads an `impl` at `home` may name, reserved forms left out. On a
+/// type: `Self` first (its own members), then the file's non-generic traits
+/// unless the type is generic. On a trait: the types that can implement one (the
+/// builtin scalars and non-generic `type` items).
+fn impl_head_items(
+    db: &RootDatabase,
+    file: SourceFile,
+    home: syntax::ImplHome,
+    edit_range: TextRange,
+) -> Vec<CompletionItem> {
+    let syntax::ImplHome::Type { generic } = home else {
+        let mut items = type_scope_items(
+            db,
+            file,
+            |loc| hir::type_item_can_implement(db, loc),
+            edit_range,
+        );
+        items.extend(builtin_type_items(hir::builtin_can_implement, edit_range));
+        return items;
+    };
+    let mut items = vec![completion_item(
+        "Self",
+        CompletionItemKind::Keyword,
+        Provenance::Gold,
+        TYPE_TIER_NONE,
+        None,
+        edit_range,
+    )];
+    if !generic {
+        items.extend(
+            hir::file_scope(db, file)
+                .iter()
+                .filter(|(_, resolution)| {
+                    matches!(resolution, hir::Resolution::TraitItem(loc)
+                        if hir::trait_can_be_implemented(db, loc))
+                })
+                .map(|(name, _)| {
+                    completion_item(
+                        name,
+                        CompletionItemKind::Trait,
+                        Provenance::Item,
+                        TYPE_TIER_NONE,
+                        None,
+                        edit_range,
+                    )
+                }),
+        );
+    }
+    items
 }
 
 /// The keywords that can open a file-scope item.
@@ -1084,6 +1220,45 @@ fn type_item_rhs_items(edit_range: TextRange) -> Vec<CompletionItem> {
     .collect()
 }
 
+/// `with $0`, and `only move` while `ceiling_open`. On the line of the
+/// item's end they lead the list, `with` first.
+fn trailing_clause_items(
+    ceiling_open: bool,
+    same_line: bool,
+    edit_range: TextRange,
+) -> Vec<CompletionItem> {
+    let keyword = Provenance::Keyword as u8;
+    let (with_tier, only_tier) = if same_line {
+        (Provenance::Gold as u8, Provenance::Gold as u8 + 1)
+    } else {
+        (keyword, keyword)
+    };
+    let mut with = completion_item_at_tier(
+        "with",
+        CompletionItemKind::Keyword,
+        with_tier,
+        TYPE_TIER_NONE,
+        None,
+        edit_range,
+    );
+    with.text_edit.insert = InsertText::Snippet {
+        snippet: "with $0".to_owned(),
+        plain: "with".to_owned(),
+    };
+    let mut items = vec![with];
+    if ceiling_open {
+        items.push(completion_item_at_tier(
+            "only move",
+            CompletionItemKind::Keyword,
+            only_tier,
+            TYPE_TIER_NONE,
+            None,
+            edit_range,
+        ));
+    }
+    items
+}
+
 /// The expression keywords whose grammar always goes on to a block. `loop
 /// {$0}` opens its block on one line. `if $0` and `match $0` write no
 /// braces: the condition or scrutinee comes first, and the candidate
@@ -1106,13 +1281,14 @@ fn block_keyword_items(edit_range: TextRange) -> Vec<CompletionItem> {
 /// The integer types plus `str`/`string`/`bool`/`char` — the nameable
 /// builtin types (mirrors [`hir::ty::builtin_type_by_name`]'s name set).
 /// Rendered with the keyword kind (they're not declarations to navigate to)
-/// but the builtin sort tier.
-fn builtin_type_items(edit_range: TextRange) -> Vec<CompletionItem> {
+/// but the builtin sort tier. Only the names `keep` accepts.
+fn builtin_type_items(keep: impl Fn(&str) -> bool, edit_range: TextRange) -> Vec<CompletionItem> {
     [
         "i8", "i16", "i32", "i64", "u8", "u16", "u32", "u64", "usize", "isize", "str", "string",
         "bool", "char",
     ]
     .iter()
+    .filter(|w| keep(w))
     .map(|w| {
         completion_item(
             *w,
@@ -1383,14 +1559,17 @@ fn payload_stops(payload: &[hir::Ty]) -> String {
         .join(", ")
 }
 
-/// Type-position candidates: only the file's declared types.
+/// Type-position candidates: only the file's declared types, those `keep`
+/// accepts.
 fn type_scope_items(
     db: &RootDatabase,
     file: SourceFile,
+    keep: impl Fn(&hir::ItemLoc) -> bool,
     edit_range: TextRange,
 ) -> Vec<CompletionItem> {
     hir::type_scope(db, file)
         .iter()
+        .filter(|(_, loc)| keep(loc))
         .map(|(name, loc)| {
             let item = loc.to_id(db);
             completion_item(

@@ -224,41 +224,50 @@ pub enum MemberContext {
 /// member).
 pub fn semantic_member_context(node: &SyntaxNode) -> Option<MemberContext> {
     let impl_element = node.ancestors().find_map(ast::ImplElement::cast)?;
+    let bare_head = impl_element_bare_head(&impl_element).is_some();
+    match impl_element_home(&impl_element)? {
+        ImplHome::Type { .. } if impl_element.is_self_head() => Some(MemberContext::Inherent),
+        // Trait impls on a GENERIC type are reserved (generic-type
+        // impls); the element carries the reservation.
+        ImplHome::Type { generic } => (bare_head && !generic).then_some(MemberContext::TraitImpl),
+        ImplHome::Trait => bare_head.then_some(MemberContext::TraitImpl),
+    }
+}
+
+/// The declaration whose plain `with` group holds an `impl` element.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ImplHome {
+    /// A `type`: `impl Self` (inherent) or `impl Trait`, the trait form
+    /// reserved when the type is `generic`.
+    Type { generic: bool },
+    /// A non-generic `trait`: `impl Type`, naming the implementer.
+    Trait,
+}
+
+/// Where `impl_element` sits, or `None` when its group has binders or
+/// clauses, or its owner is a generic trait or not a `type`/`trait`.
+pub fn impl_element_home(impl_element: &ast::ImplElement) -> Option<ImplHome> {
     let group = impl_element
         .syntax()
         .parent()
         .and_then(ast::WithGroup::cast)
         .filter(ast::WithGroup::is_plain)?;
-    let owner = group.syntax().parent()?;
-    if ast::TypeItem::can_cast(owner.kind()) {
-        if impl_element.is_self_head() {
-            return Some(MemberContext::Inherent);
+    match ast::Item::cast(group.syntax().parent()?)? {
+        ast::Item::TypeItem(item) => Some(ImplHome::Type {
+            generic: item.body().is_some_and(|body| match body {
+                ast::Expr::RecordExpr(record) => record.generic_param_list().is_some(),
+                ast::Expr::EnumExpr(en) => en.generic_param_list().is_some(),
+                _ => false,
+            }),
+        }),
+        ast::Item::TraitItem(item) => {
+            let generic = item
+                .requires_def()
+                .is_some_and(|def| def.generic_param_list().is_some());
+            (!generic).then_some(ImplHome::Trait)
         }
-        if impl_element_bare_head(&impl_element).is_some() {
-            // Trait impls on a GENERIC type are reserved (generic-type
-            // impls); the element carries the reservation.
-            let owner_generic = ast::TypeItem::cast(owner)
-                .and_then(|it| it.body())
-                .is_some_and(|body| match body {
-                    ast::Expr::RecordExpr(record) => record.generic_param_list().is_some(),
-                    ast::Expr::EnumExpr(en) => en.generic_param_list().is_some(),
-                    _ => false,
-                });
-            return (!owner_generic).then_some(MemberContext::TraitImpl);
-        }
-        return None;
+        _ => None,
     }
-    if ast::TraitItem::can_cast(owner.kind()) && impl_element_bare_head(&impl_element).is_some() {
-        // A RESERVED generic trait (`requires::<...>`) must not go
-        // semantically live through its chain — mirror of the
-        // generic-owner exclusion above (reserved for generic traits;
-        // nothing may silently depend on it being ignored).
-        let owner_generic = ast::TraitItem::cast(owner)
-            .and_then(|it| it.requires_def())
-            .is_some_and(|def| def.generic_param_list().is_some());
-        return (!owner_generic).then_some(MemberContext::TraitImpl);
-    }
-    None
 }
 
 /// The impl head when it is a bare name other than `Self` (`impl Display`,
