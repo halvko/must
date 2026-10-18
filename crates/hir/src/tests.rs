@@ -2762,6 +2762,19 @@ static q = Foo();
 }
 
 #[test]
+fn a_record_where_a_named_type_is_wanted_offers_to_construct_it() {
+    let fixed = apply_fix(
+        "type Foo = struct { x: usize };\nstatic a: Foo = struct { x = 1 };\n",
+        "Construct a `Foo`",
+    );
+    assert!(
+        fixed.contains("static a: Foo = Foo(struct { x = 1 });"),
+        "fixed: {fixed}"
+    );
+    check_diagnostics(&fixed, expect![[r#""#]]);
+}
+
+#[test]
 fn named_type_is_distinct_from_its_underlying_record() {
     // No implicit nominal↔structural coercion in either direction. The
     // named-expected direction carries the construct-it hint.
@@ -3804,6 +3817,24 @@ static f = fn (s: Shape) -> usize {
 }
 
 #[test]
+fn a_bind_named_like_a_variant_offers_the_variant_pattern() {
+    let fixed = apply_fix(
+        r#"
+type Shape = enum { Circle(usize), Point };
+static f = fn (s: Shape) -> usize {
+    match s {
+        ::Circle(r) => r,
+        Point => 0,
+    }
+};
+"#,
+        "Match the variant `::Point`",
+    );
+    assert!(fixed.contains("        ::Point => 0,\n"), "fixed: {fixed}");
+    check_diagnostics(&fixed, expect![[r#""#]]);
+}
+
+#[test]
 fn match_bind_arm_named_like_variant_is_still_a_catch_all() {
     // A bind named like a variant is a *full* catch-all (never narrowed),
     // so a trailing `_` arm after it is unreachable — proof the reinterpretation
@@ -4570,6 +4601,42 @@ fn let_record_destructure_missing_field_without_rest_errors() {
             48..49: cannot infer the type of this number: it has no defining use — add a type annotation
             55..56: cannot infer the type of this number: it has no defining use — add a type annotation
         "#]],
+    );
+}
+
+#[test]
+fn a_record_pattern_missing_fields_offers_the_rest_marker() {
+    let fixed = apply_fix(
+        "static f = fn (p: struct { x: usize, y: usize }) -> usize { let struct { x } = p; x };",
+        "Add `..`",
+    );
+    assert!(
+        fixed.contains("let struct { x, .. } = p;"),
+        "fixed: {fixed}"
+    );
+    check_diagnostics(&fixed, expect![[r#""#]]);
+    // A trailing comma is kept, and an empty pattern gets the marker alone.
+    let fixed = apply_fix(
+        "static f = fn (p: struct { x: usize, y: usize }) -> usize { let struct { x, } = p; x };",
+        "Add `..`",
+    );
+    check_diagnostics(&fixed, expect![[r#""#]]);
+    let fixed = apply_fix(
+        "static f = fn (p: struct { x: usize }) -> () { let struct {} = p; };",
+        "Add `..`",
+    );
+    assert!(fixed.contains("let struct { .. } = p;"), "fixed: {fixed}");
+    check_diagnostics(&fixed, expect![[r#""#]]);
+}
+
+#[test]
+fn a_record_pattern_missing_a_field_that_must_be_consumed_has_no_rest_fix() {
+    // `..` would lose the `T`, which is its own error.
+    assert_eq!(
+        fix_of(
+            "static f = fn::<T>(p: struct { x: usize, t: T }) -> usize { let struct { x } = p; x };"
+        ),
+        None
     );
 }
 
@@ -12273,6 +12340,22 @@ static d = fn() -> () { let m = Shape::Nope; };
 }
 
 #[test]
+fn a_trait_member_spelled_through_its_implementer_offers_the_trait() {
+    let fixed = apply_fix(
+        r#"
+trait D = requires { m: fn(Self) -> usize; };
+type P = struct { v: usize } with {
+    impl D { m = fn(x: Self) -> usize { x.v }; }
+};
+static main = fn(p: P) -> usize { P::m(p) };
+"#,
+        "Write `D::m`",
+    );
+    assert!(fixed.contains("-> usize { D::m(p) };"), "fixed: {fixed}");
+    check_diagnostics(&fixed, expect![[r#""#]]);
+}
+
+#[test]
 fn qualified_member_path_reaches_inherent_members_only() {
     // Each spelling names exactly one thing: `Type::m` is the type's OWN
     // member, and a trait member is spelled through its trait.
@@ -12762,6 +12845,39 @@ static main = fn() -> usize {
             88..110: a variant has no generic arguments of its own: they belong to the owner — write `Shape::<...>::Circle`
         "#]],
     );
+}
+
+#[test]
+fn generic_arguments_on_a_binderless_segment_move_to_the_owner() {
+    let fixed = apply_fix(
+        r#"
+type Pair = struct::<T> { a: T, b: usize } with {
+    impl Self { first = fn(p: Self) -> T { let Pair(struct { a, b }) = p; a }; }
+};
+static main = fn() -> usize {
+    let p = Pair::<usize>(struct { a = 1, b = 2 });
+    Pair::first::<usize>(p)
+};
+"#,
+        "Move the arguments to `Pair`",
+    );
+    assert!(
+        fixed.contains("    Pair::<usize>::first(p)\n"),
+        "fixed: {fixed}"
+    );
+    check_diagnostics(&fixed, expect![[r#""#]]);
+    let fixed = apply_fix(
+        r#"
+type Shape = enum::<T> { Circle(T), Point };
+static main = fn() -> Shape::<usize> { Shape::Circle::<usize>(1) };
+"#,
+        "Move the arguments to `Shape`",
+    );
+    assert!(
+        fixed.contains("{ Shape::<usize>::Circle(1) }"),
+        "fixed: {fixed}"
+    );
+    check_diagnostics(&fixed, expect![[r#""#]]);
 }
 
 #[test]
