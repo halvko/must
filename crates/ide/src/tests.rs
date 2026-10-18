@@ -6795,3 +6795,11 @@ static main = fn { g(h, 1); };
         );
     }
 }
+
+#[test]
+fn the_prelude_has_no_diagnostics() {
+    let host = AnalysisHost::new();
+    let analysis = host.snapshot();
+    let prelude = base_db::prelude_file(&analysis.db);
+    assert_eq!(analysis.diagnostics(prelude), Vec::new());
+}
