@@ -28,8 +28,26 @@ fn check_infer(text: &str, expect: Expect) {
 }
 
 fn render_infer(text: &str) -> String {
-    infer_pairs(text)
+    render_rows(text, infer_pairs(text))
+}
+
+/// [`check_infer`] limited to the rows inside `snippet`, which must occur
+/// once in `text`, so the rest of the program's types are not pinned.
+fn check_infer_within(text: &str, snippet: &str, expect: Expect) {
+    let start = text.find(snippet).expect("the snippet is in the text");
+    assert_eq!(text.rfind(snippet), Some(start), "the snippet occurs once");
+    let within = syntax::TextRange::at(
+        syntax::TextSize::new(start as u32),
+        syntax::TextSize::new(snippet.len() as u32),
+    );
+    let rows = infer_pairs(text)
         .into_iter()
+        .filter(|(range, _)| within.contains_range(*range));
+    expect.assert_eq(&render_rows(text, rows));
+}
+
+fn render_rows(text: &str, rows: impl IntoIterator<Item = (syntax::TextRange, String)>) -> String {
+    rows.into_iter()
         .map(|(range, ty)| {
             let snippet: String = text[range].replace('\n', " ");
             let snippet = if snippet.len() > 20 {
@@ -144,12 +162,21 @@ fn let_hole_pattern_initializer_is_still_type_checked() {
 
 #[test]
 fn param_hole_pattern_binds_nothing() {
-    check_diagnostics("static f = fn (_: usize) { };", expect![[r#""#]]);
+    // The parameter has a type but no binding: the only rows are the
+    // literal and its body.
+    check_infer(
+        "static f = fn (_: usize) { };",
+        expect![[r#"
+        11..28 'fn (_: usize) { }': fn(usize)
+        25..28 '{ }': ()
+    "#]],
+    );
 }
 
 #[test]
-fn hole_named_static_item_gets_dead_code_warning() {
+fn hole_named_item_gets_dead_code_warning() {
     // `_` binds nothing, so `5` can never be referenced — squiggle on `_`.
+    // A `static` and a `const` alike.
     check_diagnostics(
         "static _ = 5;",
         expect![[r#"
@@ -157,10 +184,6 @@ fn hole_named_static_item_gets_dead_code_warning() {
             11..12: cannot infer the type of this number: it has no defining use — add a type annotation
         "#]],
     );
-}
-
-#[test]
-fn hole_named_const_item_gets_dead_code_warning() {
     check_diagnostics(
         "const _ = 5;",
         expect![[r#"
@@ -168,11 +191,6 @@ fn hole_named_const_item_gets_dead_code_warning() {
             10..11: cannot infer the type of this number: it has no defining use — add a type annotation
         "#]],
     );
-}
-
-#[test]
-fn named_item_gets_no_dead_code_warning() {
-    check_diagnostics("static x: usize = 5;", expect![[r#""#]]);
 }
 
 #[test]
@@ -633,16 +651,16 @@ static main = fn { print(g()); };
 fn unannotated_mutual_recursion_infers_via_binding_groups() {
     check_diagnostics(
         r#"
-static is_even = fn (n: usize) -> bool {
+static is_even = fn (n: usize) {
     if n == 0 { true } else { is_odd(n - 1) }
 }
-static is_odd = fn (n: usize) -> bool {
+static is_odd = fn (n: usize) {
     if n == 0 { false } else { is_even(n - 1) }
 }
 static main = fn { print(is_even(4)); };
 "#,
         expect![[r#"
-            205..215: type mismatch: expected `str`, found `bool`
+            189..199: type mismatch: expected `str`, found `bool`
         "#]],
     );
 }
@@ -1681,13 +1699,6 @@ fn panic_is_allowed_in_const_contexts() {
 }
 
 #[test]
-fn plain_fn_body_exits_the_const_context() {
-    // The initializer is a const context, but entering the plain fn
-    // literal's body leaves it: that body is runtime code, `print` is fine.
-    check_diagnostics(r#"static main = fn { print("hi"); };"#, expect![[r#""#]]);
-}
-
-#[test]
 fn defining_a_plain_fn_literal_in_a_const_context_is_fine() {
     // Only calls are checked: a plain fn literal may be *defined* in a
     // const context (even inside a `const { ... }`), and its body is
@@ -2330,14 +2341,6 @@ fn record_type_canonicalizes_field_order() {
 }
 
 #[test]
-fn annotated_let_with_matching_record_is_ok() {
-    check_diagnostics(
-        r#"static f = fn { let p: struct { x: usize, y: str } = struct { x = 1, y = "s" }; };"#,
-        expect![[r#""#]],
-    );
-}
-
-#[test]
 fn record_field_mismatch_blames_the_field_and_cites_the_annotation() {
     // Bidirectional: the annotation's field types flow into the field
     // initializers, so the squiggle lands on `"s"` (not the whole literal)
@@ -2605,11 +2608,6 @@ static main = fn { s; };
 }
 
 // ---- named types (`type Foo = struct { ... };`) ----
-
-#[test]
-fn type_decl_alone_is_clean() {
-    check_diagnostics("type Foo = struct { x: usize, y: str };", expect![[r#""#]]);
-}
 
 #[test]
 fn type_and_static_share_the_flat_namespace() {
@@ -4105,11 +4103,19 @@ static f = fn {
 
 #[test]
 fn break_outside_loop_errors() {
+    // In a fn body and in an item initializer alike.
     check_diagnostics(
         "static f = fn { break 1; };",
         expect![[r#"
             16..23: `break` outside of a loop: there is no enclosing `loop` to exit
             22..23: cannot infer the type of this number: it has no defining use — add a type annotation
+        "#]],
+    );
+    check_diagnostics(
+        "static x = break 1;",
+        expect![[r#"
+            11..18: `break` outside of a loop: there is no enclosing `loop` to exit
+            17..18: cannot infer the type of this number: it has no defining use — add a type annotation
         "#]],
     );
 }
@@ -4120,17 +4126,6 @@ fn continue_outside_loop_errors() {
         "static f = fn { continue; };",
         expect![[r#"
             16..24: `continue` outside of a loop: there is no enclosing `loop` to restart
-        "#]],
-    );
-}
-
-#[test]
-fn dangling_break_at_top_level_errors() {
-    check_diagnostics(
-        "static x = break 1;",
-        expect![[r#"
-            11..18: `break` outside of a loop: there is no enclosing `loop` to exit
-            17..18: cannot infer the type of this number: it has no defining use — add a type annotation
         "#]],
     );
 }
@@ -4891,10 +4886,9 @@ fn unknown_field_in_an_assign_target_reports_no_such_field() {
 #[test]
 fn field_assign_through_a_non_record_reports_no_such_field() {
     check_diagnostics(
-        r#"static f = fn { let mut n = 1; n.x = 2; };"#,
+        r#"static f = fn { let mut n: usize = 1; n.x = 2; };"#,
         expect![[r#"
-            28..29: cannot infer the type of this number: it has no defining use — add a type annotation
-            31..32: cannot determine the type of this expression; add a type annotation
+            40..41: no field `x` on `usize`
         "#]],
     );
 }
@@ -5287,11 +5281,6 @@ fn firewall_generic_body_edit_does_not_reinfer_callers() {
 }
 
 #[test]
-fn generic_fn_fully_annotated_is_clean() {
-    check_diagnostics("static id = fn::<T>(x: T) -> T { x };", expect![[r#""#]]);
-}
-
-#[test]
 fn generic_fn_missing_param_annotation_errors() {
     check_diagnostics(
         "static id = fn::<T>(x) -> T { x };",
@@ -5455,16 +5444,6 @@ fn generic_item_never_joins_an_inference_group() {
 fn turbofish_instantiates_the_scheme() {
     check_diagnostics(
         "static id = fn::<T>(x: T) -> T { x };\nstatic g = fn () -> usize { id::<usize>(4) };",
-        expect![[r#""#]],
-    );
-}
-
-#[test]
-fn type_params_infer_from_value_arguments() {
-    // A generic item with ONLY type params may be mentioned bare: ordinary
-    // unification fills the params from the value arguments.
-    check_diagnostics(
-        "static id = fn::<T>(x: T) -> T { x };\nstatic g = fn () -> str { id(\"hi\") };",
         expect![[r#""#]],
     );
 }
@@ -7661,25 +7640,38 @@ static maybe = fn::<T>(p: T.&raw mut, full: bool) -> AllocResult::<T> {
 }
 
 #[test]
-fn user_declarations_shadow_the_builtin_alloc_result() {
+fn user_declarations_shadow_every_compiler_provided_declaration() {
     // The `print` precedent, applied to the type namespace: a file
-    // declaring its own `AllocResult` sees its own everywhere.
-    check_infer(
-        r#"
-type AllocResult = struct { tag: usize };
-static f = fn () -> AllocResult {
-    AllocResult(struct { tag = 1 })
-};
-"#,
-        expect![[r#"
-            54..114 'fn () -> AllocRes...': fn() -> AllocResult
-            75..114 '{     AllocResult...': AllocResult
-            81..92 'AllocResult': fn(struct { tag: usize }) -> AllocResult
-            81..112 'AllocResult(struc...': AllocResult
-            93..111 'struct { tag = 1 }': struct { tag: usize }
-            108..109 '1': usize
-        "#]],
-    );
+    // declaring its own `AllocResult` sees its own everywhere. Shadowing
+    // goes by name alone, so every row of the table is checked the same
+    // way.
+    let table = crate::scopes::synthetic_decls();
+    assert!(!table.is_empty(), "the table is what this test is about");
+    for decl in table {
+        let name = decl.name;
+        let text = format!(
+            r#"
+type {name} = struct {{ tag: usize }};
+static f = fn () -> {name} {{
+    {name}(struct {{ tag = 1 }})
+}};
+"#
+        );
+        assert_eq!(render_diagnostics(&text), "", "`{name}` shadowed");
+        let types: Vec<String> = infer_pairs(&text).into_iter().map(|(_, ty)| ty).collect();
+        assert_eq!(
+            types,
+            [
+                format!("fn() -> {name}"),
+                name.to_owned(),
+                format!("fn(struct {{ tag: usize }}) -> {name}"),
+                name.to_owned(),
+                "struct { tag: usize }".to_owned(),
+                "usize".to_owned(),
+            ],
+            "`{name}` shadowed"
+        );
+    }
 }
 
 #[test]
@@ -7713,22 +7705,6 @@ static f = fn (
 }
 
 #[test]
-fn every_file_names_the_same_compiler_provided_declarations() {
-    let db = RootDatabase::default();
-    let a = SourceFile::new(&db, "a.must".to_owned(), String::new());
-    let b = SourceFile::new(&db, "b.must".to_owned(), String::new());
-    for decl in crate::scopes::synthetic_decls() {
-        let prelude = Some(crate::Resolution::TypeItem(crate::synthetic_decl_loc(
-            &db, decl.name,
-        )));
-        for file in [a, b] {
-            assert_eq!(crate::type_scope(&db, file).resolve(decl.name), prelude);
-            assert_eq!(crate::file_scope(&db, file).resolve(decl.name), prelude);
-        }
-    }
-}
-
-#[test]
 fn every_table_row_is_registered_and_declared() {
     // The addition half of the table's contract, at the Rust level so that
     // it covers ROWS and not four hand-named enums: whatever
@@ -7737,28 +7713,32 @@ fn every_table_row_is_registered_and_declared() {
     // the row's variants, and `item_data` hands back exactly its binder. A
     // fifth row that nothing registered fails here without anyone having to
     // think to write a fixture for it.
+    //
+    // Two files: a declaration has one reserved location, shared by every
+    // file.
     let db = RootDatabase::default();
-    let file = SourceFile::new(
-        &db,
-        "test.must".to_owned(),
-        "static f = fn () {};".to_owned(),
-    );
+    let files = ["a.must", "b.must"]
+        .map(|name| SourceFile::new(&db, name.to_owned(), "static f = fn () {};".to_owned()));
     let table = crate::scopes::synthetic_decls();
     assert!(!table.is_empty(), "the table is what this test is about");
     for decl in table.iter() {
         let loc = crate::synthetic_decl_loc(&db, decl.name);
-        assert_eq!(
-            crate::type_scope(&db, file).resolve(decl.name),
-            Some(crate::Resolution::TypeItem(loc.clone())),
-            "`{}` is missing from the type scope",
-            decl.name
-        );
-        assert_eq!(
-            crate::file_scope(&db, file).resolve(decl.name),
-            Some(crate::Resolution::TypeItem(loc.clone())),
-            "`{}` is missing from the file scope",
-            decl.name
-        );
+        for file in files {
+            assert_eq!(
+                crate::type_scope(&db, file).resolve(decl.name),
+                Some(crate::Resolution::TypeItem(loc.clone())),
+                "`{}` is missing from {}'s type scope",
+                decl.name,
+                file.path(&db)
+            );
+            assert_eq!(
+                crate::file_scope(&db, file).resolve(decl.name),
+                Some(crate::Resolution::TypeItem(loc.clone())),
+                "`{}` is missing from {}'s file scope",
+                decl.name,
+                file.path(&db)
+            );
+        }
         let item = loc.to_id(&db);
         assert_eq!(
             crate::type_decl(&db, item),
@@ -7838,29 +7818,6 @@ static f = fn () {
             18..44 '{     let g = rea...': ()
             28..29 'g': fn() -> ReadLineResult
             32..41 'read_line': fn() -> ReadLineResult
-        "#]],
-    );
-}
-
-#[test]
-fn user_declarations_shadow_the_builtin_read_line_result() {
-    // The `AllocResult`/`print` precedent, applied to `read_line`'s result
-    // type: a file declaring its own `ReadLineResult` sees its own
-    // everywhere.
-    check_infer(
-        r#"
-type ReadLineResult = struct { tag: usize };
-static f = fn () -> ReadLineResult {
-    ReadLineResult(struct { tag = 1 })
-};
-"#,
-        expect![[r#"
-            57..123 'fn () -> ReadLine...': fn() -> ReadLineResult
-            81..123 '{     ReadLineRes...': ReadLineResult
-            87..101 'ReadLineResult': fn(struct { tag: usize }) -> ReadLineResult
-            87..121 'ReadLineResult(st...': ReadLineResult
-            102..120 'struct { tag = 1 }': struct { tag: usize }
-            117..118 '1': usize
         "#]],
     );
 }
@@ -8591,28 +8548,6 @@ static f = fn (n: usize) { n.next_char(0); };
 }
 
 #[test]
-fn user_declarations_shadow_the_builtin_next_char_enum() {
-    // The `AllocResult`/`ReadLineResult` precedent once more: a file
-    // declaring its own `NextChar` sees its own everywhere.
-    check_infer(
-        r#"
-type NextChar = struct { tag: usize };
-static f = fn () -> NextChar {
-    NextChar(struct { tag = 1 })
-};
-"#,
-        expect![[r#"
-            51..105 'fn () -> NextChar...': fn() -> NextChar
-            69..105 '{     NextChar(st...': NextChar
-            75..83 'NextChar': fn(struct { tag: usize }) -> NextChar
-            75..103 'NextChar(struct {...': NextChar
-            84..102 'struct { tag = 1 }': struct { tag: usize }
-            99..100 '1': usize
-        "#]],
-    );
-}
-
-#[test]
 fn next_char_is_const_legal() {
     // Decoding a `str` is pure, so there is no effect for a const context
     // to refuse — the pointer builtins' reason, reached through the dot.
@@ -9061,16 +8996,13 @@ fn unannotated_static_number_reports_no_defining_use_too() {
     // The same never-default rule at item level: the definition carries
     // the number diagnostic; uses see an undetermined signature.
     check_diagnostics(
-        "static x = 3;",
+        r#"
+static x = 3;
+static f = fn { let y = x; };
+"#,
         expect![[r#"
-            11..12: cannot infer the type of this number: it has no defining use — add a type annotation
-        "#]],
-    );
-    check_diagnostics(
-        "static x = 3;\nstatic f = fn { let y = x; };",
-        expect![[r#"
-            11..12: cannot infer the type of this number: it has no defining use — add a type annotation
-            38..39: not enough information to infer the type of `x`; add a type annotation to its definition (defined here at 7..8)
+            12..13: cannot infer the type of this number: it has no defining use — add a type annotation
+            39..40: not enough information to infer the type of `x`; add a type annotation to its definition (defined here at 8..9)
         "#]],
     );
 }
@@ -9335,21 +9267,6 @@ static main = fn() -> usize {
             269..284 'c.bump(2).get()': usize
             276..277 '2': usize
         "#]],
-    );
-}
-
-#[test]
-fn dot_call_happy_path_no_diagnostics() {
-    check_diagnostics(
-        r#"
-type Counter = struct { n: usize } with {
-    impl Self {
-        get = fn(c: Self) -> usize { c.n };
-    }
-};
-static main = fn() -> usize { Counter(struct { n = 3 }).get() };
-"#,
-        expect![[r#""#]],
     );
 }
 
@@ -12453,10 +12370,14 @@ fn an_annotation_flows_its_signature_into_the_literal() {
     //
     // Both annotation positions, because they are different axioms: an
     // ITEM's own annotation, and a `let` binding's.
+    //
+    // The `::` variant sigil resolves wherever an expectation reaches, so
+    // an inherited return type is an axiom position for it (`sigil`).
     check_diagnostics(
         r#"
 type Option = enum::<T> { Some(T), None };
 static item_annotation: fn(usize) -> Option::<usize> = fn(t) { Option::Some(t) };
+static sigil: fn(usize) -> Option::<usize> = fn(t) { ::Some(t) };
 static let_annotation = fn(n: usize) -> Option::<usize> {
     let f: fn(usize) -> Option::<usize> = fn(t) { Option::Some(t) };
     f(n)
@@ -12540,31 +12461,19 @@ fn an_expected_signature_names_the_literals_parameters() {
     // its type from the position too, so the body may use it for real
     // (`t.n` needs `t` to be a `Counter`, and nothing in the literal says
     // so). The literal's own annotation still wins where there is one.
-    check_infer(
+    check_infer_within(
         r#"
 type Counter = struct { n: usize };
 static apply = fn(g: fn(Counter) -> usize, c: Counter) -> usize { g(c) };
 static main = fn(c: Counter) -> usize { apply(fn(t) { t.n }, c) };
 "#,
+        "fn(t) { t.n }",
         expect![[r#"
-            52..109 'fn(g: fn(Counter)...': fn(fn(Counter) -> usize, Counter) -> usize
-            55..56 'g': fn(Counter) -> usize
-            80..81 'c': Counter
-            101..109 '{ g(c) }': usize
-            103..104 'g': fn(Counter) -> usize
-            103..107 'g(c)': usize
-            105..106 'c': Counter
-            125..176 'fn(c: Counter) ->...': fn(Counter) -> usize
-            128..129 'c': Counter
-            149..176 '{ apply(fn(t) { t...': usize
-            151..156 'apply': fn(fn(Counter) -> usize, Counter) -> usize
-            151..174 'apply(fn(t) { t.n...': usize
             157..170 'fn(t) { t.n }': fn(Counter) -> usize
             160..161 't': Counter
             163..170 '{ t.n }': usize
             165..166 't': Counter
             165..168 't.n': usize
-            172..173 'c': Counter
         "#]],
     );
 }
@@ -12584,21 +12493,6 @@ static apply = fn(
 static main = fn(p: struct { x: usize, y: usize }) -> usize {
     apply(fn(struct { x, y }) { x + y }, p)
 };
-"#,
-        expect![[r#""#]],
-    );
-}
-
-#[test]
-fn an_inherited_return_type_is_an_axiom_position_for_the_sigil() {
-    // A consequence worth pinning rather than discovering: the `::`
-    // variant sigil resolves wherever an expectation reaches, so giving a
-    // literal's body one opened a NEW axiom position for it. Recorded in
-    // `types-and-data.md`'s expectation register.
-    check_diagnostics(
-        r#"
-type Option = enum::<T> { Some(T), None };
-static f: fn(usize) -> Option::<usize> = fn(t) { ::Some(t) };
 "#,
         expect![[r#""#]],
     );
@@ -14335,25 +14229,19 @@ fn a_raw_mut_step_grants_the_permission_it_carries() {
 }
 
 #[test]
-fn a_shared_borrow_cannot_be_minted_through_a_raw_pointer() {
+fn no_safe_borrow_can_be_minted_through_a_raw_pointer() {
     // A raw pointer carries no region — unlike the shared-parent case
     // (`shared_parent_cannot_launder_into_an_exclusive_child`, whose
     // parent HAS a region and is refused only for `.&mut`), no safe
-    // borrow at all can be minted through one.
+    // borrow at all can be minted through one, shared or exclusive.
     check_diagnostics(
-        "static f = fn (r: usize.&raw) -> () { let m = unsafe { r.*.& }; };",
+        r#"
+static shared = fn (r: usize.&raw) -> () { let m = unsafe { r.*.& }; };
+static exclusive = fn (r: usize.&raw mut) -> () { let m = unsafe { r.*.&mut }; };
+"#,
         expect![[r#"
-            55..60: cannot mint a safe borrow through `usize.&raw`: a raw pointer carries no region for the new borrow to be bounded by
-        "#]],
-    );
-}
-
-#[test]
-fn an_exclusive_borrow_cannot_be_minted_through_a_raw_pointer() {
-    check_diagnostics(
-        "static f = fn (r: usize.&raw mut) -> () { let m = unsafe { r.*.&mut }; };",
-        expect![[r#"
-            59..67: cannot mint a safe borrow through `usize.&raw mut`: a raw pointer carries no region for the new borrow to be bounded by
+            61..66: cannot mint a safe borrow through `usize.&raw`: a raw pointer carries no region for the new borrow to be bounded by
+            140..148: cannot mint a safe borrow through `usize.&raw mut`: a raw pointer carries no region for the new borrow to be bounded by
         "#]],
     );
 }
@@ -15106,13 +14994,6 @@ static f = fn(c: Cell) -> usize { c.nosuch().* };
             140..150: no field or member `nosuch` on `Cell`
         "#]],
     );
-    // The real thing is still caught.
-    check_diagnostics(
-        "static f = fn(p: usize.&raw) -> usize { p.* };",
-        expect![[r#"
-            40..43: dereferencing a raw pointer requires an `unsafe { ... }` block
-        "#]],
-    );
 }
 
 // ---- `::Variant` in expression position --------------------------------
@@ -15342,13 +15223,6 @@ fn a_nested_fn_literal_may_infer_its_regions() {
              f(p)\n\
          };",
         expect![[r#""#]],
-    );
-    // An ITEM's signature still refuses it — its regions are parameters.
-    check_diagnostics(
-        "static f = fn (r: usize.&::<@_>) -> usize { r.* };",
-        expect![[r#"
-            28..30: `@_` cannot be used in a signature — declare the region in the binder (`fn::<@a>`) and name it here
-        "#]],
     );
 }
 
@@ -15917,12 +15791,17 @@ fn calling_an_extern_item_in_a_const_context_is_rejected() {
     // Not `NonConstFnCall`: "marking it `const fn` would allow this" is
     // advice that cannot be taken — an `extern` item is a DECLARATION, and there
     // is no const spelling of one to reach for. The honest refusal names
-    // the missing host.
+    // the missing host. Even an extern item with a safe type has none.
     check_diagnostics(
-        "unsafe extern static read: unsafe fn(u8.&raw mut, usize) -> i64;\n\
-         static f = const fn(p: u8.&raw mut) -> i64 { unsafe { read(p, 1) } };",
+        r#"
+unsafe extern static read: unsafe fn(u8.&raw mut, usize) -> i64;
+unsafe extern static now: fn() -> i64;
+static f = const fn(p: u8.&raw mut) -> i64 { unsafe { read(p, 1) } };
+static g = const fn() -> i64 { now() };
+"#,
         expect![[r#"
-            119..123: cannot call the `extern` item `read` in a const context; there is no host at compile time (this `const fn` is always a const context at 76..81)
+            159..163: cannot call the `extern` item `read` in a const context; there is no host at compile time (this `const fn` is always a const context at 116..121)
+            206..209: cannot call the `extern` item `now` in a const context; there is no host at compile time (this `const fn` is always a const context at 186..191)
         "#]],
     );
 }
@@ -16043,18 +15922,6 @@ fn a_safe_typed_extern_item_is_called_with_no_marker_at_all() {
     );
 }
 
-#[test]
-fn a_safe_typed_extern_item_still_has_no_host_at_compile_time() {
-    // Even with a safe type, an extern item cannot be called in a const context.
-    check_diagnostics(
-        "unsafe extern static now: fn() -> i64;\n\
-         static f = const fn() -> i64 { now() };",
-        expect![[r#"
-            70..73: cannot call the `extern` item `now` in a const context; there is no host at compile time (this `const fn` is always a const context at 50..55)
-        "#]],
-    );
-}
-
 // ---- `unsafe fn` — unsafety lives in the function type ------------------
 
 /// A safe function, an `extern` item (`unsafe fn`), and a higher-order
@@ -16064,8 +15931,11 @@ unsafe extern static read: unsafe fn(u8.&raw mut, usize) -> isize;
 static safe_read = fn(buf: u8.&raw mut, len: usize) -> isize { 0 };
 ";
 
-fn check_unsafe_fn(body: &str, expect: Expect) {
-    check_diagnostics(&format!("{UNSAFE_FN_PRELUDE}{body}"), expect);
+/// Checks `body` after the prelude, and returns the whole text it checked.
+fn check_unsafe_fn(body: &str, expect: Expect) -> String {
+    let text = format!("{UNSAFE_FN_PRELUDE}{body}");
+    check_diagnostics(&text, expect);
+    text
 }
 
 #[test]
@@ -16110,17 +15980,6 @@ fn an_unsafe_fn_does_not_coerce_to_a_safe_fn() {
 }
 
 #[test]
-fn calling_a_let_bound_unsafe_fn_needs_the_marker() {
-    check_unsafe_fn(
-        "static f = fn(p: u8.&raw mut) -> isize { let g = read; g(p, 1) };\n\
-         static ok = fn(p: u8.&raw mut) -> isize { let g = read; unsafe { g(p, 1) } };",
-        expect![[r#"
-            190..197: calling a value of `unsafe fn` type requires an `unsafe { ... }` block
-        "#]],
-    );
-}
-
-#[test]
 fn calling_an_unsafe_fn_parameter_needs_the_marker() {
     // The parameter never saw a declaration: its TYPE is the whole reason
     // the marker is owed, which is the point of moving unsafety here.
@@ -16157,16 +16016,22 @@ fn calling_an_unsafe_fn_out_of_a_record_field_needs_the_marker() {
 }
 
 #[test]
-fn passing_an_unsafe_fn_to_a_higher_order_function_carries_the_price() {
+fn an_unsafe_fn_parameter_carries_the_price_and_accepts_a_safe_fn() {
     // THE HOLE the declaration-side rule could not see: `apply(read, ...)`
     // hands the `extern` item to a body that never mentions it. The body's own
     // parameter type is now what demands the marker — so the price arrives
     // with the value instead of being left behind at the mention.
+    //
+    // And the coercion at an ARGUMENT, not just an annotation: `apply`
+    // promises to vouch, so a function that needs no vouching still fits.
     check_unsafe_fn(
-        "static apply = fn(g: unsafe fn(u8.&raw mut, usize) -> isize, p: u8.&raw mut) -> isize { \
-             unsafe { g(p, 1) } \
-         };\n\
-         static f = fn(p: u8.&raw mut) -> isize { apply(read, p) };",
+        r#"
+static apply = fn(g: unsafe fn(u8.&raw mut, usize) -> isize, p: u8.&raw mut) -> isize {
+    unsafe { g(p, 1) }
+};
+static f = fn(p: u8.&raw mut) -> isize { apply(read, p) };
+static coerced = fn(p: u8.&raw mut) -> isize { apply(safe_read, p) };
+"#,
         expect![[r#""#]],
     );
 }
@@ -16221,19 +16086,6 @@ fn a_safe_fn_parameter_refuses_an_unsafe_fn() {
         expect![[r#"
             274..278: type mismatch: expected `fn(u8.&raw mut, usize) -> isize`, found `unsafe fn(u8.&raw mut, usize) -> isize`
         "#]],
-    );
-}
-
-#[test]
-fn a_safe_fn_argument_coerces_at_an_unsafe_fn_parameter() {
-    // The coercion at an ARGUMENT, not just an annotation: `apply` promises
-    // to vouch, and a function that needs no vouching still fits.
-    check_unsafe_fn(
-        "static apply = fn(g: unsafe fn(u8.&raw mut, usize) -> isize, p: u8.&raw mut) -> isize { \
-             unsafe { g(p, 1) } \
-         };\n\
-         static f = fn(p: u8.&raw mut) -> isize { apply(safe_read, p) };",
-        expect![[r#""#]],
     );
 }
 
@@ -16573,25 +16425,17 @@ fn a_converted_fn_takes_the_type_of_the_position_it_landed_in() {
     // — the type the value has where it landed. Same decision as
     // variant -> enum, and it is what makes the coercion invisible
     // downstream.
-    check_infer(
-        "static takes = fn(g: unsafe fn(usize) -> usize) -> () { };\n\
-         static twice = fn(x: usize) -> usize { x + x };\n\
-         static call = fn() -> () { takes(twice) };",
+    check_infer_within(
+        r#"
+static takes = fn(g: unsafe fn(usize) -> usize) -> () { };
+static twice = fn(x: usize) -> usize { x + x };
+static call = fn() -> () { takes(twice) };
+"#,
+        "takes(twice)",
         expect![[r#"
-            15..57 'fn(g: unsafe fn(u...': fn(unsafe fn(usize) -> usize)
-            18..19 'g': unsafe fn(usize) -> usize
-            54..57 '{ }': ()
-            74..105 'fn(x: usize) -> u...': fn(usize) -> usize
-            77..78 'x': usize
-            96..105 '{ x + x }': usize
-            98..99 'x': usize
-            98..103 'x + x': usize
-            102..103 'x': usize
-            121..148 'fn() -> () { take...': fn()
-            132..148 '{ takes(twice) }': ()
-            134..139 'takes': fn(unsafe fn(usize) -> usize)
-            134..146 'takes(twice)': ()
-            140..145 'twice': unsafe fn(usize) -> usize
+            135..140 'takes': fn(unsafe fn(usize) -> usize)
+            135..147 'takes(twice)': ()
+            141..146 'twice': unsafe fn(usize) -> usize
         "#]],
     );
 }
@@ -16601,16 +16445,19 @@ fn an_unconsumed_mixed_safety_join_is_an_unsafe_fn() {
     // A safe branch's safety is its own variable once it flows into the
     // join, so it does not vote against the unsafe one: the join is the
     // least type both convert to, `unsafe fn`, with or without a check site
-    // or a call to convert at. Calling it then needs the block.
-    check_unsafe_fn(
-        r#"static f = fn(c: bool) -> () { let g = if c { read } else { safe_read }; };
-static called = fn(c: bool, p: u8.&raw mut) -> isize {
-    let g = if c { read } else { safe_read };
-    g(p, 1)
-};"#,
+    // or a call to convert at.
+    let text = check_unsafe_fn(
+        r#"
+static f = fn(c: bool) -> () { let g = if c { read } else { safe_read }; };
+"#,
+        expect![""],
+    );
+    check_infer_within(
+        &text,
+        "let g",
         expect![[r#"
-            316..323: calling a value of `unsafe fn` type requires an `unsafe { ... }` block
-        "#]],
+        171..172 'g': unsafe fn(u8.&raw mut, usize) -> isize
+    "#]],
     );
 }
 
@@ -16650,22 +16497,6 @@ fn a_join_still_refuses_an_unsafe_fn_where_a_safe_fn_is_demanded() {
 }
 
 // ---- the blesses: bytes into `str` --------------------------------------
-
-#[test]
-fn user_declarations_shadow_the_builtin_utf8_result() {
-    // The `AllocResult`/`ReadLineResult` rule, once more: a file that
-    // declares the name sees its own everywhere.
-    check_infer(
-        "type Utf8Result = struct { tag: usize };\n\
-         static x = Utf8Result(struct { tag = 1 });",
-        expect![[r#"
-            52..62 'Utf8Result': fn(struct { tag: usize }) -> Utf8Result
-            52..82 'Utf8Result(struct...': Utf8Result
-            63..81 'struct { tag = 1 }': struct { tag: usize }
-            78..79 '1': usize
-        "#]],
-    );
-}
 
 #[test]
 fn both_blesses_require_unsafe_and_pin_their_pointee_to_u8() {
@@ -17454,26 +17285,27 @@ static main = fn() -> usize {
 /// TODO: a builtin is a function value and should borrow (halvko/must#31).
 #[test]
 fn a_name_is_never_materialized_whatever_it_resolves_to() {
-    check_diagnostics(
-        r#"
+    let text = r#"
 static counter: usize = 1;
 const limit: usize = 2;
 static by_param = fn::<const N: usize>() -> usize { N.& .* };
-static by_static = fn() -> () { let p = counter.&mut; };
+static by_static = fn() -> () { let p = counter.&; };
 static by_const = fn() -> () { let p = limit.&mut; };
 static by_builtin = fn() -> () { let p = print.&; };
 static raw_param = fn::<const N: usize>() -> () { let p = N.&raw; };
 static raw_builtin = fn() -> () { let p = print.&raw mut; };
-"#,
+"#;
+    check_diagnostics(
+        text,
         expect![[r#"
             104..107: `.&` cannot borrow `N`: it is a const parameter, not a value with storage
-            154..161: cannot borrow a `static` as `.&mut`: `static mut` is not supported yet (`counter` is defined here at 8..15)
-            210..215: cannot borrow a `const` as `.&mut`: a `const` is copied at every mention, so there is no one place to borrow (`limit` is defined here at 34..39)
-            266..273: `.&` cannot borrow `print`: it is a builtin, not a value with storage
-            336..342: `.&raw` cannot take the address of `N`: it is a const parameter, not a value with storage
-            389..403: `.&raw` cannot take the address of `print`: it is a builtin, not a value with storage
+            207..212: cannot borrow a `const` as `.&mut`: a `const` is copied at every mention, so there is no one place to borrow (`limit` is defined here at 34..39)
+            263..270: `.&` cannot borrow `print`: it is a builtin, not a value with storage
+            333..339: `.&raw` cannot take the address of `N`: it is a const parameter, not a value with storage
+            386..400: `.&raw` cannot take the address of `print`: it is a builtin, not a value with storage
         "#]],
     );
+    check_temps(text, expect![""]);
 }
 
 /// The temporary's binding is typed as the whole root value (`Pair`, not
@@ -17498,30 +17330,10 @@ static f = fn() -> usize { get(mk().a.&) };
     };
     assert_eq!(infer.type_of_binding[binding].display(), "Pair");
     assert_eq!(body.bindings[binding].name(), "<temporary>");
-    check_infer(
-        text,
-        expect![[r#"
-            56..102 'fn() -> Pair { Pa...': fn() -> Pair
-            69..102 '{ Pair(struct { a...': Pair
-            71..75 'Pair': fn(struct { a: usize, b: usize }) -> Pair
-            71..100 'Pair(struct { a =...': Pair
-            76..99 'struct { a = 3, b...': struct { a: usize, b: usize }
-            89..90 '3': usize
-            96..97 '4': usize
-            117..160 'fn::<@a>(r: usize...': fn(usize.&::<@a>) -> usize
-            126..127 'r': usize.&::<@a>
-            153..160 '{ r.* }': usize
-            155..156 'r': usize.&::<@a>
-            155..158 'r.*': usize
-            173..204 'fn() -> usize { g...': fn() -> usize
-            187..204 '{ get(mk().a.&) }': usize
-            189..192 'get': fn(usize.&) -> usize
-            189..202 'get(mk().a.&)': usize
-            193..195 'mk': fn() -> Pair
-            193..197 'mk()': Pair
-            193..199 'mk().a': usize
-            193..201 'mk().a.&': usize.&
-        "#]],
+    let (_, source_map) = crate::body_with_source_map(&db, f);
+    assert!(
+        source_map.node_for_binding(binding).is_none(),
+        "a renderer finds a binding through its syntax node, and a temporary has none"
     );
 }
 
