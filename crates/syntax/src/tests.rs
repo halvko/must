@@ -13628,7 +13628,7 @@ fn record_field_old_colon_value_is_a_targeted_parse_error() {
                   WHITESPACE@24..25 " "
                   R_BRACE@25..26 "}"
                 SEMICOLON@26..27 ";"
-            error 23..24: record fields are defined with `=` (`name = value`); `:` annotates a type
+            error 21..22: record fields are defined with `=` (`name = value`); `:` annotates a type
         "#]],
     );
 }
@@ -17977,4 +17977,59 @@ use a::x;
         })
         .collect();
     assert_eq!(shown, ["a::b: x, y as z", "a: x"]);
+}
+
+#[test]
+fn a_record_field_written_name_colon_value_parses_its_value() {
+    // `p.n + 1` is type-shaped up to its `.`; the expression grammar
+    // reaches the `,`, so this is the retired construction spelling: one
+    // error on the `:`, and the value is a value (no "unknown type `p`",
+    // no cascade through the call and the block).
+    check_errors(
+        "static f = fn { g(struct { n: p.n + 1, m: p.m }); h() };",
+        expect![[r#"
+            28..29: record fields are defined with `=` (`name = value`); `:` annotates a type
+            40..41: record fields are defined with `=` (`name = value`); `:` annotates a type
+        "#]],
+    );
+}
+
+#[test]
+fn a_record_field_value_whose_type_reading_errs_is_a_value() {
+    // Each of these reaches the field's end as a type only through error
+    // recovery (an unclosed generic, an array stopping at its `,`, a
+    // record type's `=`), so each is a value with the one `:` error.
+    check_errors(
+        "static f = fn { g(struct { ok: n < limit, xs: [a, b], p: struct { a = 1 } }) };",
+        expect![[r#"
+            29..30: record fields are defined with `=` (`name = value`); `:` annotates a type
+            44..45: record fields are defined with `=` (`name = value`); `:` annotates a type
+            55..56: record fields are defined with `=` (`name = value`); `:` annotates a type
+        "#]],
+    );
+}
+
+#[test]
+fn a_half_written_field_type_keeps_its_own_errors() {
+    // Both readings reach the `}` only through recovery, so the field
+    // stays the type it is being written as.
+    check_errors(
+        "type P = struct { xs: Vec::<usize };",
+        expect![[r#"
+        32..33: expected `>`
+        34..35: expected `,` or `>`
+    "#]],
+    );
+}
+
+#[test]
+fn a_record_field_missing_its_comma_keeps_the_ordinary_errors() {
+    // Neither grammar gets past `m`, so `n: usize` stays an annotation.
+    check_errors(
+        "static p = struct { n: usize m = 1 };",
+        expect![[r#"
+            20..28: this field has a type but no value; write `name: Type = value` (or `name = value`)
+            29..30: expected `,` or `}`
+        "#]],
+    );
 }

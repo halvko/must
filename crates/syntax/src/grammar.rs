@@ -5,7 +5,7 @@
 use crate::BRACE_RULE;
 use crate::SyntaxKind;
 use crate::SyntaxKind::*;
-use crate::parser::{CompletedMarker, Parser};
+use crate::parser::{Checkpoint, CompletedMarker, Parser};
 
 /// Tokens an expression parser must not consume on error: the enclosing
 /// construct knows what to do with them.
@@ -2027,13 +2027,9 @@ fn enum_variant(p: &mut Parser<'_>) {
 /// (the equals-defines respell, G12): `name = expr` defines,
 /// `name: Type` annotates a TYPE — everywhere, uniformly — `name: Type =
 /// expr` does both, and bare `name` is shorthand for `name = name`. The
-/// retired construction spelling `name: value` gets a targeted parse error
-/// on literal-shaped values (never a silent reinterpretation — the shape
-/// may return later as a value-type annotation); an identifier after the
-/// colon reads as the type it now is, and the value-less-field check
-/// carries the story from there. `pub` superset-parses here too (a `type`
-/// declaration's shape is written as a `struct` literal); validation
-/// rejects it everywhere fields appear.
+/// retired construction spelling `name: value` is [`retired_field_value`]'s.
+/// `pub` superset-parses here too (a `type` declaration's shape is written
+/// as a `struct` literal); validation rejects it everywhere fields appear.
 fn record_expr_field(p: &mut Parser<'_>) {
     let m = p.start();
     p.eat(PUB_KW);
@@ -2044,28 +2040,53 @@ fn record_expr_field(p: &mut Parser<'_>) {
     } else {
         p.error("expected a field name");
     }
-    if p.eat(COLON) {
-        if matches!(
-            p.current(),
-            INT_NUMBER | STRING | CHAR | TRUE_KW | FALSE_KW | MINUS
-        ) {
-            // The retired `name: value` construction spelling, recognized
-            // on a literal-shaped value before anything is consumed. A
-            // composite value (`x: foo()`, `x: fn () -> R { .. }`) is
-            // type-shaped at its first token and is left to the ordinary
-            // type grammar: by the time it gives itself away the field is
-            // already unrecoverable, so naming the retired spelling there
-            // buries the message in a cascade instead of replacing one.
-            p.error("record fields are defined with `=` (`name = value`); `:` annotates a type");
-            expr(p);
-        } else {
-            type_(p);
+    if p.at(COLON) {
+        let annotation = p.checkpoint();
+        p.bump(COLON);
+        type_(p);
+        let stopped_short = !at_field_end(p, &[EQ]);
+        if stopped_short || p.erred_since(&annotation) {
+            retired_field_value(p, annotation, stopped_short);
         }
     }
     if p.eat(EQ) {
         expr(p);
     }
     m.complete(p, RECORD_EXPR_FIELD);
+}
+
+/// The retired `name: value` spelling, for a field whose `:` type did not
+/// parse cleanly: a literal-shaped first token, or an expression that
+/// reaches the field's end (with its own errors only if the type stopped
+/// short, `x: p.`). Gets a targeted error on the `:`, then the value.
+/// Anything else (`x: T y = 1`, `x: Vec::<T`) stays a type.
+fn retired_field_value(p: &mut Parser<'_>, annotation: Checkpoint, stopped_short: bool) {
+    p.rewind(annotation);
+    let value = p.checkpoint();
+    p.error_replacing_current(
+        "record fields are defined with `=` (`name = value`); `:` annotates a type",
+        "Replace `:` with `=`",
+        " =",
+    );
+    p.bump(COLON);
+    let literal = matches!(
+        p.current(),
+        INT_NUMBER | STRING | CHAR | TRUE_KW | FALSE_KW | MINUS
+    );
+    let value_start = p.checkpoint();
+    expr(p);
+    if literal || (at_field_end(p, &[]) && (stopped_short || !p.erred_since(&value_start))) {
+        return;
+    }
+    p.rewind(value);
+    p.bump(COLON);
+    type_(p);
+}
+
+/// Whether the parser sits where a record-literal field ends: its `,`,
+/// the literal's `}`, or one of `also`.
+fn at_field_end(p: &Parser<'_>, also: &[SyntaxKind]) -> bool {
+    matches!(p.current(), COMMA | R_BRACE | EOF) || also.contains(&p.current())
 }
 
 fn block_expr(p: &mut Parser<'_>) -> CompletedMarker {
