@@ -301,14 +301,20 @@ fn breakpoint_hit_inspect_and_resume() {
 
 #[test]
 fn record_local_expands_into_fields() {
+    // `p.x = 10;` runs before the stop, so the panel shows the mutated record.
     let program = fixture(
         "rec",
-        "static main = fn {\n    let p: struct { x: usize, y: usize } = struct { x = 1, y = 2 };\n    print(\"done\");\n};\n",
+        r#"static main = fn {
+    let mut p: struct { x: usize, y: usize } = struct { x = 1, y = 2 };
+    p.x = 10;
+    print("done");
+};
+"#,
     );
     let messages = run_session(&[
         ("initialize", json!({})),
         ("launch", json!({ "program": program.to_str().unwrap() })),
-        ("setBreakpoints", json!({ "breakpoints": [{ "line": 3 }] })),
+        ("setBreakpoints", json!({ "breakpoints": [{ "line": 4 }] })),
         ("configurationDone", json!({})),
         ("stackTrace", json!({ "threadId": 1 })),
         ("scopes", json!({ "frameId": 2 })),
@@ -327,14 +333,14 @@ fn record_local_expands_into_fields() {
 
     let stack = &responses_for(&messages, "stackTrace")[0]["body"]["stackFrames"];
     assert_eq!(stack[0]["name"], "main");
-    assert_eq!(stack[0]["line"], 3);
+    assert_eq!(stack[0]["line"], 4);
 
     // The local itself: display string, plus a non-zero reference marking
     // it expandable (unlike every scalar local elsewhere in the suite).
     let vars = &responses_for(&messages, "variables")[0]["body"]["variables"];
     assert_eq!(vars.as_array().unwrap().len(), 1);
     assert_eq!(vars[0]["name"], "p");
-    assert_eq!(vars[0]["value"], "{ x = 1, y = 2 }");
+    assert_eq!(vars[0]["value"], "{ x = 10, y = 2 }");
     assert_eq!(vars[0]["variablesReference"], 100_000);
 
     // Expanding it: one child per field, in the record's canonical (sorted)
@@ -354,106 +360,14 @@ fn record_local_expands_into_fields() {
             )
         })
         .collect();
-    assert_eq!(field_view, vec![("x", "1", 0), ("y", "2", 0)]);
+    assert_eq!(field_view, vec![("x", "10", 0), ("y", "2", 0)]);
 
     // Console evaluation sees the same structured value and can compute
     // over its fields.
     let evals = responses_for(&messages, "evaluate");
-    assert_eq!(evals[0]["body"]["result"], "{ x = 1, y = 2 }");
-    assert_eq!(evals[1]["body"]["result"], "3");
+    assert_eq!(evals[0]["body"]["result"], "{ x = 10, y = 2 }");
+    assert_eq!(evals[1]["body"]["result"], "12");
 
-    assert_eq!(events(&messages, "exited")[0]["body"]["exitCode"], 0);
-
-    let _ = std::fs::remove_file(program);
-}
-
-#[test]
-fn mutated_field_shows_its_new_value_in_locals() {
-    // `p.x = 10;` writes through the Place projection; paused after it,
-    // the variables panel shows the mutated record — same display and
-    // expansion machinery as an untouched one.
-    let program = fixture(
-        "mutrec",
-        "static main = fn {\n    let mut p: struct { x: usize, y: usize } = struct { x = 1, y = 2 };\n    p.x = 10;\n    print(\"done\");\n};\n",
-    );
-    let messages = run_session(&[
-        ("initialize", json!({})),
-        ("launch", json!({ "program": program.to_str().unwrap() })),
-        ("setBreakpoints", json!({ "breakpoints": [{ "line": 4 }] })),
-        ("configurationDone", json!({})),
-        ("stackTrace", json!({ "threadId": 1 })),
-        ("scopes", json!({ "frameId": 2 })),
-        ("variables", json!({ "variablesReference": 2 })),
-        ("variables", json!({ "variablesReference": 100_000 })),
-        ("continue", json!({ "threadId": 1 })),
-        ("disconnect", json!({})),
-    ]);
-
-    let vars = &responses_for(&messages, "variables")[0]["body"]["variables"];
-    assert_eq!(vars[0]["name"], "p");
-    assert_eq!(vars[0]["value"], "{ x = 10, y = 2 }");
-
-    let fields = &responses_for(&messages, "variables")[1]["body"]["variables"];
-    assert_eq!(fields[0]["name"], "x");
-    assert_eq!(fields[0]["value"], "10");
-    assert_eq!(fields[1]["name"], "y");
-    assert_eq!(fields[1]["value"], "2");
-
-    assert_eq!(events(&messages, "exited")[0]["body"]["exitCode"], 0);
-
-    let _ = std::fs::remove_file(program);
-}
-
-#[test]
-fn column_breakpoints_distinguish_calls_on_one_line() {
-    let program = fixture(
-        "cols",
-        "static f = fn (n: usize) -> usize { n + 1 }\nstatic main = fn {\n    let x = f(1) + f(2);\n    print(\"done\");\n};\n",
-    );
-    // Line 3 columns: 13 = `f(1)` (also where the `+` and the let-init
-    // anchor), 20 = `f(2)`.
-    let messages = run_session(&[
-        ("initialize", json!({})),
-        ("launch", json!({ "program": program.to_str().unwrap() })),
-        ("breakpointLocations", json!({ "source": {}, "line": 3 })),
-        (
-            "setBreakpoints",
-            json!({ "breakpoints": [{ "line": 3, "column": 20 }] }),
-        ),
-        ("configurationDone", json!({})),
-        ("stackTrace", json!({ "threadId": 1 })),
-        ("next", json!({ "threadId": 1, "granularity": "statement" })),
-        ("stackTrace", json!({ "threadId": 1 })),
-        ("continue", json!({ "threadId": 1 })),
-        ("disconnect", json!({})),
-    ]);
-
-    // The picker gets both call positions on the line.
-    let locations = &responses_for(&messages, "breakpointLocations")[0]["body"]["breakpoints"];
-    assert_eq!(locations[0], json!({ "line": 3, "column": 13 }));
-    assert_eq!(locations[1], json!({ "line": 3, "column": 20 }));
-
-    // The column breakpoint verifies, with its column echoed.
-    let bp = &responses_for(&messages, "setBreakpoints")[0]["body"]["breakpoints"][0];
-    assert_eq!(bp["verified"], true);
-    assert_eq!(bp["column"], 20);
-
-    // f(1) runs through unbroken; we stop exactly before f(2).
-    let stopped = events(&messages, "stopped");
-    assert_eq!(stopped[0]["body"]["reason"], "breakpoint");
-    let stack = &responses_for(&messages, "stackTrace")[0]["body"]["stackFrames"];
-    assert_eq!(stack[0]["name"], "main");
-    assert_eq!(stack[0]["line"], 3);
-    assert_eq!(stack[0]["column"], 20);
-
-    // A statement-granular step-over stays on the line: after f(2)
-    // returns, the addition (anchored at column 13) is next.
-    assert_eq!(stopped[1]["body"]["reason"], "step");
-    let stack = &responses_for(&messages, "stackTrace")[1]["body"]["stackFrames"];
-    assert_eq!(stack[0]["line"], 3);
-    assert_eq!(stack[0]["column"], 13);
-
-    // And the rest runs out clean.
     assert_eq!(events(&messages, "exited")[0]["body"]["exitCode"], 0);
 
     let _ = std::fs::remove_file(program);
@@ -521,7 +435,7 @@ fn breakpoint_columns_are_utf16_code_units() {
 }
 
 #[test]
-fn statement_steps_distinguish_statements_sharing_a_column() {
+fn column_breakpoints_and_statement_steps_split_one_line() {
     // `let x = f(1) + f(2);` lowers to an addition statement and the
     // let-init statement, both anchored at column 13 (the shared origin
     // expression's start). Position equality would merge them into one
@@ -530,9 +444,12 @@ fn statement_steps_distinguish_statements_sharing_a_column() {
         "shared-col",
         "static f = fn (n: usize) -> usize { n + 1 }\nstatic main = fn {\n    let x = f(1) + f(2);\n    print(\"done\");\n};\n",
     );
+    // Line 3 columns: 13 = `f(1)` (also where the `+` and the let-init
+    // anchor), 20 = `f(2)`.
     let messages = run_session(&[
         ("initialize", json!({})),
         ("launch", json!({ "program": program.to_str().unwrap() })),
+        ("breakpointLocations", json!({ "source": {}, "line": 3 })),
         (
             "setBreakpoints",
             json!({ "breakpoints": [{ "line": 3, "column": 20 }] }),
@@ -549,13 +466,25 @@ fn statement_steps_distinguish_statements_sharing_a_column() {
         ("disconnect", json!({})),
     ]);
 
-    // Stop 1: the column breakpoint, before f(2).
+    // The picker gets both call positions on the line.
+    let locations = &responses_for(&messages, "breakpointLocations")[0]["body"]["breakpoints"];
+    assert_eq!(locations[0], json!({ "line": 3, "column": 13 }));
+    assert_eq!(locations[1], json!({ "line": 3, "column": 20 }));
+
+    // The column breakpoint verifies, with its column echoed.
+    let bp = &responses_for(&messages, "setBreakpoints")[0]["body"]["breakpoints"][0];
+    assert_eq!(bp["verified"], true);
+    assert_eq!(bp["column"], 20);
+
+    // Stop 1: the column breakpoint. f(1) runs through unbroken; we stop
+    // exactly before f(2).
     let stack =
         |i: usize| responses_for(&messages, "stackTrace")[i]["body"]["stackFrames"][0].clone();
     assert_eq!(
         events(&messages, "stopped")[0]["body"]["reason"],
         "breakpoint"
     );
+    assert_eq!(stack(0)["name"], "main");
     assert_eq!(stack(0)["line"], 3);
     assert_eq!(stack(0)["column"], 20);
 
@@ -714,45 +643,11 @@ fn log_points_emit_without_stopping() {
 #[test]
 fn invalid_hit_conditions_unverify_the_breakpoint() {
     let program = fixture("badhits", COUNTDOWN);
-    let messages = run_session(&[
-        ("initialize", json!({})),
-        (
-            "launch",
-            json!({ "program": program.to_str().unwrap(), "entry": "down(1)" }),
-        ),
-        (
-            "setBreakpoints",
-            json!({ "breakpoints": [{ "line": 2, "hitCondition": "sometimes" }] }),
-        ),
-        ("configurationDone", json!({})),
-        ("disconnect", json!({})),
-    ]);
-    let bp = &responses_for(&messages, "setBreakpoints")[0]["body"]["breakpoints"][0];
-    assert_eq!(bp["verified"], false);
-    assert!(
-        bp["message"]
-            .as_str()
-            .unwrap()
-            .contains("invalid hit condition")
-    );
-    // Unverified means unverified: the breakpoint must not sit in the
-    // debuggee armed as an unconditional stop.
-    assert_eq!(
-        events(&messages, "stopped").len(),
-        0,
-        "not armed: {messages:?}"
-    );
-    assert_eq!(events(&messages, "exited")[0]["body"]["exitCode"], 0);
-
-    let _ = std::fs::remove_file(program);
-}
-
-#[test]
-fn zero_hit_conditions_are_rejected() {
-    let program = fixture("zerohits", COUNTDOWN);
-    // Arrivals count from 1: `==0` and `%0` can never be met, so they must
-    // not verify — a breakpoint they gate would silently never stop.
-    for hit_condition in ["%0", "==0"] {
+    // `sometimes` doesn't parse. Arrivals count from 1, so `==0` and `%0`
+    // can never be met and must not verify either — a breakpoint they gate
+    // would silently never stop. Unverified means unverified: none of them
+    // may sit in the debuggee armed as an unconditional stop.
+    for hit_condition in ["sometimes", "%0", "==0"] {
         let messages = run_session(&[
             ("initialize", json!({})),
             (
@@ -1043,7 +938,7 @@ fn stdout(messages: &[Value]) -> String {
 }
 
 #[test]
-fn terminate_at_a_breakpoint_stops_the_program() {
+fn terminate_at_a_breakpoint_stops_the_program_and_keeps_the_session() {
     let program = fixture("terminate", TWO_PRINTS);
     let messages = run_session(&[
         ("initialize", json!({})),
@@ -1052,6 +947,8 @@ fn terminate_at_a_breakpoint_stops_the_program() {
         ("setBreakpoints", json!({ "breakpoints": [{ "line": 4 }] })),
         ("configurationDone", json!({})),
         ("terminate", json!({})),
+        ("threads", json!({})),
+        ("continue", json!({ "threadId": 1 })),
         ("disconnect", json!({})),
     ]);
 
@@ -1067,27 +964,8 @@ fn terminate_at_a_breakpoint_stops_the_program() {
     assert_eq!(events(&messages, "terminated").len(), 1);
     assert!(events(&messages, "exited").is_empty());
     assert_eq!(stdout(&messages), "start\n");
-    assert_eq!(responses_for(&messages, "disconnect")[0]["success"], true);
-
-    let _ = std::fs::remove_file(program);
-}
-
-#[test]
-fn the_session_outlives_terminate() {
-    let program = fixture("terminate-session", TWO_PRINTS);
-    let messages = run_session(&[
-        ("initialize", json!({})),
-        ("launch", json!({ "program": program.to_str().unwrap() })),
-        ("setBreakpoints", json!({ "breakpoints": [{ "line": 4 }] })),
-        ("configurationDone", json!({})),
-        ("terminate", json!({})),
-        ("threads", json!({})),
-        ("continue", json!({ "threadId": 1 })),
-        ("disconnect", json!({})),
-    ]);
-
-    // Requests after `terminate` are answered; resuming finds nothing to
-    // run.
+    // The session outlives `terminate`: later requests are answered, and
+    // resuming finds nothing to run.
     assert_eq!(responses_for(&messages, "threads")[0]["success"], true);
     assert_eq!(responses_for(&messages, "continue")[0]["success"], false);
     assert_eq!(responses_for(&messages, "disconnect")[0]["success"], true);

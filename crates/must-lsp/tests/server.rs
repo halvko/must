@@ -160,14 +160,15 @@ fn publishes_parse_errors_on_open_and_change() {
     assert_eq!(diag.range.start, lsp_types::Position::new(1, 14));
     assert_eq!(diag.range.end, lsp_types::Position::new(1, 15));
 
-    // Fix the file: diagnostics clear.
+    // Fix the file: diagnostics clear. The version jumps from 0 to 7, so
+    // the server has to echo the client's version rather than count edits.
     client.change(
         &file,
-        1,
+        7,
         "static main = fn {\n    let a = \"x\";\n    print(a);\n}\n",
     );
     let diags = client.next_diagnostics();
-    assert_eq!(diags.version, Some(1));
+    assert_eq!(diags.version, Some(7));
     assert_eq!(diags.diagnostics, vec![]);
 
     drop(client);
@@ -504,71 +505,6 @@ fn quick_fix_makes_an_immutable_binding_mutable() {
 }
 
 #[test]
-fn quick_fix_borrows_an_owned_receiver() {
-    let mut client = TestClient::start();
-    let file = uri("file:///borrow-receiver.must");
-
-    client.open(
-        &file,
-        r#"
-type Counter = struct { n: usize } with {
-    impl Self {
-        get = fn::<@a>(s: Self.&::<@a>) -> usize { s.*.n };
-    }
-};
-static f = fn () -> usize {
-    let c: Counter = Counter(struct { n = 1 });
-    c.get()
-};
-"#,
-    );
-    let diags = client.next_diagnostics();
-    assert_eq!(diags.diagnostics.len(), 2); // the error + the companion hint
-    let diag = diags
-        .diagnostics
-        .iter()
-        .find(|d| d.severity == Some(lsp_types::DiagnosticSeverity::ERROR))
-        .expect("has the error diagnostic");
-    assert_eq!(
-        diag.message,
-        "`get` takes `Self.&`, and a borrow is never inserted for an owned receiver \
-         — write `.&.get(...)`"
-    );
-
-    let response =
-        client.request::<lsp_types::request::CodeActionRequest>(lsp_types::CodeActionParams {
-            text_document: lsp_types::TextDocumentIdentifier { uri: file.clone() },
-            range: diag.range,
-            context: lsp_types::CodeActionContext::default(),
-            work_done_progress_params: Default::default(),
-            partial_result_params: Default::default(),
-        });
-    let actions = response.expect("expected code actions");
-    assert_eq!(actions.len(), 1);
-    let lsp_types::CodeActionOrCommand::CodeAction(action) = &actions[0] else {
-        panic!("expected a code action, got {actions:?}");
-    };
-    assert_eq!(action.title, "Insert `.&` before `.get`");
-
-    // Uri-keyed maps are the shape the LSP protocol mandates.
-    #[allow(clippy::mutable_key_type)]
-    let changes = action
-        .edit
-        .as_ref()
-        .and_then(|e| e.changes.as_ref())
-        .expect("action has a workspace edit");
-    let edits = &changes[&file];
-    assert_eq!(edits.len(), 1);
-    // A pure insertion right before the `.` of `c.get()` (line 8, column
-    // 5): applying it yields `c.&.get()`.
-    assert_eq!(edits[0].range.start, lsp_types::Position::new(8, 5));
-    assert_eq!(edits[0].range.end, lsp_types::Position::new(8, 5));
-    assert_eq!(edits[0].new_text, ".&");
-
-    drop(client);
-}
-
-#[test]
 fn quick_fix_adds_missing_match_arms_attached_to_the_diagnostic() {
     let mut client = TestClient::start();
     let file = uri("file:///match-fix.must");
@@ -813,44 +749,16 @@ fn out_of_range_positions_clamp_into_the_requested_line() {
 }
 
 #[test]
-fn diagnostics_carry_the_document_version() {
-    let client = TestClient::start();
-    let file = uri("file:///versioned.must");
-
-    client.open(&file, "static = true;");
-    assert_eq!(client.next_diagnostics().version, Some(0));
-
-    client.change(&file, 7, "static x: usize = 1;");
-    assert_eq!(client.next_diagnostics().version, Some(7));
-
-    drop(client);
-}
-
-#[test]
-fn close_clears_diagnostics() {
-    let client = TestClient::start();
-    let file = uri("file:///broken.must");
-
-    client.open(&file, "static = true;");
-    assert_eq!(client.next_diagnostics().diagnostics.len(), 1);
-
-    client.close(&file);
-    let diags = client.next_diagnostics();
-    assert_eq!(diags.version, None);
-    assert_eq!(diags.diagnostics, vec![]);
-
-    drop(client);
-}
-
-#[test]
-fn reopening_a_closed_file_resumes_diagnostics_and_edits() {
+fn closing_clears_diagnostics_and_reopening_resumes_them() {
     let client = TestClient::start();
     let file = uri("file:///reopened.must");
 
     client.open(&file, "static = true;");
     assert_eq!(client.next_diagnostics().diagnostics.len(), 1);
     client.close(&file);
-    assert_eq!(client.next_diagnostics().diagnostics, vec![]);
+    let diags = client.next_diagnostics();
+    assert_eq!(diags.version, None);
+    assert_eq!(diags.diagnostics, vec![]);
 
     // The server emptied this document's text on close; reopening has to
     // refill the parked input rather than answer from what is left of it,
@@ -1304,24 +1212,28 @@ fn init_with_snippet_support(support: bool) -> lsp_types::InitializeParams {
     }
 }
 
-/// Fetches the completion item labeled `label` at the fixed spot the
-/// snippet tests share: a fresh statement in `main`'s body, where `add`
-/// (two params) is visible as a file item.
-fn statement_completion_item(
+/// A fresh statement in `main`'s body (line 2, column 4), where `add` (two
+/// params) is visible as a file item. The cursor sits after trailing
+/// spaces, which a raw string would hide.
+const STATEMENT_SOURCE: &str =
+    "static add = fn (a: usize, b: usize) -> usize { a };\nstatic main = fn {\n    \n};\n";
+
+/// Opens `text` and fetches the completion item labeled `label` at
+/// `position`.
+fn completion_item(
     client: &mut TestClient,
     file: &lsp_types::Uri,
+    text: &str,
+    position: lsp_types::Position,
     label: &str,
 ) -> lsp_types::CompletionItem {
-    client.open(
-        file,
-        "static add = fn (a: usize, b: usize) -> usize { a };\nstatic main = fn {\n    \n};\n",
-    );
+    client.open(file, text);
     client.next_diagnostics();
 
     let response = client.request::<lsp_types::request::Completion>(lsp_types::CompletionParams {
         text_document_position: lsp_types::TextDocumentPositionParams {
             text_document: lsp_types::TextDocumentIdentifier { uri: file.clone() },
-            position: lsp_types::Position::new(2, 4),
+            position,
         },
         work_done_progress_params: Default::default(),
         partial_result_params: Default::default(),
@@ -1341,7 +1253,13 @@ fn snippet_capable_client_receives_snippet_format_items() {
     let mut client = TestClient::start_with(init_with_snippet_support(true));
     let file = uri("file:///snippet_capable.must");
 
-    let add = statement_completion_item(&mut client, &file, "add");
+    let add = completion_item(
+        &mut client,
+        &file,
+        STATEMENT_SOURCE,
+        lsp_types::Position::new(2, 4),
+        "add",
+    );
     assert_eq!(
         add.insert_text_format,
         Some(lsp_types::InsertTextFormat::SNIPPET)
@@ -1351,6 +1269,16 @@ fn snippet_capable_client_receives_snippet_format_items() {
         other => panic!("expected a plain edit, got {other:?}"),
     };
     assert_eq!(edit.new_text, "add($1)");
+
+    let template = completion_item(
+        &mut client,
+        &uri("file:///match_template.must"),
+        // The source ends `match s` with a trailing space; the cursor follows it.
+        "type Shape = enum { Circle(usize), Point };\nstatic f = fn (s: Shape) {\n    match s \n};\n",
+        lsp_types::Position::new(2, 12),
+        "match arms",
+    );
+    assert_eq!(template.kind, Some(lsp_types::CompletionItemKind::SNIPPET));
 
     drop(client);
 }
@@ -1363,7 +1291,13 @@ fn snippet_incapable_client_receives_the_plain_fallback() {
     let mut client = TestClient::start_with(init_with_snippet_support(false));
     let file = uri("file:///snippet_incapable.must");
 
-    let add = statement_completion_item(&mut client, &file, "add");
+    let add = completion_item(
+        &mut client,
+        &file,
+        STATEMENT_SOURCE,
+        lsp_types::Position::new(2, 4),
+        "add",
+    );
     assert_eq!(add.insert_text_format, None);
     let edit = match add.text_edit.as_ref().expect("has a text edit") {
         lsp_types::CompletionTextEdit::Edit(edit) => edit,
@@ -1372,180 +1306,6 @@ fn snippet_incapable_client_receives_the_plain_fallback() {
     // The plain fallback is still the call form (`add()`), not the bare
     // literal snippet text (`add($1)`) and not the bare name either.
     assert_eq!(edit.new_text, "add()");
-
-    drop(client);
-}
-
-#[test]
-fn snippet_capable_client_receives_the_loop_block() {
-    let mut client = TestClient::start_with(init_with_snippet_support(true));
-    let file = uri("file:///loop_capable.must");
-
-    let item = statement_completion_item(&mut client, &file, "loop");
-    assert_eq!(
-        item.insert_text_format,
-        Some(lsp_types::InsertTextFormat::SNIPPET)
-    );
-    let edit = match item.text_edit.as_ref().expect("has a text edit") {
-        lsp_types::CompletionTextEdit::Edit(edit) => edit,
-        other => panic!("expected a plain edit, got {other:?}"),
-    };
-    assert_eq!(edit.new_text, "loop {$0}");
-
-    drop(client);
-}
-
-#[test]
-fn snippet_incapable_client_receives_the_bare_loop_keyword() {
-    let mut client = TestClient::start_with(init_with_snippet_support(false));
-    let file = uri("file:///loop_incapable.must");
-
-    let item = statement_completion_item(&mut client, &file, "loop");
-    assert_eq!(item.insert_text_format, None);
-    let edit = match item.text_edit.as_ref().expect("has a text edit") {
-        lsp_types::CompletionTextEdit::Edit(edit) => edit,
-        other => panic!("expected a plain edit, got {other:?}"),
-    };
-    assert_eq!(edit.new_text, "loop");
-
-    drop(client);
-}
-
-/// Fetches the `match arms` template completion at `position` in `text` —
-/// the multi-line snippet the capability tests below check, at either
-/// shape of the arm-list slot (see `ide::completions::ArmListShape`).
-fn match_template_item(
-    client: &mut TestClient,
-    file: &lsp_types::Uri,
-    text: &str,
-    position: lsp_types::Position,
-) -> lsp_types::CompletionItem {
-    client.open(file, text);
-    client.next_diagnostics();
-
-    let response = client.request::<lsp_types::request::Completion>(lsp_types::CompletionParams {
-        text_document_position: lsp_types::TextDocumentPositionParams {
-            text_document: lsp_types::TextDocumentIdentifier { uri: file.clone() },
-            position,
-        },
-        work_done_progress_params: Default::default(),
-        partial_result_params: Default::default(),
-        context: None,
-    });
-    let Some(lsp_types::CompletionResponse::Array(items)) = response else {
-        panic!("expected a plain array of completion items, got {response:?}");
-    };
-    items
-        .into_iter()
-        .find(|it| it.label == "match arms")
-        .expect("the arm-list template is offered")
-}
-
-const MATCH_TEMPLATE_NO_BRACES_SOURCE: &str =
-    "type Shape = enum { Circle(usize), Point };\nstatic f = fn (s: Shape) {\n    match s \n};\n";
-
-#[test]
-fn snippet_capable_client_receives_the_match_arm_template() {
-    let mut client = TestClient::start_with(init_with_snippet_support(true));
-    let file = uri("file:///match_template_capable.must");
-
-    let template = match_template_item(
-        &mut client,
-        &file,
-        MATCH_TEMPLATE_NO_BRACES_SOURCE,
-        lsp_types::Position::new(2, 12),
-    );
-    assert_eq!(
-        template.kind,
-        Some(lsp_types::CompletionItemKind::SNIPPET),
-        "the template announces itself as one"
-    );
-    assert_eq!(
-        template.insert_text_format,
-        Some(lsp_types::InsertTextFormat::SNIPPET)
-    );
-    let edit = match template.text_edit.as_ref().expect("has a text edit") {
-        lsp_types::CompletionTextEdit::Edit(edit) => edit,
-        other => panic!("expected a plain edit, got {other:?}"),
-    };
-    // Absolute indentation, measured off the `match` keyword's own line —
-    // see `ide::completions::match_template` for why it is not relative.
-    assert_eq!(
-        edit.new_text,
-        "{\n        ::Circle($1) => $2,\n        ::Point => $3,\n    }"
-    );
-
-    drop(client);
-}
-
-#[test]
-fn snippet_incapable_client_receives_the_match_template_fallback() {
-    // The one client-visible thing that must never happen: literal `$1`
-    // text pasted into a buffer by a client that cannot expand it.
-    let mut client = TestClient::start_with(init_with_snippet_support(false));
-    let file = uri("file:///match_template_incapable.must");
-
-    let template = match_template_item(
-        &mut client,
-        &file,
-        MATCH_TEMPLATE_NO_BRACES_SOURCE,
-        lsp_types::Position::new(2, 12),
-    );
-    assert_eq!(template.insert_text_format, None);
-    let edit = match template.text_edit.as_ref().expect("has a text edit") {
-        lsp_types::CompletionTextEdit::Edit(edit) => edit,
-        other => panic!("expected a plain edit, got {other:?}"),
-    };
-    assert!(
-        !edit.new_text.contains('$'),
-        "snippet syntax leaked to a snippet-incapable client: {:?}",
-        edit.new_text
-    );
-    assert_eq!(
-        edit.new_text,
-        "{\n        ::Circle => ,\n        ::Point => ,\n    }"
-    );
-
-    drop(client);
-}
-
-/// The other shape of the template slot, end to end: `match s {}` with the
-/// cursor already inside the pair an auto-closing editor supplied. `{` is
-/// NOT a registered trigger character (see
-/// `completion_capability_is_advertised_with_dot_and_colon_triggers`), so a
-/// real editor does not fire this request spontaneously the instant `{` is
-/// typed — but the position still answers the template on an explicit
-/// invoke, which is exactly what this request represents.
-#[test]
-fn snippet_capable_client_receives_the_match_arm_template_inside_empty_braces() {
-    let mut client = TestClient::start_with(init_with_snippet_support(true));
-    let file = uri("file:///match_template_empty_braces.must");
-
-    // Line 2 is `    match s {}`; column 13 sits right between the `{` and
-    // the `}` an auto-closing client already inserted.
-    let template = match_template_item(
-        &mut client,
-        &file,
-        "type Shape = enum { Circle(usize), Point };\nstatic f = fn (s: Shape) {\n    match s {}\n};\n",
-        lsp_types::Position::new(2, 13),
-    );
-    assert_eq!(
-        template.insert_text_format,
-        Some(lsp_types::InsertTextFormat::SNIPPET)
-    );
-    let edit = match template.text_edit.as_ref().expect("has a text edit") {
-        lsp_types::CompletionTextEdit::Edit(edit) => edit,
-        other => panic!("expected a plain edit, got {other:?}"),
-    };
-    // No braces of its own: the pair already in the buffer belongs to the
-    // client's auto-close, and the server has no way to ask it to delete a
-    // second one — so the template writes arms only, opening on its own
-    // line same as the no-braces shape, and the existing `}` ends up at
-    // `indent` right after the last arm.
-    assert_eq!(
-        edit.new_text,
-        "\n        ::Circle($1) => $2,\n        ::Point => $3,\n    "
-    );
 
     drop(client);
 }

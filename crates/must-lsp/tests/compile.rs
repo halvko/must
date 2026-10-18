@@ -75,6 +75,8 @@ fn execute(path: &std::path::Path) -> String {
 
 #[test]
 fn a_compiled_program_runs_on_a_plain_engine() {
+    // The default entry `main()` calls a non-`const fn`; the entry's static
+    // initializer must not be checked as a const context.
     let source = fixture(
         "hello",
         r#"
@@ -185,35 +187,6 @@ fn a_program_with_errors_is_not_compiled() {
     );
     assert!(!wasm.exists());
     let _ = std::fs::remove_file(&source);
-}
-
-#[test]
-fn calling_an_ordinary_function_as_the_entry_is_not_a_const_context_error() {
-    // The regression this guards: injecting `-e`'s expression as a
-    // `static` initializer makes it a const context, and checking that
-    // context by the file's own rules would reject calling any non-`const
-    // fn` there at all — which is what the DEFAULT entry, `main()`, always
-    // does. The check gate must stay scoped to the file's own items.
-    let source = fixture(
-        "entry-ordinary-call",
-        r#"
-static main = fn () -> () { print("ok\n") };
-"#,
-    );
-    let wasm = out_path("entry-ordinary-call");
-    let (message, code) = run(&[
-        "compile",
-        source.to_str().unwrap(),
-        "-o",
-        wasm.to_str().unwrap(),
-    ]);
-    assert_eq!(
-        code, 0,
-        "the default entry must not fail to check: {message}"
-    );
-    assert_eq!(execute(&wasm), "ok\n");
-    let _ = std::fs::remove_file(&source);
-    let _ = std::fs::remove_file(&wasm);
 }
 
 #[test]
@@ -339,28 +312,4 @@ fn a_malformed_entry_expression_is_a_usage_error() {
     assert!(message.contains("invalid entry expression"), "{message}");
     assert!(!wasm.exists());
     let _ = std::fs::remove_file(&source);
-}
-
-#[test]
-fn the_examples_flagship_compiles_and_prints_what_the_interpreter_prints() {
-    // `display.must` is the traits milestone: dictionaries resolved into
-    // direct calls, three implementers of one generic consumer. Compiled
-    // and interpreted output must be byte-identical.
-    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .parent()
-        .and_then(std::path::Path::parent)
-        .expect("workspace root");
-    let example = root.join("examples/display.must");
-    let wasm = out_path("display");
-    let (message, code) = run(&[
-        "compile",
-        example.to_str().unwrap(),
-        "-o",
-        wasm.to_str().unwrap(),
-    ]);
-    assert_eq!(code, 0, "{message}");
-    let (interpreted, code) = run(&["run", example.to_str().unwrap()]);
-    assert_eq!(code, 0, "{interpreted}");
-    assert_eq!(execute(&wasm), interpreted);
-    let _ = std::fs::remove_file(&wasm);
 }

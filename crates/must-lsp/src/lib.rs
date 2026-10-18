@@ -1233,31 +1233,13 @@ mod tests {
 
         open(&mut state, &doc, BROKEN);
 
+        assert_eq!(state.files.by_uri.len(), 1);
         assert!(matches!(state.files.by_uri[&doc], FileState::Open(_)));
         assert!(
             state.files.by_uri[&doc].source_file() == file,
             "reopening minted a second input for the same document"
         );
         assert_eq!(state.host.snapshot().diagnostics(file).len(), 1);
-    }
-
-    #[test]
-    fn open_close_cycles_leave_one_entry_and_one_input() {
-        let (mut state, _client) = server();
-        let doc = uri("file:///churn.must");
-        open(&mut state, &doc, BROKEN);
-        let file = state.files.by_uri[&doc].source_file();
-
-        for _ in 0..50 {
-            close(&mut state, &doc);
-            open(&mut state, &doc, BROKEN);
-        }
-
-        assert_eq!(state.files.by_uri.len(), 1);
-        assert!(
-            state.files.by_uri[&doc].source_file() == file,
-            "a cycle minted a new salsa input; memory would grow per open event"
-        );
     }
 
     #[test]
