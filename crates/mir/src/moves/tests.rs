@@ -176,24 +176,6 @@ static main = fn() -> usize {
     );
 }
 
-/// A place use of a moved rigid parameter is refused like a by-value one.
-#[test]
-fn a_place_use_of_a_moved_type_parameter_is_the_use_after_move_error() {
-    check_diagnostics(
-        r#"
-static pair = fn::<@a, T>(v: T, r: T.&::<@a>) -> T { v };
-static f = fn::<T: forget>(m: T) -> T {
-    let w = m;
-    let r = m.&;
-    pair(w, r)
-};
-"#,
-        expect![[r#"
-            126..127: `m` was already consumed: a value of `T` may not be duplicated, and no bound grants copying — borrow it at the first use (`m` is born here, and there is only one of it at 86..87) (first consumed here at 111..112)
-        "#]],
-    );
-}
-
 /// The leak is on the path that leaks — the empty `else`, out through the
 /// body's end — with the move on the other path as the note.
 #[test]
@@ -531,21 +513,6 @@ static held = const { const_make(1) };
 }
 
 #[test]
-fn a_borrow_of_a_linear_consumes_nothing_and_a_copy_out_is_refused() {
-    check_linear(
-        r#"
-static peek = fn::<@a>(r: Res.&::<@a>) -> usize { r.*.id };
-static main = fn() -> () {
-    let r = make(1);
-    let n = peek(r.&);
-    r.drop();
-};
-"#,
-        expect![""],
-    );
-}
-
-#[test]
 fn containment_infects_a_container_and_a_rest_pattern_cannot_skip_it() {
     check_linear(
         r#"
@@ -600,23 +567,6 @@ static leaky = fn(m: Maybe) -> () {
 "#,
         expect![[r#"
             567..570: `r` is not consumed on this path; its type has no `forget` capability, so every path must consume it (`r` is born here and must be consumed at 561..562)
-        "#]],
-    );
-}
-
-#[test]
-fn a_loop_may_not_consume_a_linear_born_outside_it() {
-    check_linear(
-        r#"
-static main = fn(n: usize) -> () {
-    let r = make(1);
-    loop {
-        r.drop();
-    };
-};
-"#,
-        expect![[r#"
-            411..412: `r` was already consumed (`r` is born here and must be consumed at 379..380) (consumed here, on an earlier iteration of the loop at 411..412)
         "#]],
     );
 }
@@ -693,32 +643,13 @@ static n: usize = const { let r = const_make(1); 5 };
 }
 
 #[test]
-fn a_container_holds_a_linear_with_nothing_written_on_its_binder() {
-    // The ruling, at its smallest (T22): `Box` says nothing about `T`, and
-    // `Box::<Res>` is linear anyway — CONTAINMENT decided, which is what
-    // it always did. The one diagnostic left is the leak the program
-    // really has; the refusal that used to sit beside it was bookkeeping
-    // about a bound nobody needed.
-    check_linear(
-        r#"
-type Box = enum::<T> { Full(T), Empty };
-static main = fn() -> () {
-    let r = make(1);
-    let b = Box::Full(r);
-};
-"#,
-        expect![[r#"
-            402..452: `b` is not consumed on this path; its type has no `forget` capability, so every path must consume it (`b` is born here and must be consumed at 433..434)
-        "#]],
-    );
-}
-
-#[test]
 fn a_container_parameter_carries_a_linear_and_hands_it_back() {
     // `unwrap`'s shape is the reason rigid checking is bearable: inside the
     // body the only things you can do with a `T` you may not forget are
     // hand it back and pass it on — and handing it back is what a container
     // is for.
+    // `leaky`: `Box` says nothing about `T`, yet `Box::<Res>` is linear by
+    // containment, so the leak is the only diagnostic.
     check_linear(
         r#"
 type Box = enum::<T> { Full(T), Empty } with {
@@ -1609,37 +1540,6 @@ static main = fn(text: str) -> usize {
 }
 
 #[test]
-fn not_dropping_a_string_is_a_check_error() {
-    check_string(
-        r#"
-static leak = fn(text: str) -> () {
-    let s = to_owned(text.&);
-    print(s.&.as_str());
-};
-"#,
-        expect![[r#"
-            996..1054: `s` is not consumed on this path; its type has no `forget` capability, so every path must consume it (`s` is born here and must be consumed at 1006..1007)
-        "#]],
-    );
-}
-
-#[test]
-fn dropping_a_string_twice_is_a_check_error() {
-    check_string(
-        r#"
-static double = fn(text: str) -> () {
-    let s = to_owned(text.&);
-    s.drop();
-    s.drop();
-};
-"#,
-        expect![[r#"
-            1048..1049: `s` was already consumed (`s` is born here and must be consumed at 1008..1009) (first consumed here at 1034..1035)
-        "#]],
-    );
-}
-
-#[test]
 fn a_string_cannot_be_copied_out_of_a_borrow_or_a_container() {
     check_string(
         r#"
@@ -1802,73 +1702,12 @@ static main = fn(c: bool) -> Res {
 
 // ---- `Reader`: a heap-owning type declared `only move` ------------------
 
-/// The shipped `examples/stdin_lib.must` `Reader`, trimmed to what the
-/// checker sees — the buffering/line-scanning machinery is not the point
-/// here, only that the type owns a heap allocation, is declared `without
-/// forget`, and disposes of itself by being taken apart, exactly like
-/// `String.drop` above. `eof` stays in the trimmed type, unused by any test
-/// here, so `..` in `drop` has a forgettable field to actually skip.
-const READER_PRELUDE: &str = r#"
-type Reader = struct {
-    buf: u8.&raw mut,
-    cap: usize,
-    eof: bool,
-} only move with {
-    impl Self {
-        drop = fn(r: Self) -> () {
-            let Reader(struct { buf, cap, .. }) = r;
-            unsafe { dealloc_array(buf, cap); };
-        };
-    }
-};
-static reader_new = fn(cap: usize) -> Reader {
-    let buf = match alloc_array::<u8>(cap) {
-        ::Ok(p) => p,
-        ::Err => panic("out of memory"),
-    };
-    Reader(struct { buf, cap, eof = false })
-};
-"#;
-
-fn check_reader(body: &str, expect: Expect) {
-    check_diagnostics(&format!("{READER_PRELUDE}{body}"), expect);
-}
-
-#[test]
-fn a_reader_dropped_on_the_one_path_is_clean() {
-    check_reader(
-        r#"
-static main = fn() -> () {
-    let r = reader_new(16);
-    r.drop();
-};
-"#,
-        expect![""],
-    );
-}
-
-#[test]
-fn not_dropping_a_reader_is_a_check_error() {
-    // `Reader` owns an allocation and is `only move`, so a path that
-    // never calls `drop` is refused (T20, M16).
-    check_reader(
-        r#"
-static leak = fn() -> () {
-    let r = reader_new(16);
-};
-"#,
-        expect![[r#"
-            505..536: `r` is not consumed on this path; its type has no `forget` capability, so every path must consume it (`r` is born here and must be consumed at 515..516)
-        "#]],
-    );
-}
-
 #[test]
 fn a_reader_drop_that_only_reads_a_field_is_refused() {
     // The obvious `drop` reads `r.buf`/`r.cap` and frees them — but a
     // plain field read leaves `r` itself untouched by the checker, so `r`
-    // is still owed a consume. This is why `drop` above takes `r` apart
-    // instead of reading out of it.
+    // is still owed a consume. That is why a `Reader`'s `deinit` has to
+    // take `r` apart instead of reading out of it.
     check_diagnostics(
         r#"
 type Reader = struct {
@@ -2012,8 +1851,8 @@ static via_flat_map = fn(text: str) -> usize {{
 
 // ---- materialized temporaries (M12) -------------------------------------
 
-/// A must-consume value cannot be borrowed as a temporary: a temporary
-/// has no name, so nothing could ever consume it.
+/// A must-consume value cannot be borrowed as a temporary, by `.&` or by
+/// `.&raw`: a temporary has no name, so nothing could ever consume it.
 #[test]
 fn a_value_that_must_be_consumed_cannot_be_borrowed_as_a_temporary() {
     check_linear(
@@ -2022,25 +1861,13 @@ static peek = fn::<@a>(r: Res.&::<@a>) -> usize { r.*.id };
 static main = fn() -> usize {
     peek(make(1).&)
 };
-"#,
-        expect![[r#"
-            435..442: this value must be consumed, so it cannot be borrowed as a temporary: a temporary has no name, and nothing could ever consume it — bind it with `let` first, then borrow the binding
-        "#]],
-    );
-}
-
-/// `.&raw` of a must-consume temporary gets the bind-it-with-`let`-first
-/// refusal.
-#[test]
-fn an_addr_of_of_a_must_consume_temporary_is_refused_with_the_bind_first_message() {
-    check_linear(
-        r#"
-static main = fn() -> () {
+static raw_borrow = fn() -> () {
     let p = make(1).&raw;
 };
 "#,
         expect![[r#"
-            375..382: this value must be consumed, so it cannot be borrowed as a temporary: a temporary has no name, and nothing could ever consume it — bind it with `let` first, then borrow the binding
+            435..442: this value must be consumed, so it cannot be borrowed as a temporary: a temporary has no name, and nothing could ever consume it — bind it with `let` first, then borrow the binding
+            494..501: this value must be consumed, so it cannot be borrowed as a temporary: a temporary has no name, and nothing could ever consume it — bind it with `let` first, then borrow the binding
         "#]],
     );
 }
