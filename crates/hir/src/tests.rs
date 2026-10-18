@@ -5905,21 +5905,24 @@ fn const_param_forwards_as_a_const_arg() {
 #[test]
 fn generic_record_construction_with_explicit_args() {
     check_infer(
-        "type Pair = struct::<T> { a: T, b: T };\n\\\n         static main = fn () -> usize { let p = Pair::<usize>(struct { a = 1, b = 2 }); p.a + p.b };",
+        r#"
+type Pair = struct::<T> { a: T, b: T };
+static main = fn () -> usize { let p = Pair::<usize>(struct { a = 1, b = 2 }); p.a + p.b };
+"#,
         expect![[r#"
-            65..141 'fn () -> usize { ...': fn() -> usize
-            80..141 '{ let p = Pair::<...': usize
-            86..87 'p': Pair::<usize>
-            90..103 'Pair::<usize>': fn(struct { a: usize, b: usize }) -> Pair::<usize>
-            90..128 'Pair::<usize>(str...': Pair::<usize>
-            104..127 'struct { a = 1, b...': struct { a: usize, b: usize }
-            117..118 '1': usize
-            124..125 '2': usize
-            130..131 'p': Pair::<usize>
-            130..133 'p.a': usize
-            130..139 'p.a + p.b': usize
-            136..137 'p': Pair::<usize>
-            136..139 'p.b': usize
+            55..131 'fn () -> usize { ...': fn() -> usize
+            70..131 '{ let p = Pair::<...': usize
+            76..77 'p': Pair::<usize>
+            80..93 'Pair::<usize>': fn(struct { a: usize, b: usize }) -> Pair::<usize>
+            80..118 'Pair::<usize>(str...': Pair::<usize>
+            94..117 'struct { a = 1, b...': struct { a: usize, b: usize }
+            107..108 '1': usize
+            114..115 '2': usize
+            120..121 'p': Pair::<usize>
+            120..123 'p.a': usize
+            120..129 'p.a + p.b': usize
+            126..127 'p': Pair::<usize>
+            126..129 'p.b': usize
         "#]],
     );
 }
@@ -5927,18 +5930,21 @@ fn generic_record_construction_with_explicit_args() {
 #[test]
 fn generic_record_construction_infers_args_from_payload() {
     check_infer(
-        "type Pair = struct::<T> { a: T, b: T };\n\\\n         static main = fn () -> usize { let p = Pair(struct { a = 1, b = 2 }); p.b };",
+        r#"
+type Pair = struct::<T> { a: T, b: T };
+static main = fn () -> usize { let p = Pair(struct { a = 1, b = 2 }); p.b };
+"#,
         expect![[r#"
-            65..126 'fn () -> usize { ...': fn() -> usize
-            80..126 '{ let p = Pair(st...': usize
-            86..87 'p': Pair::<usize>
-            90..94 'Pair': fn(struct { a: usize, b: usize }) -> Pair::<usize>
-            90..119 'Pair(struct { a =...': Pair::<usize>
-            95..118 'struct { a = 1, b...': struct { a: usize, b: usize }
-            108..109 '1': usize
-            115..116 '2': usize
-            121..122 'p': Pair::<usize>
-            121..124 'p.b': usize
+            55..116 'fn () -> usize { ...': fn() -> usize
+            70..116 '{ let p = Pair(st...': usize
+            76..77 'p': Pair::<usize>
+            80..84 'Pair': fn(struct { a: usize, b: usize }) -> Pair::<usize>
+            80..109 'Pair(struct { a =...': Pair::<usize>
+            85..108 'struct { a = 1, b...': struct { a: usize, b: usize }
+            98..99 '1': usize
+            105..106 '2': usize
+            111..112 'p': Pair::<usize>
+            111..114 'p.b': usize
         "#]],
     );
 }
@@ -5946,11 +5952,13 @@ fn generic_record_construction_infers_args_from_payload() {
 #[test]
 fn generic_type_arity_mismatch_blames_the_use_site() {
     check_diagnostics(
-        "type Pair = struct::<T> { a: T, b: T };\n\\\n         static main = fn () { let p = Pair::<usize, str>(struct { a = 1, b = 2 }); };",
+        r#"
+type Pair = struct::<T> { a: T, b: T };
+static main = fn () { let p = Pair::<usize, str>(struct { a = 1, b = 2 }); };
+"#,
         expect![[r#"
-            40..41: unexpected character `\`
-            81..99: `Pair` takes 1 generic argument, found 2 (declared here at 5..9)
-            113..114: cannot infer the type of this number: it has no defining use — add a type annotation
+            71..89: `Pair` takes 1 generic argument, found 2 (declared here at 6..10)
+            103..104: cannot infer the type of this number: it has no defining use — add a type annotation
         "#]],
     );
 }
@@ -5958,10 +5966,12 @@ fn generic_type_arity_mismatch_blames_the_use_site() {
 #[test]
 fn generic_type_arity_mismatch_in_annotation_blames_the_use_site() {
     check_diagnostics(
-        "type Pair = struct::<T> { a: T, b: T };\n\\\n         static main = fn () { let p: Pair::<usize, str> = Pair::<usize>(struct { a = 1, b = 2 }); };",
+        r#"
+type Pair = struct::<T> { a: T, b: T };
+static main = fn () { let p: Pair::<usize, str> = Pair::<usize>(struct { a = 1, b = 2 }); };
+"#,
         expect![[r#"
-            40..41: unexpected character `\`
-            80..98: `Pair` takes 1 generic argument, found 2 (declared here at 5..9)
+            70..88: `Pair` takes 1 generic argument, found 2 (declared here at 6..10)
         "#]],
     );
 }
@@ -5969,10 +5979,12 @@ fn generic_type_arity_mismatch_in_annotation_blames_the_use_site() {
 #[test]
 fn bare_generic_type_in_annotation_requires_the_turbofish() {
     check_diagnostics(
-        "type Pair = struct::<T> { a: T, b: T };\n\\\n         static main = fn () { let p: Pair = Pair::<usize>(struct { a = 1, b = 2 }); };",
+        r#"
+type Pair = struct::<T> { a: T, b: T };
+static main = fn () { let p: Pair = Pair::<usize>(struct { a = 1, b = 2 }); };
+"#,
         expect![[r#"
-            40..41: unexpected character `\`
-            80..84: `Pair` takes 1 generic argument, found 0 (declared here at 5..9)
+            70..74: `Pair` takes 1 generic argument, found 0 (declared here at 6..10)
         "#]],
     );
 }
@@ -5980,16 +5992,19 @@ fn bare_generic_type_in_annotation_requires_the_turbofish() {
 #[test]
 fn annotation_hole_arg_is_pinned_by_the_initializer() {
     check_infer(
-        "type Pair = struct::<T> { a: T, b: T };\n\\\n         static main = fn () { let p: Pair::<_> = Pair(struct { a = 1, b = 2 }); };",
+        r#"
+type Pair = struct::<T> { a: T, b: T };
+static main = fn () { let p: Pair::<_> = Pair(struct { a = 1, b = 2 }); };
+"#,
         expect![[r#"
-            65..124 'fn () { let p: Pa...': fn()
-            71..124 '{ let p: Pair::<_...': ()
-            77..78 'p': Pair::<{number}>
-            92..96 'Pair': fn(struct { a: {number}, b: {number} }) -> Pair::<{number}>
-            92..121 'Pair(struct { a =...': Pair::<{number}>
-            97..120 'struct { a = 1, b...': struct { a: {number}, b: {number} }
-            110..111 '1': {number}
-            117..118 '2': {number}
+            55..114 'fn () { let p: Pa...': fn()
+            61..114 '{ let p: Pair::<_...': ()
+            67..68 'p': Pair::<{number}>
+            82..86 'Pair': fn(struct { a: {number}, b: {number} }) -> Pair::<{number}>
+            82..111 'Pair(struct { a =...': Pair::<{number}>
+            87..110 'struct { a = 1, b...': struct { a: {number}, b: {number} }
+            100..101 '1': {number}
+            107..108 '2': {number}
         "#]],
     );
 }
@@ -5997,10 +6012,12 @@ fn annotation_hole_arg_is_pinned_by_the_initializer() {
 #[test]
 fn different_type_args_do_not_unify() {
     check_diagnostics(
-        "type Pair = struct::<T> { a: T, b: T };\n\\\n         static main = fn () { let p: Pair::<str> = Pair::<usize>(struct { a = 1, b = 2 }); };",
+        r#"
+type Pair = struct::<T> { a: T, b: T };
+static main = fn () { let p: Pair::<str> = Pair::<usize>(struct { a = 1, b = 2 }); };
+"#,
         expect![[r#"
-            40..41: unexpected character `\`
-            94..132: type mismatch: expected `Pair::<str>`, found `Pair::<usize>` (expected `Pair::<str>` because of this annotation at 80..91)
+            84..122: type mismatch: expected `Pair::<str>`, found `Pair::<usize>` (expected `Pair::<str>` because of this annotation at 70..81)
         "#]],
     );
 }
@@ -6008,12 +6025,13 @@ fn different_type_args_do_not_unify() {
 #[test]
 fn same_args_unify_across_bodies() {
     check_diagnostics(
-        "type Pair = struct::<T> { a: T, b: T };\n\\\n         static mk = fn () -> Pair::<usize> { Pair::<usize>(struct { a = 1, b = 2 }) };\n\\\n         static use_it = fn (p: Pair::<usize>) -> usize { p.a };\n\\\n         static main = fn () -> usize { use_it(mk()) };",
-        expect![[r#"
-            40..41: unexpected character `\`
-            130..131: unexpected character `\`
-            197..198: unexpected character `\`
-        "#]],
+        r#"
+type Pair = struct::<T> { a: T, b: T };
+static mk = fn () -> Pair::<usize> { Pair::<usize>(struct { a = 1, b = 2 }) };
+static use_it = fn (p: Pair::<usize>) -> usize { p.a };
+static main = fn () -> usize { use_it(mk()) };
+"#,
+        expect![""],
     );
 }
 
@@ -6259,10 +6277,12 @@ fn non_exhaustive_match_over_a_generic_enum_is_reported() {
 #[test]
 fn const_params_on_types_distinguish_instances() {
     check_diagnostics(
-        "type Buf = struct::<const N: usize> { len: usize };\n\\\n         static main = fn () { let b: Buf::<8> = Buf::<9>(struct { len = 1 }); };",
+        r#"
+type Buf = struct::<const N: usize> { len: usize };
+static main = fn () { let b: Buf::<8> = Buf::<9>(struct { len = 1 }); };
+"#,
         expect![[r#"
-            52..53: unexpected character `\`
-            103..131: type mismatch: expected `Buf::<8>`, found `Buf::<9>` (expected `Buf::<8>` because of this annotation at 92..100)
+            93..121: type mismatch: expected `Buf::<8>`, found `Buf::<9>` (expected `Buf::<8>` because of this annotation at 82..90)
         "#]],
     );
 }
@@ -6270,18 +6290,21 @@ fn const_params_on_types_distinguish_instances() {
 #[test]
 fn const_param_type_annotation_and_construction_agree() {
     check_infer(
-        "type Buf = struct::<const N: usize> { len: usize };\n\\\n         static main = fn () -> usize { let b: Buf::<8> = Buf::<8>(struct { len = 3 }); b.len };",
+        r#"
+type Buf = struct::<const N: usize> { len: usize };
+static main = fn () -> usize { let b: Buf::<8> = Buf::<8>(struct { len = 3 }); b.len };
+"#,
         expect![[r#"
-            77..149 'fn () -> usize { ...': fn() -> usize
-            92..149 '{ let b: Buf::<8>...': usize
-            98..99 'b': Buf::<8>
-            112..120 'Buf::<8>': fn(struct { len: usize }) -> Buf::<8>
-            112..140 'Buf::<8>(struct {...': Buf::<8>
-            118..119 '8': usize
-            121..139 'struct { len = 3 }': struct { len: usize }
-            136..137 '3': usize
-            142..143 'b': Buf::<8>
-            142..147 'b.len': usize
+            67..139 'fn () -> usize { ...': fn() -> usize
+            82..139 '{ let b: Buf::<8>...': usize
+            88..89 'b': Buf::<8>
+            102..110 'Buf::<8>': fn(struct { len: usize }) -> Buf::<8>
+            102..130 'Buf::<8>(struct {...': Buf::<8>
+            108..109 '8': usize
+            111..129 'struct { len = 3 }': struct { len: usize }
+            126..127 '3': usize
+            132..133 'b': Buf::<8>
+            132..137 'b.len': usize
         "#]],
     );
 }
@@ -6289,10 +6312,12 @@ fn const_param_type_annotation_and_construction_agree() {
 #[test]
 fn const_block_in_annotation_position_is_rejected() {
     check_diagnostics(
-        "type Buf = struct::<const N: usize> { len: usize };\n\\\n         static main = fn () { let b: Buf::<const { 4 + 4 }> = Buf::<8>(struct { len = 1 }); };",
+        r#"
+type Buf = struct::<const N: usize> { len: usize };
+static main = fn () { let b: Buf::<const { 4 + 4 }> = Buf::<8>(struct { len = 1 }); };
+"#,
         expect![[r#"
-            52..53: unexpected character `\`
-            98..113: a `const { ... }` block cannot parameterize a type; pass the value through a generic function's const parameter instead
+            88..103: a `const { ... }` block cannot parameterize a type; pass the value through a generic function's const parameter instead
         "#]],
     );
 }
@@ -6300,10 +6325,12 @@ fn const_block_in_annotation_position_is_rejected() {
 #[test]
 fn const_block_in_type_construction_turbofish_is_rejected() {
     check_diagnostics(
-        "type Buf = struct::<const N: usize> { len: usize };\n\\\n         static main = fn () { let b = Buf::<const { 4 + 4 }>(struct { len = 1 }); };",
+        r#"
+type Buf = struct::<const N: usize> { len: usize };
+static main = fn () { let b = Buf::<const { 4 + 4 }>(struct { len = 1 }); };
+"#,
         expect![[r#"
-            52..53: unexpected character `\`
-            93..115: a `const { ... }` block cannot parameterize a type; pass the value through a generic function's const parameter instead
+            83..105: a `const { ... }` block cannot parameterize a type; pass the value through a generic function's const parameter instead
         "#]],
     );
 }
@@ -6350,10 +6377,12 @@ fn unpinned_generic_type_param_is_reported_at_the_mention() {
 #[test]
 fn generic_type_display_in_diagnostics() {
     check_diagnostics(
-        "type Pair = struct::<T> { a: T, b: T };\n\\\n         static main = fn () -> usize { Pair::<usize>(struct { a = 1, b = 2 }) };",
+        r#"
+type Pair = struct::<T> { a: T, b: T };
+static main = fn () -> usize { Pair::<usize>(struct { a = 1, b = 2 }) };
+"#,
         expect![[r#"
-            40..41: unexpected character `\`
-            82..120: type mismatch: expected `usize`, found `Pair::<usize>` (expected `usize` because of this return type at 71..79)
+            72..110: type mismatch: expected `usize`, found `Pair::<usize>` (expected `usize` because of this return type at 61..69)
         "#]],
     );
 }
@@ -6372,14 +6401,16 @@ fn generic_type_name_is_not_a_value() {
 #[test]
 fn kind_mismatches_on_a_generic_type_mention() {
     check_diagnostics(
-        "type Buf = struct::<T, const N: usize> { x: T };\n\\\n         static main = fn () { let b: Buf::<8, usize> = Buf::<8, usize>(struct { x = 1 }); };",
+        r#"
+type Buf = struct::<T, const N: usize> { x: T };
+static main = fn () { let b: Buf::<8, usize> = Buf::<8, usize>(struct { x = 1 }); };
+"#,
         expect![[r#"
-            49..50: unexpected character `\`
-            95..96: `T` is a type parameter; write a type
-            98..103: `N` is a const parameter; write a value (a literal, or `const <expr>`)
-            107..122: `T` is a type parameter; write a type
-            107..122: `N` is a const parameter; write a value (a literal, or `const <expr>`)
-            113..114: cannot infer the type of this number: it has no defining use — add a type annotation
+            85..86: `T` is a type parameter; write a type
+            88..93: `N` is a const parameter; write a value (a literal, or `const <expr>`)
+            97..112: `T` is a type parameter; write a type
+            97..112: `N` is a const parameter; write a value (a literal, or `const <expr>`)
+            103..104: cannot infer the type of this number: it has no defining use — add a type annotation
         "#]],
     );
 }
