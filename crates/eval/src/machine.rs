@@ -356,6 +356,9 @@ pub struct Machine<'db, M> {
     const_block_evaluations: u64,
     /// > 0 while inside a static initializer: the const context marker.
     const_depth: usize,
+    /// The fuel each const context starts with: [`CONST_FUEL`] unless
+    /// set with [`Self::with_const_fuel`].
+    const_fuel_budget: u64,
     const_fuel: u64,
     next_frame_serial: u64,
     /// The typed abstract memory: every address-taken local and every
@@ -424,6 +427,7 @@ impl<'db, M: Mode> Machine<'db, M> {
             forced_blocks: FxHashMap::default(),
             const_block_evaluations: 0,
             const_depth: 0,
+            const_fuel_budget: CONST_FUEL,
             const_fuel: CONST_FUEL,
             next_frame_serial: 0,
             memory: FxHashMap::default(),
@@ -434,6 +438,13 @@ impl<'db, M: Mode> Machine<'db, M> {
             dangling_alloc: None,
             next_alloc: 0,
         }
+    }
+
+    /// Replaces the per-const-context fuel budget — tests lower it so an
+    /// out-of-fuel program runs out quickly.
+    pub fn with_const_fuel(mut self, budget: u64) -> Self {
+        self.const_fuel_budget = budget;
+        self
     }
 
     /// The (memoized) const value of a top-level item. Always a const
@@ -465,7 +476,7 @@ impl<'db, M: Mode> Machine<'db, M> {
         // budget: `const_value(B)` must give the same answer whether B is
         // queried directly or forced from inside another item's evaluation.
         let saved_frames = std::mem::take(&mut self.frames);
-        let saved_fuel = std::mem::replace(&mut self.const_fuel, CONST_FUEL);
+        let saved_fuel = std::mem::replace(&mut self.const_fuel, self.const_fuel_budget);
         let result = self
             .eval_root(&loc)
             .and_then(|value| self.check_const_escape(value, root_origin(self.db, &loc)));
@@ -545,7 +556,7 @@ impl<'db, M: Mode> Machine<'db, M> {
         // own fuel budget — the block's value must not depend on who forced
         // it first.
         let saved_frames = std::mem::take(&mut self.frames);
-        let saved_fuel = std::mem::replace(&mut self.const_fuel, CONST_FUEL);
+        let saved_fuel = std::mem::replace(&mut self.const_fuel, self.const_fuel_budget);
         let result = self
             .push_frame(loc.clone(), body, Vec::new(), const_env, None)
             .and_then(|()| self.run_to_done())

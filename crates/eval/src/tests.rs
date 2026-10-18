@@ -4,9 +4,22 @@ use expect_test::{Expect, expect};
 use crate::machine::{Machine, RunMode, StepEvent};
 use crate::{EvalErrorKind, Value};
 
+/// A const fuel budget for out-of-fuel tests: the default budget takes
+/// seconds to burn in a debug build.
+const LOW_FUEL: u64 = 10_000;
+
 /// Renders `const_value` for every *value* item in the fixture (`type`
 /// items declare no value — nothing to render).
 fn check_const(text: &str, expect: Expect) {
+    check_const_impl(text, None, expect);
+}
+
+/// [`check_const`] on machines whose const fuel is `fuel`.
+fn check_const_with_fuel(text: &str, fuel: u64, expect: Expect) {
+    check_const_impl(text, Some(fuel), expect);
+}
+
+fn check_const_impl(text: &str, fuel: Option<u64>, expect: Expect) {
     let db = RootDatabase::default();
     let file = SourceFile::new(&db, "test.must".to_owned(), text.to_owned());
     let mut rendered = String::new();
@@ -18,7 +31,13 @@ fn check_const(text: &str, expect: Expect) {
             continue;
         }
         let name = item.name(&db);
-        rendered.push_str(&match crate::const_value(&db, item) {
+        let result = match fuel {
+            None => crate::const_value(&db, item).clone(),
+            Some(fuel) => {
+                crate::const_value_on(&db, Machine::for_const(&db).with_const_fuel(fuel), item)
+            }
+        };
+        rendered.push_str(&match result {
             Ok(value) => format!("{name} = {}\n", value.display()),
             Err(err) => format!("{name} = error[{:?}]: {}\n", err.kind, err.message),
         });
@@ -196,12 +215,29 @@ fn check_run_impl(
 /// `const { … }` block's check-time result, in lowering order (inner blocks
 /// before the blocks enclosing them), indexed per item.
 fn check_const_blocks(text: &str, expect: Expect) {
+    check_const_blocks_impl(text, None, expect);
+}
+
+/// [`check_const_blocks`] on machines whose const fuel is `fuel`.
+fn check_const_blocks_with_fuel(text: &str, fuel: u64, expect: Expect) {
+    check_const_blocks_impl(text, Some(fuel), expect);
+}
+
+fn check_const_blocks_impl(text: &str, fuel: Option<u64>, expect: Expect) {
     let db = RootDatabase::default();
     let file = SourceFile::new(&db, "test.must".to_owned(), text.to_owned());
     let mut rendered = String::new();
     for &item in hir::file_item_ids(&db, file) {
         let name = item.name(&db);
-        for (i, (_, result)) in crate::const_block_values(&db, item).iter().enumerate() {
+        let results = match fuel {
+            None => crate::const_block_values(&db, item).clone(),
+            Some(fuel) => crate::const_block_values_on(
+                &db,
+                Machine::for_const(&db).with_const_fuel(fuel),
+                item,
+            ),
+        };
+        for (i, (_, result)) in results.iter().enumerate() {
             rendered.push_str(&match result {
                 Ok(value) => format!("{name}#{i} = {}\n", value.display()),
                 Err(err) => format!("{name}#{i} = error[{:?}]: {}\n", err.kind, err.message),
@@ -2571,10 +2607,11 @@ static first_over = fn (limit: usize) -> usize {
 
 #[test]
 fn infinite_loop_in_an_initializer_runs_out_of_fuel() {
-    // Loops are const-legal; the machine's existing fuel budget is what
-    // bounds a runaway compile-time loop.
-    check_const(
+    // Loops are const-legal; the machine's fuel budget is what bounds a
+    // runaway compile-time loop. A low budget keeps the test fast.
+    check_const_with_fuel(
         "static spin = loop { };",
+        LOW_FUEL,
         expect![[r#"
             spin = error[NotConst]: constant evaluation ran out of fuel
         "#]],
@@ -2583,8 +2620,9 @@ fn infinite_loop_in_an_initializer_runs_out_of_fuel() {
 
 #[test]
 fn infinite_loop_in_a_const_block_runs_out_of_fuel() {
-    check_const_blocks(
+    check_const_blocks_with_fuel(
         "static f = fn { const { loop { } } };",
+        LOW_FUEL,
         expect![[r#"
             f#0 = error[NotConst]: constant evaluation ran out of fuel
         "#]],
