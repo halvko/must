@@ -1447,11 +1447,14 @@ pub fn file_diagnostics(db: &dyn Db, file: SourceFile) -> Vec<Diagnostic> {
             let Some(ptr) = source_map.node_for_expr(diag.expr()) else {
                 continue;
             };
+            let OutlivesDiagnostic::UndeclaredOutlives {
+                longer, shorter, ..
+            } = diag;
             diagnostics.push(Diagnostic {
                 range: ptr.text_range(),
                 severity: Severity::Error,
                 message: diag.message(),
-                fix: None,
+                fix: outlives_bound_fix(&ptr.to_node(&syntax_root), longer, shorter),
                 related: Vec::new(),
             });
         }
@@ -1469,7 +1472,7 @@ pub fn file_diagnostics(db: &dyn Db, file: SourceFile) -> Vec<Diagnostic> {
                 range: ptr.text_range(),
                 severity: Severity::Error,
                 message: diag.message(),
-                fix: None,
+                fix: unsafe_block_fix(ptr.to_node(&syntax_root)),
                 related: Vec::new(),
             });
         }
@@ -1552,11 +1555,15 @@ pub fn file_diagnostics(db: &dyn Db, file: SourceFile) -> Vec<Diagnostic> {
             let Some(range) = range else {
                 continue;
             };
+            let fix = diag.forget_param(db, item).and_then(|param| {
+                let node = syntax_root.covering_element(range);
+                forget_bound_fix(&node.ancestors().next()?, &param)
+            });
             diagnostics.push(Diagnostic {
                 range,
                 severity: Severity::Error,
                 message: diag.render(db, item),
-                fix: None,
+                fix,
                 related: Vec::new(),
             });
         }
@@ -2233,6 +2240,121 @@ fn insert_before_dot(dot: &syntax::SyntaxToken, text: &str, name: &str) -> synta
             insert: text.to_owned(),
         }],
     }
+}
+
+/// The `param: forget` bound a leak's message offers, written into the
+/// binder of the `fn` that encloses `node` and declares `param` (after any
+/// bounds it already has). A parameter of the owning `type` has no such
+/// binder to write into, since a `type` declaration's parameters take no
+/// capability bounds, and gets no fix.
+pub fn forget_bound_fix(node: &syntax::SyntaxNode, param: &str) -> Option<syntax::Fix> {
+    let declared = node
+        .ancestors()
+        .filter_map(ast::FnLiteral::cast)
+        .filter_map(|fn_lit| fn_lit.generic_param_list())
+        .flat_map(|list| list.params())
+        .find_map(|generic| match generic {
+            ast::GenericParam::TypeParam(type_param)
+                if type_param.name().is_some_and(|name| name.text() == param) =>
+            {
+                Some(type_param)
+            }
+            _ => None,
+        })?;
+    let edit = match declared.bounds().last() {
+        Some(bound) => syntax::TextEdit {
+            range: TextRange::empty(bound.syntax().text_range().end()),
+            insert: " + forget".to_owned(),
+        },
+        None => syntax::TextEdit {
+            range: TextRange::empty(declared.name()?.syntax().text_range().end()),
+            insert: ": forget".to_owned(),
+        },
+    };
+    Some(syntax::Fix {
+        label: format!("Require `{param}: forget`"),
+        edits: vec![edit],
+    })
+}
+
+/// The `longer: shorter` clause an outlives error asks for, written into
+/// the binder of the `fn` that encloses `node` and declares `longer`
+/// (after any bounds it already has). Not offered when `shorter` is an
+/// overlap (`@a + @b`): any one member would do, so the choice is the
+/// user's. A region the owning `type` declares has no `fn` binder to
+/// write into and gets no fix.
+fn outlives_bound_fix(
+    node: &syntax::SyntaxNode,
+    longer: &str,
+    shorter: &str,
+) -> Option<syntax::Fix> {
+    if shorter.contains(" + ") {
+        return None;
+    }
+    let declared = node
+        .ancestors()
+        .filter_map(ast::FnLiteral::cast)
+        .filter_map(|fn_lit| fn_lit.generic_param_list())
+        .flat_map(|list| list.params())
+        .find_map(|generic| match generic {
+            ast::GenericParam::RegionParam(region) if region.name().as_deref() == Some(longer) => {
+                Some(region)
+            }
+            _ => None,
+        })?;
+    let edit = match declared.bounds().last() {
+        Some(bound) => syntax::TextEdit {
+            range: TextRange::empty(bound.text_range().end()),
+            insert: format!(" + {shorter}"),
+        },
+        None => syntax::TextEdit {
+            range: TextRange::empty(declared.region_token()?.text_range().end()),
+            insert: format!(": {shorter}"),
+        },
+    };
+    Some(syntax::Fix {
+        label: format!("Declare `{longer}: {shorter}`"),
+        edits: vec![edit],
+    })
+}
+
+/// The `unsafe { ... }` block the message asks for, around the operation
+/// at `node`. The block is a value, so wrapping a place in it would copy
+/// out of the place: the wrap climbs through the enclosing expressions
+/// (stopping at a block, whose tail it then wraps) to the statement they
+/// make, and wraps that whole statement when it is one (`p.*.x = 1;`,
+/// `g(p.*);`), else the outermost expression (a `let` initializer, a
+/// block's tail, a match arm's body).
+fn unsafe_block_fix(node: syntax::SyntaxNode) -> Option<syntax::Fix> {
+    let mut expr = ast::Expr::cast(node)?;
+    while let Some(parent) = expr.syntax().parent().and_then(ast::Expr::cast)
+        && !matches!(
+            parent,
+            ast::Expr::BlockExpr(_) | ast::Expr::UnsafeBlockExpr(_) | ast::Expr::ConstBlockExpr(_)
+        )
+    {
+        expr = parent;
+    }
+    let parent = expr.syntax().parent()?;
+    let wrapped =
+        if ast::ExprStmt::can_cast(parent.kind()) || ast::AssignStmt::can_cast(parent.kind()) {
+            parent
+        } else {
+            expr.syntax().clone()
+        };
+    Some(syntax::Fix {
+        label: "Wrap in `unsafe { }`".to_owned(),
+        edits: vec![
+            syntax::TextEdit {
+                range: TextRange::empty(wrapped.text_range().start()),
+                insert: "unsafe { ".to_owned(),
+            },
+            syntax::TextEdit {
+                range: TextRange::empty(wrapped.text_range().end()),
+                insert: " }".to_owned(),
+            },
+        ],
+    })
 }
 
 /// Moves a path's second-segment turbofish onto its first segment, where

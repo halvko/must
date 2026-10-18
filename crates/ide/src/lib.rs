@@ -249,11 +249,16 @@ impl Analysis {
                         message,
                     })
                     .collect();
+                let fix = diag.forget_param(&self.db, item).and_then(|param| {
+                    let root = base_db::parse(&self.db, file).syntax_node();
+                    let node = root.covering_element(range).ancestors().next()?;
+                    hir::forget_bound_fix(&node, &param).map(|fix| in_file(file, fix))
+                });
                 diagnostics.push(Diagnostic {
                     range,
                     severity: Severity::Error,
                     message: diag.message(&self.db, item),
-                    fix: None,
+                    fix,
                     related,
                 });
             }
