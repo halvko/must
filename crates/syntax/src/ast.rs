@@ -1256,7 +1256,11 @@ impl PathExpr {
     /// reservation), which is exactly why it must not be confused with
     /// [`Self::generic_arg_list`].
     pub fn member_generic_arg_list(&self) -> Option<GenericArgList> {
-        child::<MemberGenericArgs>(&self.syntax)?.generic_arg_list()
+        self.member_generic_args()?.generic_arg_list()
+    }
+    /// The second segment's `::<...>` as a whole, `::` included.
+    pub fn member_generic_args(&self) -> Option<MemberGenericArgs> {
+        child(&self.syntax)
     }
 }
 
@@ -1415,6 +1419,9 @@ impl RecordPat {
     /// `..` only means the pattern doesn't bind them).
     pub fn rest_pat(&self) -> Option<RestPat> {
         child(&self.syntax)
+    }
+    pub fn l_brace_token(&self) -> Option<SyntaxToken> {
+        token(&self.syntax, L_BRACE)
     }
 }
 

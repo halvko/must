@@ -2759,6 +2759,19 @@ static q = Foo();
 }
 
 #[test]
+fn a_record_where_a_named_type_is_wanted_offers_to_construct_it() {
+    let fixed = apply_fix(
+        "type Foo = struct { x: usize };\nstatic a: Foo = struct { x = 1 };\n",
+        "Construct a `Foo`",
+    );
+    assert!(
+        fixed.contains("static a: Foo = Foo(struct { x = 1 });"),
+        "fixed: {fixed}"
+    );
+    check_diagnostics(&fixed, expect![[r#""#]]);
+}
+
+#[test]
 fn named_type_is_distinct_from_its_underlying_record() {
     // No implicit nominal↔structural coercion in either direction. The
     // named-expected direction carries the construct-it hint.
@@ -3801,6 +3814,24 @@ static f = fn (s: Shape) -> usize {
 }
 
 #[test]
+fn a_bind_named_like_a_variant_offers_the_variant_pattern() {
+    let fixed = apply_fix(
+        r#"
+type Shape = enum { Circle(usize), Point };
+static f = fn (s: Shape) -> usize {
+    match s {
+        ::Circle(r) => r,
+        Point => 0,
+    }
+};
+"#,
+        "Match the variant `::Point`",
+    );
+    assert!(fixed.contains("        ::Point => 0,\n"), "fixed: {fixed}");
+    check_diagnostics(&fixed, expect![[r#""#]]);
+}
+
+#[test]
 fn match_bind_arm_named_like_variant_is_still_a_catch_all() {
     // A bind named like a variant is a *full* catch-all (never narrowed),
     // so a trailing `_` arm after it is unreachable — proof the reinterpretation
@@ -3839,7 +3870,7 @@ static f = fn (s: Shape) -> usize {
 };
 "#,
         expect![[r#"
-            103..109: `Circle` binds the whole value; write `::Circle` (or `Shape::Circle`) to match the variant (`Shape` is defined here at 6..11)
+            103..109: `Circle` binds the whole value; write `::Circle(_)` (or `Shape::Circle(_)`) to match the variant (`Shape` is defined here at 6..11)
         "#]],
     );
 }
@@ -4564,6 +4595,42 @@ fn let_record_destructure_missing_field_without_rest_errors() {
             48..49: cannot infer the type of this number: it has no defining use — add a type annotation
             55..56: cannot infer the type of this number: it has no defining use — add a type annotation
         "#]],
+    );
+}
+
+#[test]
+fn a_record_pattern_missing_fields_offers_the_rest_marker() {
+    let fixed = apply_fix(
+        "static f = fn (p: struct { x: usize, y: usize }) -> usize { let struct { x } = p; x };",
+        "Add `..`",
+    );
+    assert!(
+        fixed.contains("let struct { x, .. } = p;"),
+        "fixed: {fixed}"
+    );
+    check_diagnostics(&fixed, expect![[r#""#]]);
+    // A trailing comma is kept, and an empty pattern gets the marker alone.
+    let fixed = apply_fix(
+        "static f = fn (p: struct { x: usize, y: usize }) -> usize { let struct { x, } = p; x };",
+        "Add `..`",
+    );
+    check_diagnostics(&fixed, expect![[r#""#]]);
+    let fixed = apply_fix(
+        "static f = fn (p: struct { x: usize }) -> () { let struct {} = p; };",
+        "Add `..`",
+    );
+    assert!(fixed.contains("let struct { .. } = p;"), "fixed: {fixed}");
+    check_diagnostics(&fixed, expect![[r#""#]]);
+}
+
+#[test]
+fn a_record_pattern_missing_a_field_that_must_be_consumed_has_no_rest_fix() {
+    // `..` would lose the `T`, which is its own error.
+    assert_eq!(
+        fix_of(
+            "static f = fn::<T>(p: struct { x: usize, t: T }) -> usize { let struct { x } = p; x };"
+        ),
+        None
     );
 }
 
@@ -13407,6 +13474,22 @@ static d = fn() -> () { let m = Shape::Nope; };
 }
 
 #[test]
+fn a_trait_member_spelled_through_its_implementer_offers_the_trait() {
+    let fixed = apply_fix(
+        r#"
+trait D = requires { m: fn(Self) -> usize; };
+type P = struct { v: usize } with {
+    impl D { m = fn(x: Self) -> usize { x.v }; }
+};
+static main = fn(p: P) -> usize { P::m(p) };
+"#,
+        "Write `D::m`",
+    );
+    assert!(fixed.contains("-> usize { D::m(p) };"), "fixed: {fixed}");
+    check_diagnostics(&fixed, expect![[r#""#]]);
+}
+
+#[test]
 fn qualified_member_path_reaches_inherent_members_only() {
     // Each spelling names exactly one thing: `Type::m` is the type's OWN
     // member, and a trait member is spelled through its trait.
@@ -13873,6 +13956,39 @@ static main = fn() -> usize {
             88..110: a variant has no generic arguments of its own: they belong to the owner — write `Shape::<...>::Circle`
         "#]],
     );
+}
+
+#[test]
+fn generic_arguments_on_a_binderless_segment_move_to_the_owner() {
+    let fixed = apply_fix(
+        r#"
+type Pair = struct::<T> { a: T, b: usize } with {
+    impl Self { first = fn(p: Self) -> T { let Pair(struct { a, b }) = p; a }; }
+};
+static main = fn() -> usize {
+    let p = Pair::<usize>(struct { a = 1, b = 2 });
+    Pair::first::<usize>(p)
+};
+"#,
+        "Move the arguments to `Pair`",
+    );
+    assert!(
+        fixed.contains("    Pair::<usize>::first(p)\n"),
+        "fixed: {fixed}"
+    );
+    check_diagnostics(&fixed, expect![[r#""#]]);
+    let fixed = apply_fix(
+        r#"
+type Shape = enum::<T> { Circle(T), Point };
+static main = fn() -> Shape::<usize> { Shape::Circle::<usize>(1) };
+"#,
+        "Move the arguments to `Shape`",
+    );
+    assert!(
+        fixed.contains("{ Shape::<usize>::Circle(1) }"),
+        "fixed: {fixed}"
+    );
+    check_diagnostics(&fixed, expect![[r#""#]]);
 }
 
 #[test]
@@ -19481,4 +19597,136 @@ static f = fn::<@a, @b>(o: Out, r: Out.&mut::<@a>.&mut::<@b>) -> usize {
             287..298 'mk().a.b[1]': value 'mk()' ["mk().a.b[1]", "mk().a.b", "mk().a"]
         "#]],
     );
+}
+
+#[test]
+fn owner_arguments_written_through_self_move_to_the_owners_name() {
+    // `Self` takes no arguments, so the fix spells the owner as the message
+    // does.
+    let fixed = apply_fix(
+        r#"
+type Pair = struct::<T> { a: T, b: usize } with {
+    impl Self {
+        first = fn(p: Self) -> T { let Pair(struct { a, b }) = p; a };
+        second = fn(p: Self) -> T { Self::first::<T>(p) };
+    }
+};
+"#,
+        "Move the arguments to `Pair`",
+    );
+    assert!(fixed.contains("{ Pair::<T>::first(p) }"), "fixed: {fixed}");
+    check_diagnostics(&fixed, expect![[r#""#]]);
+}
+
+#[test]
+fn a_bind_named_like_a_payload_variant_offers_the_variant_with_its_payload() {
+    let source = r#"
+type Shape = enum { Circle(usize), Point };
+static f = fn (s: Shape) -> usize {
+    match s {
+        Circle => 1,
+        ::Point => 0,
+    }
+};
+"#;
+    check_diagnostics(
+        source,
+        expect![[r#"
+            103..109: `Circle` binds the whole value; write `::Circle(_)` (or `Shape::Circle(_)`) to match the variant (`Shape` is defined here at 6..11)
+            124..131: unreachable arm: `Point` is already covered by a previous arm
+        "#]],
+    );
+    let db = RootDatabase::default();
+    let file = SourceFile::new(&db, "test.must".to_owned(), source.to_owned());
+    let fix = (crate::file_diagnostics(&db, file).into_iter())
+        .find_map(|d| d.fix)
+        .expect("a fix");
+    assert_eq!(fix.label, "Match the variant `::Circle(_)`");
+    let mut fixed = source.to_owned();
+    let mut edits = fix.edits;
+    edits.sort_by_key(|edit| std::cmp::Reverse(edit.range.start()));
+    for edit in edits {
+        fixed.replace_range(std::ops::Range::<usize>::from(edit.range), &edit.insert);
+    }
+    assert!(
+        fixed.contains("        ::Circle(_) => 1,\n"),
+        "fixed: {fixed}"
+    );
+    check_diagnostics(&fixed, expect![[r#""#]]);
+}
+
+/// The fixes on `path`'s diagnostics in the library `fixture`, by label,
+/// with the text each one inserts.
+fn library_fixes(fixture: &str, path: &str) -> Vec<(String, Vec<String>)> {
+    let mut db = RootDatabase::default();
+    let files = base_db::new_library(&mut db, "", base_db::fixture_files(fixture));
+    let file = (files.into_iter())
+        .find(|file| file.path(&db) == path)
+        .expect("file in fixture");
+    (crate::file_diagnostics(&db, file).into_iter())
+        .filter_map(|d| d.fix)
+        .map(|fix| {
+            let inserts = fix.edits.into_iter().map(|edit| edit.insert).collect();
+            (fix.label, inserts)
+        })
+        .collect()
+}
+
+#[test]
+fn a_fix_writes_a_type_or_trait_by_the_name_the_file_knows_it_by() {
+    // Imported under another name: the fix writes that name.
+    let fixes = library_fixes(
+        r#"
+//- a.must
+use shapes::Foo as Bar;
+use shapes::D as Show;
+use shapes::P;
+static a: Bar = struct { x = 1 };
+static m = fn(p: P) -> usize { P::m(p) };
+//- shapes.must
+pub type Foo = struct { x: usize };
+pub trait D = requires { m: fn(Self) -> usize; };
+pub type P = struct { v: usize } with {
+    impl D { m = fn(x: Self) -> usize { x.v }; }
+};
+"#,
+        "a.must",
+    );
+    expect![[r#"
+        [
+            (
+                "Construct a `Bar`",
+                [
+                    "Bar(",
+                    ")",
+                ],
+            ),
+            (
+                "Write `Show::m`",
+                [
+                    "Show",
+                ],
+            ),
+        ]
+    "#]]
+    .assert_debug_eq(&fixes);
+    // Not imported at all: no name to write, so no fix.
+    let fixes = library_fixes(
+        r#"
+//- a.must
+use shapes::make;
+use shapes::P;
+static a = make(struct { x = 1 });
+static m = fn(p: P) -> usize { P::m(p) };
+//- shapes.must
+pub type Foo = struct { x: usize };
+pub static make = fn(f: Foo) -> Foo { f };
+pub trait D = requires { m: fn(Self) -> usize; };
+pub type P = struct { v: usize } with {
+    impl D { m = fn(x: Self) -> usize { x.v }; }
+};
+"#,
+        "a.must",
+    );
+    assert_eq!(fixes, Vec::new());
 }

@@ -584,6 +584,9 @@ pub enum InferenceDiagnostic {
         /// The enum whose variant the name shadows.
         item: ItemLoc,
         name: String,
+        /// How many payload values the variant carries, each matched with
+        /// a `_` in the spelling the message suggests.
+        payload: usize,
     },
     /// A variant pattern naming the wrong number of payload bindings.
     PatArity {
@@ -1143,7 +1146,7 @@ pub enum InferenceDiagnostic {
         type_name: String,
         member: String,
         /// The traits providing it for this type, in library order.
-        traits: Vec<String>,
+        traits: Vec<ItemLoc>,
     },
     /// `Trait::<Self = T>::Item` — an associated-type path. Associated
     /// types are reserved; the trait declares the name, so this
@@ -1286,6 +1289,16 @@ pub enum InferenceDiagnostic {
         /// for a binder-less MEMBER.
         suggest_owner_list: bool,
     },
+}
+
+/// The payload a variant pattern writes to match any value of a variant
+/// with `n` payload values: nothing for none, else `(_, ...)`.
+pub(crate) fn variant_payload_holes(n: usize) -> String {
+    if n == 0 {
+        String::new()
+    } else {
+        format!("({})", vec!["_"; n].join(", "))
+    }
 }
 
 /// How a use site can WRITE the turbofish that pins a binder. An item's
@@ -1982,10 +1995,18 @@ impl InferenceDiagnostic {
             InferenceDiagnostic::PatIntLiteralTooLarge { .. } => {
                 crate::diag::INT_LITERAL_TOO_LARGE.to_owned()
             }
-            InferenceDiagnostic::BindShadowsVariant { item, name, .. } => format!(
-                "`{name}` binds the whole value; write `::{name}` (or `{}::{name}`) to match the variant",
-                item.display_name()
-            ),
+            InferenceDiagnostic::BindShadowsVariant {
+                item,
+                name,
+                payload,
+                ..
+            } => {
+                let payload = variant_payload_holes(*payload);
+                format!(
+                    "`{name}` binds the whole value; write `::{name}{payload}` (or `{}::{name}{payload}`) to match the variant",
+                    item.display_name()
+                )
+            }
             InferenceDiagnostic::PatWrongEnum {
                 item,
                 variant,
@@ -2246,6 +2267,7 @@ impl InferenceDiagnostic {
                 traits,
                 ..
             } => {
+                let traits: Vec<&str> = traits.iter().map(ItemLoc::display_name).collect();
                 let providers = match traits.split_last() {
                     Some((last, [])) => format!("`{last}` provides it"),
                     Some((last, rest)) => format!(
@@ -7948,10 +7970,10 @@ impl<'db> InferCtx<'db> {
             return false;
         }
         let self_key = crate::traits::SelfKey::Decl(loc.clone());
-        let traits: Vec<String> =
+        let traits: Vec<ItemLoc> =
             crate::traits::traits_providing_member(self.db, self.file, &self_key, member)
                 .into_iter()
-                .map(|(trait_, _)| trait_.display_name().to_owned())
+                .map(|(trait_, _)| trait_)
                 .collect();
         if traits.is_empty() {
             return false;
@@ -9249,7 +9271,7 @@ impl<'db> InferCtx<'db> {
                 if let Some(loc) = &enum_loc
                     && let Some(name) = name
                     && let Some(variants) = enum_variants(self.db, loc.to_id(self.db)).as_ref()
-                    && variants.iter().any(|(n, _)| *n == name)
+                    && let Some((_, payload)) = variants.iter().find(|(n, _)| *n == name)
                 {
                     self.result
                         .diagnostics
@@ -9258,6 +9280,7 @@ impl<'db> InferCtx<'db> {
                             pat,
                             item: loc.clone(),
                             name: name.to_owned(),
+                            payload: payload.len(),
                         });
                 }
                 let ty = match scrut {
