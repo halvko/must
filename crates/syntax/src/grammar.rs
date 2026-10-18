@@ -2300,33 +2300,24 @@ fn fn_type_param_list(p: &mut Parser<'_>) {
 
 /// One parameter of a fn TYPE: a bare `Type`. A leading `mut` or `name:`, or
 /// a pattern that parsed as a type and then met its colon (`struct { x }:
-/// T`), is refused once and consumed, so one written mistake costs the
-/// reader one message, not the rest of the list.
+/// T`), is consumed into the `PARAM`, so one written mistake costs the
+/// reader one message (validation's, which carries the fix), not the rest
+/// of the list.
 fn fn_type_param(p: &mut Parser<'_>) {
     let m = p.start();
     let at_name = |p: &Parser<'_>| matches!(p.current(), IDENT | HOLE) && p.nth(1) == COLON;
-    let refused = p.at(MUT_KW) || at_name(p);
-    if refused {
-        p.error(FN_TYPE_PARAM_IS_BARE);
-        p.eat(MUT_KW);
-        if at_name(p) {
-            p.bump_any();
-            p.bump(COLON);
-        }
+    p.eat(MUT_KW);
+    if at_name(p) {
+        p.bump_any();
+        p.bump(COLON);
     }
     type_(p);
     if p.at(COLON) {
-        if !refused {
-            p.error(FN_TYPE_PARAM_IS_BARE);
-        }
         p.bump(COLON);
         type_(p);
     }
     m.complete(p, PARAM);
 }
-
-const FN_TYPE_PARAM_IS_BARE: &str =
-    "a function type's parameters are bare types, not patterns: write `fn(usize, str)`";
 
 /// The core (non-postfix) type. Returns `None` only when nothing was parsed
 /// (the `_ => error` arm), so the postfix loop in [`type_`] has no operand.

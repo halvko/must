@@ -15060,6 +15060,64 @@ fn region_params_come_first_in_a_binder() {
     );
 }
 
+/// `text` has one error, whose fix is labelled `label` and turns it into
+/// `fixed`, which has none.
+fn check_fix(text: &str, label: &str, fixed: &str) {
+    let parse = crate::parse(text);
+    let [err] = parse.errors() else {
+        panic!("expected one error for {text:?}: {:?}", parse.errors());
+    };
+    let fix = err.fix.as_ref().expect("expected a fix");
+    assert_eq!(fix.label, label);
+    assert_eq!(apply_fix(text, fix), fixed);
+    assert!(crate::parse(fixed).errors().is_empty(), "{fixed:?}");
+}
+
+#[test]
+fn a_region_parameter_after_a_type_parameter_is_moved_to_the_front() {
+    check_fix(
+        "static f = fn::<T, @a>(x: T.&::<@a>) -> () {};",
+        "Move `@a` before `T`",
+        "static f = fn::<@a, T>(x: T.&::<@a>) -> () {};",
+    );
+    // Bounds and all, and in front of the FIRST spellable parameter.
+    check_fix(
+        "static f = fn::<@a, T, const N: usize, @b: @a>(x: T.&::<@b>) -> () {};",
+        "Move `@b` before `T`",
+        "static f = fn::<@a, @b: @a, T, const N: usize>(x: T.&::<@b>) -> () {};",
+    );
+    // From the middle of the list.
+    check_fix(
+        "static f = fn::<T, @a, U>(x: T.&::<@a>, y: U) -> () {};",
+        "Move `@a` before `T`",
+        "static f = fn::<@a, T, U>(x: T.&::<@a>, y: U) -> () {};",
+    );
+}
+
+#[test]
+fn a_fn_types_parameter_pattern_is_cut_back_to_its_type() {
+    check_fix(
+        "static f: fn(x: usize, str) -> usize = g;",
+        "Keep only the type",
+        "static f: fn(usize, str) -> usize = g;",
+    );
+    check_fix(
+        "static f: fn(mut x: usize) -> usize = g;",
+        "Keep only the type",
+        "static f: fn(usize) -> usize = g;",
+    );
+    check_fix(
+        "static f: fn(mut usize) -> usize = g;",
+        "Keep only the type",
+        "static f: fn(usize) -> usize = g;",
+    );
+    check_fix(
+        "static f: fn(struct { x: usize }: P) -> usize = g;",
+        "Keep only the type",
+        "static f: fn(P) -> usize = g;",
+    );
+}
+
 #[test]
 fn a_borrow_expressions_turbofish_parses_and_is_refused() {
     // The borrow OPERATOR's turbofish still parses on the expression side —
@@ -15410,7 +15468,7 @@ fn a_fn_type_parameter_name_is_refused() {
                     WHITESPACE@59..60 " "
                     R_BRACE@60..61 "}"
                 SEMICOLON@61..62 ";"
-            error 13..14: a function type's parameters are bare types, not patterns: write `fn(usize, str)`
+            error 13..15: a function type's parameters are bare types, not patterns: write `fn(usize, str)`
         "#]],
     );
 }
@@ -15690,11 +15748,11 @@ static c: fn(x:) -> usize = g;
 trait D = requires { m: fn(mut n: usize) -> usize; };
 "#,
         expect![[r#"
-            14..17: a function type's parameters are bare types, not patterns: write `fn(usize, str)`
-            74..75: a function type's parameters are bare types, not patterns: write `fn(usize, str)`
-            110..111: a function type's parameters are bare types, not patterns: write `fn(usize, str)`
+            14..20: a function type's parameters are bare types, not patterns: write `fn(usize, str)`
+            55..75: a function type's parameters are bare types, not patterns: write `fn(usize, str)`
+            110..112: a function type's parameters are bare types, not patterns: write `fn(usize, str)`
             112..113: expected a type
-            155..158: a function type's parameters are bare types, not patterns: write `fn(usize, str)`
+            155..161: a function type's parameters are bare types, not patterns: write `fn(usize, str)`
         "#]],
     );
 }

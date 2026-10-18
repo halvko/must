@@ -501,6 +501,7 @@ fn errors_checks_dirty_with_the_documented_count() {
                 |
             387 | static misordered_binder = fn::<T, @a>(r: T.&::<@a>) -> T.&::<@a> { r };
                 |                                    ^^
+               = help: Move `@a` before `T`
 
             error: regions are inferred at a borrow, never written: drop this argument — a region belongs in a type position, so assert it with an annotation (`let r: _.&::<@a> = x.&;`)
               --> examples/errors.must:396:80

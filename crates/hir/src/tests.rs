@@ -12903,7 +12903,7 @@ trait D = requires {
 };
 "#,
         expect![[r#"
-            32..33: a function type's parameters are bare types, not patterns: write `fn(usize, str)`
+            32..34: a function type's parameters are bare types, not patterns: write `fn(usize, str)`
             35..36: expected a type
         "#]],
     );
