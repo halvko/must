@@ -3395,21 +3395,16 @@ static main = fn {
 }
 
 #[test]
-fn completions_snippet_type_item_rhs_struct_and_enum() {
+fn completions_type_item_rhs_struct_and_enum_insert_the_bare_word() {
+    // No space or brace: a turbofish is written flush (`struct::<T> {`).
     let fixture_text = "type X = $0;";
     assert_eq!(
         completion_insert(fixture_text, "struct"),
-        crate::InsertText::Snippet {
-            snippet: "struct { $1 }".to_owned(),
-            plain: "struct { }".to_owned(),
-        }
+        crate::InsertText::Plain("struct".to_owned())
     );
     assert_eq!(
         completion_insert(fixture_text, "enum"),
-        crate::InsertText::Snippet {
-            snippet: "enum { $1 }".to_owned(),
-            plain: "enum { }".to_owned(),
-        }
+        crate::InsertText::Plain("enum".to_owned())
     );
 }
 
