@@ -6574,28 +6574,37 @@ static f = fn () -> () {
 fn a_read_only_borrow_loop_does_not_accumulate_scan_cost() {
     // A read can only demote `Unique`, so it never has to look at a node
     // that is already settled — a read-only borrow loop must not rescan
-    // every borrow the program has ever made. Pinned behaviorally: the
-    // loop must still produce the right answer with several thousand
-    // live shared borrows outstanding.
-    check_run(
+    // every borrow the program has ever made. Pinned by the machine's scan
+    // counter: a rescan per read would scan the loop's whole history every
+    // iteration, quadratic in the iteration count.
+    const ITERATIONS: u64 = 200;
+    let db = RootDatabase::default();
+    let text = format!(
         r#"
-static get = fn::<@a>(r: usize.&::<@a>) -> usize { r.* };
-static f = fn () -> usize {
+static get = fn::<@a>(r: usize.&::<@a>) -> usize {{ r.* }};
+static f = fn () -> usize {{
     let n: usize = 3;
     let mut acc: usize = 0;
     let mut i: usize = 0;
-    loop {
+    loop {{
         acc = acc + get(n.&);
         i = i + 1;
-        if i == 2000 { break } else { }
-    };
+        if i == {ITERATIONS} {{ break }} else {{ }}
+    }};
     acc
-};
-"#,
-        "f()",
-        expect![[r#"
-            => 6000
-        "#]],
+}};
+static entrypoint = (f());
+"#
+    );
+    let file = SourceFile::new(&db, "test.must".to_owned(), text);
+    let mut machine = Machine::new(&db, RunMode::without_stdin(Vec::new()));
+    let result = machine.eval_root(&hir::item_loc(&db, item(&db, file, "entrypoint")));
+    assert_eq!(result, Ok(Value::Int(hir::IntValue::Usize(600))));
+    // Each iteration's mint and read scan only the live exclusive nodes.
+    let scanned = machine.borrow_nodes_scanned();
+    assert!(
+        scanned <= 4 * ITERATIONS,
+        "{scanned} nodes scanned in {ITERATIONS} iterations"
     );
 }
 

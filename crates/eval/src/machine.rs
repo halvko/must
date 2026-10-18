@@ -354,6 +354,8 @@ pub struct Machine<'db, M> {
     /// How many const-block bodies were actually executed (memo misses) —
     /// observable instrumentation for the memoization guarantee.
     const_block_evaluations: u64,
+    /// How many aliasing-tree nodes all accesses have scanned so far.
+    borrow_nodes_scanned: u64,
     /// > 0 while inside a static initializer: the const context marker.
     const_depth: usize,
     /// The fuel each const context starts with: [`CONST_FUEL`] unless
@@ -426,6 +428,7 @@ impl<'db, M: Mode> Machine<'db, M> {
             forcing_blocks: Vec::new(),
             forced_blocks: FxHashMap::default(),
             const_block_evaluations: 0,
+            borrow_nodes_scanned: 0,
             const_depth: 0,
             const_fuel_budget: CONST_FUEL,
             const_fuel: CONST_FUEL,
@@ -573,6 +576,11 @@ impl<'db, M: Mode> Machine<'db, M> {
     /// (memo misses): the observable face of per-run memoization.
     pub fn const_block_evaluations(&self) -> u64 {
         self.const_block_evaluations
+    }
+
+    /// How many aliasing-tree nodes all accesses have scanned so far.
+    pub fn borrow_nodes_scanned(&self) -> u64 {
+        self.borrow_nodes_scanned
     }
 
     /// The `const` block (or const argument) expression `body` was lowered
@@ -3995,6 +4003,7 @@ impl<M> Machine<'_, M> {
                 Access::Write => list.unique.iter().chain(&list.settled).copied().collect(),
             },
         };
+        self.borrow_nodes_scanned += scan.len() as u64;
         let mut touched = false;
         for other in scan {
             if other == tag {
