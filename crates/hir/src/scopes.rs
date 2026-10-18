@@ -1089,6 +1089,15 @@ pub fn file_scope(db: &dyn Db, file: SourceFile) -> FileScope {
             },
         );
     }
+    // The prelude's own items, visible everywhere on the same terms.
+    let prelude = base_db::prelude_file(db);
+    if file != prelude {
+        for (name, entry) in &file_scope(db, prelude).entries {
+            if !scope.entries.contains_key(name) {
+                scope.entries.insert(name.clone(), entry.clone());
+            }
+        }
+    }
     scope
 }
 

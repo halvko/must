@@ -55,7 +55,11 @@ pub fn new_library(db: &mut dyn Db, root: &str, files: Vec<(String, String)>) ->
 
 /// The file the compiler-provided declarations belong to: one per
 /// database, so every file that names `ReadLineResult` names the same
-/// declaration. It has no text; its declarations come from hir's table.
+/// declaration. Its text is [`PRELUDE_SOURCE`]; the builtin enums and
+/// functions without source come from hir's tables.
+/// The Must source of the prelude: items every file sees without a `use`.
+pub const PRELUDE_SOURCE: &str = include_str!("prelude.must");
+
 #[salsa::input(singleton)]
 pub struct Prelude {
     pub file: SourceFile,
@@ -114,7 +118,7 @@ impl RootDatabase {
 
     fn with_storage(storage: salsa::Storage<Self>) -> Self {
         let db = RootDatabase { storage };
-        let file = SourceFile::new(&db, "<prelude>".to_owned(), String::new());
+        let file = SourceFile::new(&db, "<prelude>".to_owned(), PRELUDE_SOURCE.to_owned());
         Prelude::new(&db, file);
         Settings::new(&db, Settings::DEFAULT_BIG_INFERENCE_GROUP);
         db
