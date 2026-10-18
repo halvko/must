@@ -96,7 +96,9 @@
   character. Snippets are indented absolutely: Zed's snippet path shifts the
   body by the indents query's suggestion for its first line minus that
   line's own indentation, which is zero for an absolute arm list that opens
-  on its own line.
+  on its own line. A generated stub (a match arm, a missing impl member)
+  gives its binders plain, usable names, never `_`-prefixed ones: the
+  unused-binding warning and its rename fix cover them.
 - **P03** `print` emits exactly what it is given: `str` only, no newline, no formatting, no
   interpolation. The CLI runner writes to `stdout.lock()` — Rust's own line buffering, no
   per-call flush — and flushes it explicitly before a crash report and before a blocking

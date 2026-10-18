@@ -8774,6 +8774,27 @@ static main = fn() -> usize {
     );
 }
 
+/// An impl missing several members traps with the checker's plural text.
+#[test]
+fn an_impl_missing_several_members_traps_with_the_plural_text() {
+    check_run(
+        r#"
+trait D = requires { m: fn(Self) -> usize; n: fn(Self) -> usize; } with { impl usize { } };
+static g = fn::<T: D>(x: T) -> usize { x.m() };
+static main = fn() -> usize {
+    print("before;");
+    let n: usize = 1;
+    g(n)
+};
+"#,
+        "main()",
+        expect![[r#"
+            output: "before;"
+            error[Trap]: this impl of `D` is missing the members `m` and `n`
+        "#]],
+    );
+}
+
 /// A direct use of a member its impl lacks traps with the impl's error,
 /// not with a claim that the trait isn't implemented, in each spelling.
 #[test]
