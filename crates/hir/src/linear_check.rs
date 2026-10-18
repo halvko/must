@@ -108,6 +108,29 @@ impl LinearDiagnostic {
         )
     }
 
+    /// The binder parameter whose `forget` bound the message offers, when
+    /// it offers one: a LEAK whose value is linear only because that
+    /// parameter is (see [`Self::message`] for which arms say so).
+    pub fn forget_param(&self, db: &dyn Db, item: ItemId<'_>) -> Option<std::sync::Arc<str>> {
+        match self {
+            LinearDiagnostic::RestSkipsLinear { param, .. }
+            | LinearDiagnostic::WildcardSkipsLinear { param, .. } => param.clone(),
+            LinearDiagnostic::Discarded { expr }
+            | LinearDiagnostic::ConstBlockHoldsLinear { expr }
+            | LinearDiagnostic::AssignOverPlace { target: expr } => {
+                let ty = infer(db, item).type_of_expr.get(*expr)?;
+                crate::capability::blaming_param(db, ty)
+            }
+            // Duplication offers no bound (see [`Self::message`]), and an
+            // item's own value is never in a binder's scope. Listed, not
+            // `_`, so a new arm has to say whether it offers one.
+            LinearDiagnostic::BorrowedTemporary { .. }
+            | LinearDiagnostic::CopiedOut { .. }
+            | LinearDiagnostic::Repeated { .. }
+            | LinearDiagnostic::ItemHoldsLinear { .. } => None,
+        }
+    }
+
     /// The message as reported for a finding of `item`'s check: the
     /// blamed root read off its types.
     pub fn render(&self, db: &dyn Db, item: ItemId<'_>) -> String {
