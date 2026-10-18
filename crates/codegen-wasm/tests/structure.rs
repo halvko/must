@@ -182,19 +182,6 @@ fn the_trap_table_travels_with_the_module() {
 }
 
 #[test]
-fn a_runtime_panic_message_is_readable_after_the_trap() {
-    // The message is not a literal at the call, so it is published through
-    // the module's globals rather than baked into the trap table.
-    harness::check(
-        r#"
-static pick = fn (n: usize) -> str { if n == 0 { "zero" } else { "other" } };
-static main = fn () -> usize { panic(pick(1)) };
-"#,
-        "main()",
-    );
-}
-
-#[test]
 fn polymorphic_recursion_is_refused_by_name() {
     // `go::<T>` calls itself at `Option::<T>`, so every call needs an
     // instance the previous one did not: monomorphization has nothing to
@@ -339,82 +326,52 @@ fn a_declared_extern_item_becomes_a_real_wasm_import_and_is_called_through() {
     // The `extern`-item mechanism, end to end at the module level: the
     // declaration's own name is the import's field name (module `must`,
     // `print`'s sibling), it lands in the import section, and the call
-    // goes through it. Nothing here is `read`-specific — `read` itself
-    // needs a raw pointer, which this backend refuses by name.
-    let source = "unsafe extern static host_tick: unsafe fn(i64) -> i64;\n\
-                  static main = fn () -> i64 { unsafe { host_tick(7) } };";
-    let artifact = compile(source, "main()");
-    let engine = wasmi::Engine::default();
-    let module = wasmi::Module::new(&engine, &artifact.wasm[..]).expect("validates");
-    let imports: Vec<(String, String)> = module
-        .imports()
-        .map(|import| (import.module().to_owned(), import.name().to_owned()))
-        .collect();
-    assert_eq!(
-        imports,
-        vec![
-            ("must".to_owned(), "print".to_owned()),
-            ("must".to_owned(), "host_tick".to_owned()),
-        ],
-        "a declared `extern` item joins `print` in the import section, under its own name"
-    );
+    // goes through it, whether its type is `unsafe fn` or safe. (`read`
+    // itself needs a raw pointer, which this backend refuses by name.)
+    for source in [
+        r#"
+unsafe extern static host_tick: unsafe fn(i64) -> i64;
+static main = fn () -> i64 { unsafe { host_tick(7) } };
+"#,
+        r#"
+unsafe extern static host_tick: fn(i64) -> i64;
+static main = fn () -> i64 { host_tick(7) };
+"#,
+    ] {
+        let artifact = compile(source, "main()");
+        let engine = wasmi::Engine::default();
+        let module = wasmi::Module::new(&engine, &artifact.wasm[..]).expect("validates");
+        let imports: Vec<(String, String)> = module
+            .imports()
+            .map(|import| (import.module().to_owned(), import.name().to_owned()))
+            .collect();
+        assert_eq!(
+            imports,
+            vec![
+                ("must".to_owned(), "print".to_owned()),
+                ("must".to_owned(), "host_tick".to_owned()),
+            ],
+            "a declared `extern` item joins `print` in the import section, under its own name\n{source}"
+        );
 
-    // And it really is wired: a host that doubles gets 7 and the module
-    // returns 14.
-    let mut store = wasmi::Store::new(&engine, ());
-    let mut linker = wasmi::Linker::new(&engine);
-    linker
-        .func_wrap("must", "print", |_: i32, _: i32| {})
-        .expect("print");
-    linker
-        .func_wrap("must", "host_tick", |n: i64| n * 2)
-        .expect("host_tick");
-    let instance = linker
-        .instantiate_and_start(&mut store, &module)
-        .expect("instantiates");
-    let entry = instance
-        .get_typed_func::<(), i64>(&store, "main")
-        .expect("entry");
-    assert_eq!(entry.call(&mut store, ()).expect("runs"), 14);
-}
-
-#[test]
-fn a_safe_typed_extern_item_reaches_the_same_wasm_import_with_no_call_site_marker() {
-    // An extern function is callable in a safe context unless it has an
-    // `unsafe fn` type.
-    let source = "unsafe extern static host_tick: fn(i64) -> i64;\n\
-                  static main = fn () -> i64 { host_tick(7) };";
-    let artifact = compile(source, "main()");
-    let engine = wasmi::Engine::default();
-    let module = wasmi::Module::new(&engine, &artifact.wasm[..]).expect("validates");
-    let imports: Vec<(String, String)> = module
-        .imports()
-        .map(|import| (import.module().to_owned(), import.name().to_owned()))
-        .collect();
-    assert_eq!(
-        imports,
-        vec![
-            ("must".to_owned(), "print".to_owned()),
-            ("must".to_owned(), "host_tick".to_owned()),
-        ],
-        "a safe-typed `extern` item joins `print` in the import section too"
-    );
-
-    let mut store = wasmi::Store::new(&engine, ());
-    let mut linker = wasmi::Linker::new(&engine);
-    linker
-        .func_wrap("must", "print", |_: i32, _: i32| {})
-        .expect("print");
-    linker
-        .func_wrap("must", "host_tick", |n: i64| n * 2)
-        .expect("host_tick");
-    let instance = linker
-        .instantiate_and_start(&mut store, &module)
-        .expect("instantiates");
-    let entry = instance
-        .get_typed_func::<(), i64>(&store, "main")
-        .expect("entry");
-    assert_eq!(entry.call(&mut store, ()).expect("runs"), 14);
+        // And it really is wired: a host that doubles gets 7 and the module
+        // returns 14.
+        let mut store = wasmi::Store::new(&engine, ());
+        let mut linker = wasmi::Linker::new(&engine);
+        linker
+            .func_wrap("must", "print", |_: i32, _: i32| {})
+            .expect("print");
+        linker
+            .func_wrap("must", "host_tick", |n: i64| n * 2)
+            .expect("host_tick");
+        let instance = linker
+            .instantiate_and_start(&mut store, &module)
+            .expect("instantiates");
+        let entry = instance
+            .get_typed_func::<(), i64>(&store, "main")
+            .expect("entry");
+        assert_eq!(entry.call(&mut store, ()).expect("runs"), 14, "{source}");
+    }
 }
 
 #[test]

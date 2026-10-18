@@ -60,14 +60,45 @@ pub struct Run {
 const ENTRY: &str = "__must_entry";
 
 pub fn prepare(db: &RootDatabase, source: &str, entry: &str) -> hir::ItemLoc {
-    let text = format!("{source}\nstatic {ENTRY} = ({entry});\n");
+    let mut locs = inject(db, source, &[(ENTRY.to_owned(), entry)]);
+    locs.pop().expect("one entry in, one item out")
+}
+
+/// [`prepare`] for each of `entries` in one file, so the program's items
+/// lower once for all of them; every entry is a caller at once, so they
+/// fill an unannotated signature's holes together.
+pub fn prepare_many(db: &RootDatabase, source: &str, entries: &[&str]) -> Vec<hir::ItemLoc> {
+    let named: Vec<(String, &str)> = entries
+        .iter()
+        .enumerate()
+        .map(|(index, entry)| (format!("{ENTRY}_{index}"), *entry))
+        .collect();
+    inject(db, source, &named)
+}
+
+/// Append `static <name> = (<entry>);` for each pair and find the items.
+fn inject(db: &RootDatabase, source: &str, entries: &[(String, &str)]) -> Vec<hir::ItemLoc> {
+    let mut text = source.to_owned();
+    for (name, entry) in entries {
+        assert!(
+            !source.contains(name.as_str()),
+            "the program spells `{name}`"
+        );
+        text.push_str(&format!("\nstatic {name} = ({entry});\n"));
+    }
     let file = SourceFile::new(db, "test.must".to_owned(), text);
-    let item = hir::file_item_ids(db, file)
-        .last()
-        .copied()
-        .filter(|item| item.name(db) == ENTRY)
-        .unwrap_or_else(|| panic!("the injected entry item must be the last item"));
-    hir::item_loc(db, item)
+    let items = hir::file_item_ids(db, file);
+    entries
+        .iter()
+        .map(|(name, _)| {
+            let item = items
+                .iter()
+                .copied()
+                .find(|item| *item.name(db) == *name)
+                .unwrap_or_else(|| panic!("the injected entry item `{name}` must parse"));
+            hir::item_loc(db, item)
+        })
+        .collect()
 }
 
 /// Run `f` on a thread with [`codegen_wasm::STACK_BUDGET`] of stack.
@@ -100,30 +131,33 @@ pub fn on_stack<T: Send>(stack: usize, f: impl FnOnce() -> T + Send) -> T {
     })
 }
 
-/// Run under the interpreter — the specification side.
-pub fn interpret(db: &RootDatabase, entry: &hir::ItemLoc) -> Run {
+/// Run under the interpreter — the specification side. The value comes
+/// back too (`()` after a trap): its SHAPE tells the decoder how to read
+/// the compiled result slots back.
+pub fn interpret(db: &RootDatabase, entry: &hir::ItemLoc) -> (Run, Value) {
     let mut out = Vec::new();
     // Nothing supported here calls `read_line`: the wasm backend refuses it
     // by name, so no differentially compared program reaches that codepath.
     let result = Machine::new(db, RunMode::without_stdin(&mut out)).eval_root(entry);
     let stdout = String::from_utf8(out).expect("print output is UTF-8");
-    let outcome = match result {
-        Ok(Value::Unit) => Outcome::Value(None),
-        Ok(value) => Outcome::Value(Some(value.display())),
+    let (outcome, value) = match result {
+        Ok(Value::Unit) => (Outcome::Value(None), Value::Unit),
+        Ok(value) => (Outcome::Value(Some(value.display())), value),
         Err(err) => {
             assert!(
                 !matches!(err.kind, EvalErrorKind::Uninstantiated),
                 "the interpreter hit an internal case: {}",
                 err.message
             );
-            Outcome::Trap(err.message)
+            (Outcome::Trap(err.message), Value::Unit)
         }
     };
-    Run {
+    let run = Run {
         stdout,
         outcome,
         trap: None,
-    }
+    };
+    (run, value)
 }
 
 /// Execute a compiled artifact on a real engine (`wasmi` — chosen for
@@ -358,22 +392,33 @@ fn decode_into(
 
 /// The whole comparison, for one program and one entry expression.
 pub fn check(source: &str, entry: &str) {
-    on_budget(|| check_on_budget(source, entry))
+    on_budget(|| {
+        let db = RootDatabase::default();
+        let loc = prepare(&db, source, entry);
+        compare(&db, &loc);
+    })
 }
 
-fn check_on_budget(source: &str, entry: &str) {
-    let db = RootDatabase::default();
-    let loc = prepare(&db, source, entry);
-    let interpreted = interpret(&db, &loc);
-    let artifact = match codegen_wasm::compile(&db, &loc) {
+/// [`check`] for every expression in `entries` against one program,
+/// sharing one database (see [`prepare_many`]). Each entry is run and
+/// compared on its own; the first that disagrees fails the test, named.
+pub fn check_many(source: &str, entries: &[&str]) {
+    on_budget(|| {
+        let db = RootDatabase::default();
+        for (loc, entry) in prepare_many(&db, source, entries).iter().zip(entries) {
+            println!("checking `{entry}`");
+            compare(&db, loc);
+        }
+    })
+}
+
+fn compare(db: &RootDatabase, loc: &hir::ItemLoc) {
+    let (interpreted, reference) = interpret(db, loc);
+    let artifact = match codegen_wasm::compile(db, loc) {
         Ok(artifact) => artifact,
         Err(err) => panic!("compilation refused: {}", err.message()),
     };
-    let reference = match &interpreted.outcome {
-        Outcome::Value(_) => reference_value(&db, &loc),
-        Outcome::Trap(_) => Value::Unit,
-    };
-    let compiled = execute(&db, &artifact, &reference);
+    let compiled = execute(db, &artifact, &reference);
 
     assert_eq!(
         interpreted.stdout, compiled.stdout,
@@ -386,7 +431,7 @@ fn check_on_budget(source: &str, entry: &str) {
             // arguments are not on the value, so its layout cannot be
             // reconstructed). Everything else must decode, so this
             // coverage cannot quietly thin out.
-            if a.is_some() && !generic_enum(&db, &reference) {
+            if a.is_some() && !generic_enum(db, &reference) {
                 assert!(
                     b.is_some(),
                     "the compiled entry's value could not be read back \
@@ -461,15 +506,6 @@ fn generic_enum(db: &RootDatabase, value: &Value) -> bool {
     hir::item_data(db, decl.to_id(db))
         .as_ref()
         .is_none_or(|data| !data.generics.is_empty())
-}
-
-/// Re-run the interpreter just to learn the entry value's SHAPE (which
-/// tells the decoder how to read the result slots back).
-fn reference_value(db: &RootDatabase, entry: &hir::ItemLoc) -> Value {
-    let mut sink = Vec::new();
-    Machine::new(db, RunMode::without_stdin(&mut sink))
-        .eval_root(entry)
-        .unwrap_or(Value::Unit)
 }
 
 /// Compile-only: the refusal a program must produce.
