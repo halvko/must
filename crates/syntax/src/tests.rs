@@ -8964,8 +8964,8 @@ fn a_prefix_borrow_with_no_operand_migrates_without_a_fix() {
 
 #[test]
 fn retired_prefix_borrow_type_does_not_chase_a_retired_lifetime() {
-    // The parser does not chase a retired spelling across token kinds
-    // (G26). In legacy `&'a T` the `&` fires its own migration and stops;
+    // The parser does not chase a retired spelling across token kinds.
+    // In legacy `&'a T` the `&` fires its own migration and stops;
     // the freed `'` opens an unterminated character literal (the scan is
     // bounded to the line, so it costs one token), and the referent never
     // reaches the borrow — so no rewrite is offered and
@@ -9175,7 +9175,7 @@ fn bare_amp_between_expressions_is_not_a_binary_operator() {
 
 #[test]
 fn a_bare_quote_is_an_unterminated_character_literal() {
-    // The `'`-prefixed lifetime kind is retired (G26) and `'` now opens a
+    // The `'`-prefixed lifetime kind is retired and `'` now opens a
     // character literal. A lone one is therefore an UNTERMINATED literal,
     // not an unknown character — and the scan is bounded to the line
     // (unlike a string's), so this single odd quote costs exactly one token
@@ -15789,7 +15789,7 @@ fn the_retired_declaration_clause_is_consumed_whole() {
     // `without` is an ordinary identifier now, so a stranded one would end
     // the item and desync the file-level loop into two more errors. The
     // recognizer takes the head and every `+`-joined name with it: ONE
-    // sentence, and the item after it still parses (G21/G26). No rewriting
+    // sentence, and the item after it still parses (G21). No rewriting
     // fix rides it — see `retired_without_clause`.
     check_errors(
         "type S = struct { n: usize } without forget + send;\n\
