@@ -156,7 +156,9 @@ pub(crate) fn library_trait_impls<'db>(db: &'db dyn Db, library: LibraryId<'db>)
                 // implemented trait — its impls stay out of the buckets
                 // (diagnosed at the head).
                 let trait_ = match file_scope(db, file).resolve(&head) {
-                    Some(Resolution::TraitItem(loc)) if !trait_is_generic(db, &loc) => Some(loc),
+                    Some(Resolution::TraitItem(loc)) if trait_can_be_implemented(db, &loc) => {
+                        Some(loc)
+                    }
                     _ => None,
                 };
                 (trait_, Some(SelfKey::Decl(owner.clone())))
@@ -200,13 +202,30 @@ fn trait_impl_elements(decl: &syntax::ast::Item) -> Vec<(syntax::ast::ImplElemen
         .collect()
 }
 
-/// Whether a trait declaration carries the RESERVED `requires::<...>`
-/// binder (reserved for generic traits): a reserved trait must not go
-/// semantically live anywhere downstream.
-pub(crate) fn trait_is_generic(db: &dyn Db, loc: &ItemLoc) -> bool {
+/// Whether the declaration at `loc` declares generic parameters. On a
+/// trait that is the RESERVED `requires::<...>` binder: a reserved trait
+/// must not go semantically live anywhere downstream.
+pub(crate) fn item_is_generic(db: &dyn Db, loc: &ItemLoc) -> bool {
     crate::item_data(db, loc.to_id(db))
         .as_ref()
         .is_some_and(|data| !data.generics.is_empty())
+}
+
+/// Whether the builtin type `name` can implement traits: the scalars.
+pub fn builtin_can_implement(name: &str) -> bool {
+    builtin_type_by_name(name).is_some_and(|ty| SelfKey::for_ty(&ty).is_some())
+}
+
+/// Whether the `type` item at `loc` can implement traits: impls for a
+/// generic type are reserved.
+pub fn type_item_can_implement(db: &dyn Db, loc: &ItemLoc) -> bool {
+    !item_is_generic(db, loc)
+}
+
+/// Whether the trait at `loc` can be implemented: generic traits are
+/// reserved.
+pub fn trait_can_be_implemented(db: &dyn Db, loc: &ItemLoc) -> bool {
+    !item_is_generic(db, loc)
 }
 
 /// Resolve a trait-side impl head to an implementing type: a builtin
@@ -218,10 +237,7 @@ pub(crate) fn resolve_self_head(db: &dyn Db, file: SourceFile, head: &str) -> Op
     }
     match type_scope(db, file).resolve(head) {
         Some(Resolution::TypeItem(loc)) => {
-            let generic = crate::item_data(db, loc.to_id(db))
-                .as_ref()
-                .is_some_and(|data| !data.generics.is_empty());
-            (!generic).then_some(SelfKey::Decl(loc))
+            type_item_can_implement(db, &loc).then_some(SelfKey::Decl(loc))
         }
         _ => None,
     }
@@ -236,7 +252,7 @@ pub(crate) fn bound_trait(db: &dyn Db, file: SourceFile, bound: &TypeRef) -> Opt
         return None;
     };
     match file_scope(db, file).resolve(name) {
-        Some(Resolution::TraitItem(loc)) if !trait_is_generic(db, &loc) => Some(loc),
+        Some(Resolution::TraitItem(loc)) if !item_is_generic(db, &loc) => Some(loc),
         _ => None,
     }
 }

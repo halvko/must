@@ -49,7 +49,10 @@ pub use scopes::{
     alloc_result_loc, expr_scopes, file_scope, next_char_loc, read_line_result_loc, resolutions,
     synthetic_decl_loc, synthetic_decl_named, synthetic_decls, type_scope, utf8_result_loc,
 };
-pub use traits::{BoundDotOffer, BoundSlot, bound_dot_offers, bound_slots, dict_param_count};
+pub use traits::{
+    BoundDotOffer, BoundSlot, bound_dot_offers, bound_slots, builtin_can_implement,
+    dict_param_count, trait_can_be_implemented, type_item_can_implement,
+};
 pub use trap_sites::{
     BodyError, ErrorOwners, TrapSite, error_owners, range_traps, trap_sites_for_pats,
 };
@@ -2563,7 +2566,7 @@ fn trait_definition_diagnostics(db: &dyn Db, file: SourceFile, diagnostics: &mut
                 // A RESERVED generic trait must not go semantically live
                 // through a bound (reserved for generic traits).
                 Ok(Some(Resolution::TraitItem(loc))) => {
-                    traits::trait_is_generic(db, &loc).then(|| {
+                    traits::item_is_generic(db, &loc).then(|| {
                         NameError::new(format!(
                             "`{name}` is a reserved generic trait \
                          (generic traits are not supported yet); it cannot be a bound"

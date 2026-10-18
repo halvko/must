@@ -120,6 +120,7 @@ fn completion_item_kind(kind: ide::CompletionItemKind) -> lsp_types::CompletionI
         ide::CompletionItemKind::Field => lsp_types::CompletionItemKind::FIELD,
         ide::CompletionItemKind::EnumMember => lsp_types::CompletionItemKind::ENUM_MEMBER,
         ide::CompletionItemKind::Struct => lsp_types::CompletionItemKind::STRUCT,
+        ide::CompletionItemKind::Trait => lsp_types::CompletionItemKind::INTERFACE,
         ide::CompletionItemKind::Enum => lsp_types::CompletionItemKind::ENUM,
         ide::CompletionItemKind::Constant => lsp_types::CompletionItemKind::CONSTANT,
         ide::CompletionItemKind::Keyword => lsp_types::CompletionItemKind::KEYWORD,

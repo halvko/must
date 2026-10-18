@@ -2639,6 +2639,245 @@ fn completions_type_item_rhs_offers_exactly_struct_and_enum() {
     );
 }
 
+// ---- trailing clauses and `trait` RHS ----
+
+#[test]
+fn completions_trait_rhs_offers_requires() {
+    check_completions(
+        "trait Shape = $0",
+        expect_test::expect![[r#"
+            requires Keyword
+        "#]],
+    );
+    check_completions(
+        "trait Shape = req$0",
+        expect_test::expect![[r#"
+            requires Keyword
+        "#]],
+    );
+    assert_eq!(
+        completion_insert("trait Shape = $0", "requires"),
+        crate::InsertText::Snippet {
+            snippet: "requires $0".to_owned(),
+            plain: "requires".to_owned(),
+        }
+    );
+}
+
+#[test]
+fn completions_after_a_braced_type_lead_with_its_clauses_on_the_same_line() {
+    check_completions(
+        "type Point = struct { x: usize } $0",
+        expect_test::expect![[r#"
+            with Keyword
+            only move Keyword
+            const Keyword
+            extern Keyword
+            static Keyword
+            trait Keyword
+            type Keyword
+            unsafe Keyword
+            use Keyword
+        "#]],
+    );
+    assert_eq!(
+        completion_insert("type Point = struct { x: usize } w$0", "with"),
+        crate::InsertText::Snippet {
+            snippet: "with $0".to_owned(),
+            plain: "with".to_owned(),
+        }
+    );
+    assert_eq!(
+        completion_insert("type Point = struct { x: usize } $0", "only move"),
+        crate::InsertText::Plain("only move".to_owned())
+    );
+}
+
+#[test]
+fn completions_after_a_braced_type_on_a_later_line_rank_clauses_as_keywords() {
+    check_completions(
+        r#"
+type Point = struct { x: usize }
+$0"#,
+        expect_test::expect![[r#"
+            const Keyword
+            extern Keyword
+            only move Keyword
+            static Keyword
+            trait Keyword
+            type Keyword
+            unsafe Keyword
+            use Keyword
+            with Keyword
+        "#]],
+    );
+}
+
+#[test]
+fn completions_after_a_with_group_offer_another() {
+    check_completions(
+        "type Point = struct { x: usize } with { impl Self { } } $0",
+        expect_test::expect![[r#"
+            with Keyword
+            only move Keyword
+            const Keyword
+            extern Keyword
+            static Keyword
+            trait Keyword
+            type Keyword
+            unsafe Keyword
+            use Keyword
+        "#]],
+    );
+}
+
+#[test]
+fn completions_after_a_braced_trait_offer_with_but_not_only() {
+    check_completions(
+        "trait Shape = requires { area: fn(Self) -> usize } $0",
+        expect_test::expect![[r#"
+            with Keyword
+            const Keyword
+            extern Keyword
+            static Keyword
+            trait Keyword
+            type Keyword
+            unsafe Keyword
+            use Keyword
+        "#]],
+    );
+}
+
+#[test]
+fn completions_after_a_closed_item_offer_no_clauses() {
+    check_no_completion(
+        r#"
+type Point = struct { x: usize };
+$0"#,
+        "with",
+    );
+    check_no_completion(
+        r#"
+static n = 1;
+$0"#,
+        "with",
+    );
+    check_no_completion("static f = fn { } $0", "with");
+}
+
+#[test]
+fn completions_in_a_with_group_offer_impl() {
+    check_completions(
+        "type Point = struct { x: usize } with { $0 }",
+        expect_test::expect![[r#"
+            impl Keyword
+        "#]],
+    );
+    check_completions(
+        "type Point = struct { x: usize } with { impl Self { } i$0 }",
+        expect_test::expect![[r#"
+            impl Keyword
+        "#]],
+    );
+}
+
+#[test]
+fn completions_impl_head_on_a_type_offers_self_then_traits() {
+    // `impl Self` (own members) or `impl Trait`: no other type can head an
+    // impl in a type's group. A generic trait is reserved, so `Conv` is not
+    // offered.
+    check_completions(
+        r#"
+trait Shape = requires { }
+trait Conv = requires::<T> { }
+type Point = struct { x: usize } with { impl $0 }
+"#,
+        expect_test::expect![[r#"
+            Self Keyword
+            Shape Trait
+        "#]],
+    );
+}
+
+#[test]
+fn completions_impl_head_on_a_generic_type_offers_only_self() {
+    // Trait impls on a generic type are reserved.
+    check_completions(
+        r#"
+trait Shape = requires { }
+type Wrap = struct::<T> { x: T } with { impl $0 }
+"#,
+        expect_test::expect![[r#"
+            Self Keyword
+        "#]],
+    );
+}
+
+#[test]
+fn completions_impl_head_on_a_trait_offers_named_types() {
+    // The head names the implementer: a builtin scalar or a non-generic
+    // type. No `Self`, no type keywords, and no generic type (`Wrap`,
+    // `AllocResult`): impls for those are reserved.
+    check_completions(
+        r#"
+type Point = struct { x: usize }
+type Wrap = struct::<T> { x: T }
+trait Shape = requires { } with { impl $0 }
+"#,
+        expect_test::expect![[r#"
+            NextChar Enum (enum { Char(char, usize), End })
+            Point Struct (struct { x: usize })
+            ReadLineResult Enum (enum { Line(str), End })
+            Utf8Result Enum (enum { Ok(str), Err })
+            bool Keyword
+            char Keyword
+            i16 Keyword
+            i32 Keyword
+            i64 Keyword
+            i8 Keyword
+            isize Keyword
+            str Keyword
+            string Keyword
+            u16 Keyword
+            u32 Keyword
+            u64 Keyword
+            u8 Keyword
+            usize Keyword
+        "#]],
+    );
+}
+
+#[test]
+fn completions_impl_head_in_reserved_territory_offers_nothing() {
+    // A generic trait's chain is reserved: no head is valid there, so no
+    // type keywords either.
+    check_completions(
+        "trait Shape = requires::<T> { } with { impl $0 }",
+        expect_test::expect![""],
+    );
+}
+
+#[test]
+fn completions_after_a_ceiling_offer_with_but_no_second_ceiling() {
+    check_completions(
+        "type Res = struct { n: usize } only move $0",
+        expect_test::expect![[r#"
+            with Keyword
+            const Keyword
+            extern Keyword
+            static Keyword
+            trait Keyword
+            type Keyword
+            unsafe Keyword
+            use Keyword
+        "#]],
+    );
+    check_no_completion(
+        "type Res = struct { n: usize } only move with { impl Self { } } $0",
+        "only move",
+    );
+}
+
 // ---- type-directed ranking ----
 
 #[test]
