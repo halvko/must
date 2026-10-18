@@ -394,7 +394,7 @@ type Q = struct { a: usize } with {
 "#,
         // TODO: halvko/must#163: bounds may come in any order; the message stops naming one.
         expect![[r#"
-            c.must 105..106: member `m`'s generic binder does not match `D`'s requirement (arity, kinds and bounds must agree, the bounds in the requirement's order) (required by the trait here at b.must 67..68)
+            c.must 105..106: member `m`'s generic binder does not match `D`'s requirement (arity, kinds and bounds must agree, the bounds in the requirement's order) (`m` is required by `D` here at b.must 67..68)
         "#]],
     );
 }

@@ -313,7 +313,7 @@ trait Renamed = requires { f: fn::<@a, @b: @a>(usize.&::<@b>, Self) -> usize; }
   with { impl Cell { f = fn::<@x, @y: @x>(p: usize.&::<@y>, s: Self) -> usize { 1 }; } };
 "#,
         expect![[r#"
-            135..136: member `f` does not match `Renamed`'s requirement: expected `fn(usize.&::<@b>, Cell) -> usize`, found `fn(usize.&::<@y>, Cell) -> usize` (required by the trait here at 61..62)
+            135..136: member `f` does not match `Renamed`'s requirement: expected `fn(usize.&::<@b>, Cell) -> usize`, found `fn(usize.&::<@y>, Cell) -> usize` (`f` is required by `Renamed` here at 61..62)
         "#]],
     );
     check_diagnostics(
@@ -324,7 +324,7 @@ trait Dropped = requires { f: fn::<@a, @b: @a>(usize.&::<@b>, Self) -> usize; }
 "#,
         // TODO: halvko/must#163: bounds may come in any order; the message stops naming one.
         expect![[r#"
-            135..136: member `f`'s generic binder does not match `Dropped`'s requirement (arity, kinds and bounds must agree, the bounds in the requirement's order) (required by the trait here at 61..62)
+            135..136: member `f`'s generic binder does not match `Dropped`'s requirement (arity, kinds and bounds must agree, the bounds in the requirement's order) (`f` is required by `Dropped` here at 61..62)
         "#]],
     );
 }

@@ -708,6 +708,9 @@ impl ImplElement {
     pub fn l_brace_token(&self) -> Option<SyntaxToken> {
         token(&self.syntax, L_BRACE)
     }
+    pub fn r_brace_token(&self) -> Option<SyntaxToken> {
+        token(&self.syntax, R_BRACE)
+    }
     /// Where an error about the head's name goes: the head, or the whole
     /// element when recovery dropped it.
     pub fn head_range(&self) -> TextRange {
