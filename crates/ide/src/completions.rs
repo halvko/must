@@ -66,10 +66,10 @@
 //! - a parameterful `fn` item, builtin or local in expression position:
 //!   `name($1)`, or the bare name when the position expects the `fn`
 //!   itself as a value;
-//! - a `type X = …` RHS: `struct { $1 }` / `enum { $1 }`;
 //! - `requires $0` on a `trait X = …` RHS and `with $0` after a braced
-//!   `type`/`trait` value, which, like `if`/`match`, write no braces: the
-//!   user types the `{` so the editor pairs it;
+//!   `type`/`trait` value, which, like `if`/`match`, write no braces: a
+//!   clause list may come first, and the user types the `{` so the editor
+//!   pairs it ([`open_keyword_item`]);
 //! - a payload-carrying variant pattern in a match arm: `::Circle($1)` /
 //!   `Pair($1, $2)`, one tab stop per payload, because `check_match_pat`
 //!   counts bindings against payloads;
@@ -220,9 +220,8 @@ pub enum CompletionItemKind {
     Keyword,
     /// A multi-token template rather than a name — the `match` arm list.
     /// Its own kind because the label deliberately does not equal the
-    /// insertion (the precedent is `type X = …`'s `struct`/`enum`, which
-    /// insert a whole shell), and an editor that renders kind icons should
-    /// say so rather than dressing it up as a keyword.
+    /// insertion, and an editor that renders kind icons should say so
+    /// rather than dressing it up as a keyword.
     Snippet,
 }
 
@@ -617,10 +616,9 @@ pub(crate) fn completions(
             items.extend(trailing_clause_items(ceiling_open, same_line, edit_range));
             items
         }
-        Some(Context::TraitRhs) => vec![keyword_snippet_item(
+        Some(Context::TraitRhs) => vec![open_keyword_item(
             "requires",
-            "requires $0".to_owned(),
-            "requires".to_owned(),
+            Provenance::Keyword as u8,
             edit_range,
         )],
         Some(Context::WithElement) => keyword_items(&[SyntaxKind::IMPL_KW], edit_range),
@@ -1218,19 +1216,30 @@ fn keyword_snippet_item(
     item
 }
 
-/// The `type X = …` RHS keywords, snippeted: `struct { $1 }` /
-/// `enum { $1 }` — a snippet-incapable client falls back to the bare shell
-/// (`struct { }` / `enum { }`), still more than the plain keyword alone.
+/// `word $0`, or the bare word for a snippet-incapable client. For a
+/// keyword followed by a space and then a condition, a scrutinee or the
+/// `{` itself; no braces are written, the user types the `{`.
+fn open_keyword_item(word: &str, tier: u8, edit_range: TextRange) -> CompletionItem {
+    let mut item = completion_item_at_tier(
+        word,
+        CompletionItemKind::Keyword,
+        tier,
+        TYPE_TIER_NONE,
+        None,
+        edit_range,
+    );
+    item.text_edit.insert = InsertText::Snippet {
+        snippet: format!("{word} $0"),
+        plain: word.to_owned(),
+    };
+    item
+}
+
+/// The `type X = …` RHS keywords, as the bare words: what follows is the
+/// user's `{` or a turbofish written flush (`struct::<T> {`), so no space
+/// or brace is guessed.
 fn type_item_rhs_items(edit_range: TextRange) -> Vec<CompletionItem> {
-    [
-        ("struct", "struct { $1 }", "struct { }"),
-        ("enum", "enum { $1 }", "enum { }"),
-    ]
-    .into_iter()
-    .map(|(word, snippet, plain)| {
-        keyword_snippet_item(word, snippet.to_owned(), plain.to_owned(), edit_range)
-    })
-    .collect()
+    keyword_items(&[SyntaxKind::STRUCT_KW, SyntaxKind::ENUM_KW], edit_range)
 }
 
 /// `with $0`, and `only move` while `ceiling_open`. On the line of the
@@ -1246,19 +1255,7 @@ fn trailing_clause_items(
     } else {
         (keyword, keyword)
     };
-    let mut with = completion_item_at_tier(
-        "with",
-        CompletionItemKind::Keyword,
-        with_tier,
-        TYPE_TIER_NONE,
-        None,
-        edit_range,
-    );
-    with.text_edit.insert = InsertText::Snippet {
-        snippet: "with $0".to_owned(),
-        plain: "with".to_owned(),
-    };
-    let mut items = vec![with];
+    let mut items = vec![open_keyword_item("with", with_tier, edit_range)];
     if ceiling_open {
         items.push(completion_item_at_tier(
             "only move",
@@ -1272,23 +1269,22 @@ fn trailing_clause_items(
     items
 }
 
-/// The expression keywords whose grammar always goes on to a block. `loop
-/// {$0}` opens its block on one line. `if $0` and `match $0` write no
-/// braces: the condition or scrutinee comes first, and the candidate
-/// accepted for it ends in a space ([`space_before_block`]). A
-/// snippet-incapable client gets the bare keyword.
+/// The expression keywords whose grammar always goes on to a block:
+/// `loop {$0}` opens it on one line; `if` and `match` are
+/// [`open_keyword_item`]s, the candidate accepted for their condition or
+/// scrutinee ending in a space ([`space_before_block`]).
 fn block_keyword_items(edit_range: TextRange) -> Vec<CompletionItem> {
-    [
-        (SyntaxKind::IF_KW, "if $0"),
-        (SyntaxKind::LOOP_KW, "loop {$0}"),
-        (SyntaxKind::MATCH_KW, "match $0"),
+    let keyword = Provenance::Keyword as u8;
+    vec![
+        open_keyword_item("if", keyword, edit_range),
+        keyword_snippet_item(
+            "loop",
+            "loop {$0}".to_owned(),
+            "loop".to_owned(),
+            edit_range,
+        ),
+        open_keyword_item("match", keyword, edit_range),
     ]
-    .into_iter()
-    .map(|(word, snippet)| {
-        let word = word.keyword_text().expect("block keywords are keywords");
-        keyword_snippet_item(word, snippet.to_owned(), word.to_owned(), edit_range)
-    })
-    .collect()
 }
 
 /// The integer types plus `str`/`string`/`bool`/`char` — the nameable
