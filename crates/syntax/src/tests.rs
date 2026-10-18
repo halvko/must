@@ -17978,3 +17978,126 @@ use a::x;
         .collect();
     assert_eq!(shown, ["a::b: x, y as z", "a: x"]);
 }
+
+/// A trait written without `requires` or without `=` reports one error on
+/// the first token that is out of place, and its fix yields a clean trait.
+#[test]
+fn trait_missing_requires_or_eq() {
+    let cases = [
+        (
+            r#"
+trait Min = {
+}
+"#,
+            "{",
+            "expected `requires` before `{`: a trait lists its members in `requires { ... }`",
+            "Insert `requires`",
+            r#"
+trait Min = requires {
+}
+"#,
+        ),
+        (
+            r#"
+trait Min {
+}
+"#,
+            "{",
+            "expected `=`: a trait is declared `trait Name = requires { ... }`",
+            "Insert `= requires`",
+            r#"
+trait Min = requires {
+}
+"#,
+        ),
+        (
+            r#"
+trait Min requires {
+}
+"#,
+            "requires",
+            "expected `=`: a trait is declared `trait Name = requires { ... }`",
+            "Insert `=`",
+            r#"
+trait Min = requires {
+}
+"#,
+        ),
+        (
+            r#"
+trait Min = unsafe {
+}
+"#,
+            "{",
+            "expected `requires` before `{`: a trait lists its members in `requires { ... }`",
+            "Insert `requires`",
+            r#"
+trait Min = unsafe requires {
+}
+"#,
+        ),
+        (
+            r#"
+trait Min unsafe {
+}
+"#,
+            "unsafe",
+            "expected `=`: a trait is declared `trait Name = requires { ... }`",
+            "Insert `= requires`",
+            r#"
+trait Min = unsafe requires {
+}
+"#,
+        ),
+        (
+            r#"
+trait Min unsafe requires {
+}
+"#,
+            "unsafe",
+            "expected `=`: a trait is declared `trait Name = requires { ... }`",
+            "Insert `=`",
+            r#"
+trait Min = unsafe requires {
+}
+"#,
+        ),
+    ];
+    // Validation rejects `unsafe` traits on their own; that error is not
+    // part of the recovery.
+    let errors = |text: &str| -> Vec<crate::SyntaxError> {
+        crate::parse(text)
+            .errors()
+            .iter()
+            .filter(|err| err.message != "`unsafe` traits are not supported yet")
+            .cloned()
+            .collect()
+    };
+    for (text, blamed, message, label, fixed) in cases {
+        let [err] = &errors(text)[..] else {
+            panic!("expected one error for {text:?}: {:?}", errors(text));
+        };
+        assert_eq!(&text[err.range], blamed, "{text:?}");
+        assert_eq!(err.message, message, "{text:?}");
+        let fix = err.fix.as_ref().expect("expected a fix");
+        assert_eq!(fix.label, label);
+        assert_eq!(apply_fix(text, fix), fixed);
+        assert!(errors(fixed).is_empty(), "{fixed:?}");
+    }
+}
+
+/// The member block of a trait missing `requires` parses as its body: the
+/// missing keyword is the only error.
+#[test]
+fn trait_missing_requires_keeps_members() {
+    check_errors(
+        r#"
+trait Min = {
+    min: fn(Self, Self) -> Self;
+};
+"#,
+        expect![[r#"
+            13..14: expected `requires` before `{`: a trait lists its members in `requires { ... }`
+        "#]],
+    );
+}

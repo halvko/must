@@ -104,9 +104,10 @@ fn item(p: &mut Parser<'_>) {
     if p.eat(COLON) {
         type_(p);
     }
-    if p.eat(EQ) {
+    let has_eq = p.eat(EQ);
+    if has_eq || (node == TRAIT_ITEM && at_trait_constructor(p)) {
         if node == TRAIT_ITEM {
-            trait_rhs(p);
+            trait_rhs(p, has_eq);
         } else {
             expr(p);
         }
@@ -218,9 +219,9 @@ fn trailing_clauses(p: &mut Parser<'_>) {
 /// parse-and-reserve). Only the plain non-generic `requires { ... }` form
 /// is semantically supported; binders, clauses, `unsafe` and aliases
 /// parse cleanly and are rejected by validation.
-fn trait_rhs(p: &mut Parser<'_>) {
-    if p.at(REQUIRES_KW) || (p.at(UNSAFE_KW) && p.nth(1) == REQUIRES_KW) {
-        requires_def(p);
+fn trait_rhs(p: &mut Parser<'_>, has_eq: bool) {
+    if at_trait_constructor(p) {
+        requires_def(p, has_eq);
         return;
     }
     // Alias RHS: `Trait + Trait + ...` — reserved.
@@ -236,15 +237,45 @@ fn trait_rhs(p: &mut Parser<'_>) {
     m.complete(p, TRAIT_ALIAS);
 }
 
+/// At `unsafe? requires` or `unsafe? {`: a trait constructor, its
+/// `requires` possibly missing.
+fn at_trait_constructor(p: &Parser<'_>) -> bool {
+    let n = usize::from(p.at(UNSAFE_KW));
+    matches!(p.nth(n), REQUIRES_KW | L_BRACE)
+}
+
 /// `unsafe? requires ::<binders>? clause,* { member* }` — the trait
 /// constructor. Clauses (`Self: Iterator`) constrain like a `with`
 /// clause; the brace holds the requirement members (the shared member
 /// grammar: colon-declares are the live form, equals-defines are
 /// reserved defaults).
-fn requires_def(p: &mut Parser<'_>) {
+fn requires_def(p: &mut Parser<'_>, has_eq: bool) {
     let m = p.start();
+    // A missing `=` or `requires` is one error at the first gap, and the
+    // constructor parses as if both were there.
+    if !has_eq {
+        let at_unsafe = p.at(UNSAFE_KW);
+        let keyword_missing = p.nth(usize::from(at_unsafe)) != REQUIRES_KW;
+        let (label, insert) = match (at_unsafe, keyword_missing) {
+            (false, false) => ("Insert `=`", "= requires"),
+            (false, true) => ("Insert `= requires`", "= requires {"),
+            (true, false) => ("Insert `=`", "= unsafe"),
+            (true, true) => ("Insert `= requires`", "= unsafe requires"),
+        };
+        p.error_replacing_current(
+            "expected `=`: a trait is declared `trait Name = requires { ... }`",
+            label,
+            insert,
+        );
+    }
     p.eat(UNSAFE_KW);
-    p.bump(REQUIRES_KW);
+    if !p.eat(REQUIRES_KW) && has_eq {
+        p.error_replacing_current(
+            "expected `requires` before `{`: a trait lists its members in `requires { ... }`",
+            "Insert `requires`",
+            "requires {",
+        );
+    }
     if p.at(COLON2) && p.nth(1) == L_ANGLE {
         generic_param_list(p);
     }
