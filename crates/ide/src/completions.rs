@@ -1585,6 +1585,9 @@ fn dispatch_ty(ty: &hir::Ty) -> &hir::Ty {
 /// members of every trait implemented for its type, from
 /// [`hir::impl_dot_offers`], the enumeration impl-directed resolution picks
 /// from.
+///
+/// When the position expects a type the receiver reaches by deref, field
+/// and borrow, that chain leads the list ([`projection_items`], P17).
 fn field_items(
     db: &RootDatabase,
     file: SourceFile,
@@ -1637,6 +1640,15 @@ fn field_items(
             item
         })
         .collect();
+    items.extend(projection_items(
+        db,
+        ty,
+        &field_derefs,
+        exclusive,
+        dot,
+        edit_range,
+        expected,
+    ));
     // Dot-callable inherent members of a named receiver, offered next to the
     // fields they share the dot with. A borrow receiver's members hang off the
     // REFERENT's declaration; which of them the dot offers, and which it
@@ -1725,6 +1737,96 @@ fn field_items(
             expected,
             edit_range,
         ));
+    }
+    items
+}
+
+/// The place chains the dot can finish into the position's expected type
+/// (P17), the deref, projection and borrow Rust would have inserted: `*` per
+/// borrow layer when the referent is expected (`x.*`, `x.*.*`), a borrow of
+/// the receiver itself when a borrow of it is expected (`x.&`), and a field
+/// borrowed through the receiver's layers when a borrow of the field is
+/// expected (`p.*.x.&`). Nothing without an expectation: unasked, these are
+/// noise next to the fields and members.
+///
+/// A borrow keeps its expected mutability and is refused when the receiver
+/// can't provide a `&mut` (`exclusive`, as for members); a deref is refused
+/// when it reads a value that can't be copied out (M07).
+fn projection_items(
+    db: &RootDatabase,
+    ty: &hir::Ty,
+    field_derefs: &str,
+    exclusive: bool,
+    dot: TextSize,
+    edit_range: TextRange,
+    expected: Option<&hir::Ty>,
+) -> Vec<CompletionItem> {
+    let Some(expected) = expected else {
+        return Vec::new();
+    };
+    // Regions are left out: an expectation inside a body carries the
+    // body's own, which the checker relates to the receiver's.
+    let same = |a: &hir::Ty, b: &hir::Ty| matches_as_value(&a.erase_regions(), &b.erase_regions());
+    let item = |label: String, detail: &hir::Ty, filter: String, refused: bool| {
+        let mut item = completion_item(
+            label,
+            CompletionItemKind::Field,
+            Provenance::Item,
+            0,
+            Some(detail.display()),
+            edit_range,
+        );
+        item.filter_text = filter;
+        item.whole_expr = true;
+        if refused { refuse(item) } else { item }
+    };
+    let mut items = Vec::new();
+    let mut layer = ty;
+    let mut derefs = 0;
+    let mut layers_exclusive = true;
+    while let hir::Ty::Borrow {
+        mutable, referent, ..
+    } = layer
+    {
+        derefs += 1;
+        layers_exclusive &= *mutable;
+        layer = referent;
+        if same(layer, expected) {
+            let label = vec!["*"; derefs].join(".");
+            // A `&mut` read out is a reborrow, which only `&mut` layers
+            // grant; anything else read out is a copy.
+            let refused = match layer {
+                hir::Ty::Borrow { mutable: true, .. } => !layers_exclusive,
+                _ => !hir::capability::is_copyable(db, layer),
+            };
+            items.push(item(label.clone(), layer, label, refused));
+        }
+    }
+    let hir::Ty::Borrow {
+        mutable, referent, ..
+    } = expected
+    else {
+        return items;
+    };
+    let borrow = if *mutable { "&mut" } else { "&" };
+    let refused = *mutable && !exclusive;
+    if same(ty, referent) {
+        // Written over the dot, like a member's written borrow (P16).
+        let mut receiver = item(borrow.to_owned(), expected, format!(".{borrow}"), refused);
+        receiver.text_edit.range = TextRange::new(dot, edit_range.end());
+        receiver.text_edit.insert = InsertText::Plain(format!(".{borrow}"));
+        items.push(receiver);
+    }
+    let record = record_of(db, dispatch_ty(&hir::deref_receiver(ty).receiver));
+    for (name, field_ty) in record.iter().flat_map(|record| record.fields.iter()) {
+        if same(field_ty, referent) {
+            items.push(item(
+                format!("{field_derefs}{name}.{borrow}"),
+                expected,
+                name.clone(),
+                refused,
+            ));
+        }
     }
     items
 }
@@ -2391,11 +2493,25 @@ fn expected_type_at(
         }
     }
 
-    // No prefix: the only provable hole is a `let`'s missing initializer —
-    // the nearest non-trivia token left of the cursor must be its `=`.
+    // No prefix: the provable holes are a `let`'s missing initializer —
+    // the nearest non-trivia token left of the cursor is its `=` — and a
+    // dot awaiting its name, whose field expression the body already holds.
     let mut token = real_root.token_at_offset(offset).left_biased()?;
     while matches!(token.kind(), SyntaxKind::WHITESPACE | SyntaxKind::COMMENT) {
         token = token.prev_token()?;
+    }
+    if token.kind() == SyntaxKind::DOT {
+        let mut node = token.parent()?;
+        let item = hir::checkable_item_at(db, file, &node)?;
+        let (_, source_map) = hir::body_with_source_map(db, item);
+        let inference = hir::infer::infer(db, item);
+        while node.text_range().end() == token.text_range().end() {
+            if let Some(expr) = source_map.expr_for_node(SyntaxNodePtr::new(&node)) {
+                return inference.expectation_of_expr.get(expr).cloned();
+            }
+            node = node.parent()?;
+        }
+        return None;
     }
     if token.kind() != SyntaxKind::EQ {
         return None;

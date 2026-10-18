@@ -145,6 +145,15 @@
   `static`, a shared or raw step). Examples: `.&mut.add()` on an immutable root, `add()` on
   `Counter.&`, `*.add()` on `Counter.&mut.&`, and `s.*.c.add()` with `c: Counter.&mut` and
   `s: S.&`.
+- **P17** Completion writes the place chain the expected type asks for (G14). When the
+  position expects a type the dot's receiver reaches by deref, field projection and borrow,
+  the dot offers that chain first: `*` per borrow layer to the expected referent (`n.*.*`), a
+  borrow of the receiver itself (`n.&`), or a field borrowed through the receiver's layers
+  (`other.*.x.&` where `usize.&` is expected). The borrow keeps the expected mutability. This
+  is what Rust's auto-ref and auto-deref would have inserted, written out, because must's
+  compiler inserts none of it. Without an expectation no chain is offered. A chain the checker
+  would refuse is offered and sorted last, as in P16: a `&mut` the receiver can't provide, or a
+  value that can't be copied out of its borrow (M07).
 - **P13** The examples smoke target checks and runs every example against recorded snapshots
   under a timeout, so a hang fails naming the file, and a coverage guard fails if an example
   ships untested.
