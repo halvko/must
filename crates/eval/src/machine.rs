@@ -802,7 +802,8 @@ impl<'db, M: Mode> Machine<'db, M> {
     /// Execute exactly one statement or terminator of the topmost frame.
     /// On `Err`, the frame stack is left intact for inspection.
     pub fn step(&mut self) -> Result<StepEvent, EvalError> {
-        self.step_frame().map_err(|err| self.blame_caller_of_prelude(err))
+        self.step_frame()
+            .map_err(|err| self.blame_caller_of_prelude(err))
     }
 
     /// An error raised inside a prelude item is reported at the call in
@@ -816,7 +817,11 @@ impl<'db, M: Mode> Machine<'db, M> {
         if loc.file != prelude {
             return err;
         }
-        let caller = self.frames.iter().rev().find(|frame| frame.loc.file != prelude);
+        let caller = self
+            .frames
+            .iter()
+            .rev()
+            .find(|frame| frame.loc.file != prelude);
         if let Some(frame) = caller {
             let body = &self.lowered(&frame.loc).bodies[frame.body];
             let origin = body.blocks[frame.block].terminator.origin;
@@ -2571,6 +2576,22 @@ impl<'db, M: Mode> Machine<'db, M> {
             }
         }
         match builtin {
+            Builtin::IndexOutOfBounds => {
+                expect_args(self, 2)?;
+                let usize_arg = |value: &Value| match value {
+                    Value::Int(iv) => iv.usize_payload(),
+                    _ => None,
+                };
+                let (Some(len), Some(index)) = (usize_arg(&args[0]), usize_arg(&args[1])) else {
+                    return Err(self.ill_typed("two `usize` arguments", &args[0], loc, origin));
+                };
+                Err(EvalError {
+                    kind: EvalErrorKind::Panic,
+                    message: hir::diag::index_out_of_bounds(len, index),
+                    origin: Some((loc.clone(), origin)),
+                    notes: Vec::new(),
+                })
+            }
             Builtin::Panic => {
                 expect_args(self, 1)?;
                 let Value::Str(text) = &args[0] else {

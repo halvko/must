@@ -1718,6 +1718,38 @@ impl<'a, 'db> Emitter<'a, 'db> {
                         // `panic` diverges: no continuation is emitted.
                         return Ok(());
                     }
+                    // The prelude's `index` out of range: the same trap
+                    // as an out-of-range element step.
+                    Some(CallTarget::IndexOutOfBounds) => {
+                        let [len, index] = args.as_slice() else {
+                            return Err(Refusal::new(
+                                "an `index_out_of_bounds` without two arguments",
+                                &ctx.loc,
+                                origin,
+                            ));
+                        };
+                        let Some(len) = self.const_int(ctx, len)? else {
+                            return Err(Refusal::new(
+                                "an array length that is not known at compile time",
+                                &ctx.loc,
+                                origin,
+                            ));
+                        };
+                        let Ok(len) = u32::try_from(len) else {
+                            return Err(Refusal::new(
+                                format!("an array of {len} elements (too large to flatten)"),
+                                &ctx.loc,
+                                origin,
+                            ));
+                        };
+                        let key = match self.const_int(ctx, index)? {
+                            Some(index) => TrapKey::IndexConstant { len, index },
+                            None => TrapKey::IndexDynamic { len },
+                        };
+                        let trap = self.traps.intern_key(key);
+                        self.trap(ctx, trap);
+                        return Ok(());
+                    }
                     Some(CallTarget::Instance(callee)) => {
                         let (params, results) = self.signature(&callee)?;
                         let (expected, results) = (params.len() as u32, results.len() as u32);
