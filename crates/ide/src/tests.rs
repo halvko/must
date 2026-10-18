@@ -1998,20 +1998,20 @@ static make_point = fn (x: usize) -> $0 { x };
             Point Struct (struct { x: usize, y: usize })
             ReadLineResult Enum (enum { Line(str), End })
             Utf8Result Enum (enum { Ok(str), Err })
-            bool Keyword
-            char Keyword
-            i16 Keyword
-            i32 Keyword
-            i64 Keyword
-            i8 Keyword
-            isize Keyword
-            str Keyword
-            string Keyword
-            u16 Keyword
-            u32 Keyword
-            u64 Keyword
-            u8 Keyword
-            usize Keyword
+            bool Struct
+            char Struct
+            i16 Struct
+            i32 Struct
+            i64 Struct
+            i8 Struct
+            isize Struct
+            str Struct
+            string Struct
+            u16 Struct
+            u32 Struct
+            u64 Struct
+            u8 Struct
+            usize Struct
             fn Keyword
             struct Keyword
             unsafe Keyword
@@ -2829,20 +2829,20 @@ trait Shape = requires { } with { impl $0 }
             Point Struct (struct { x: usize })
             ReadLineResult Enum (enum { Line(str), End })
             Utf8Result Enum (enum { Ok(str), Err })
-            bool Keyword
-            char Keyword
-            i16 Keyword
-            i32 Keyword
-            i64 Keyword
-            i8 Keyword
-            isize Keyword
-            str Keyword
-            string Keyword
-            u16 Keyword
-            u32 Keyword
-            u64 Keyword
-            u8 Keyword
-            usize Keyword
+            bool Struct
+            char Struct
+            i16 Struct
+            i32 Struct
+            i64 Struct
+            i8 Struct
+            isize Struct
+            str Struct
+            string Struct
+            u16 Struct
+            u32 Struct
+            u64 Struct
+            u8 Struct
+            usize Struct
         "#]],
     );
 }
