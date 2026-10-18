@@ -192,7 +192,9 @@ pub(crate) fn library_trait_impls<'db>(db: &'db dyn Db, library: LibraryId<'db>)
 /// with-chain traversal ([`item_tree::semantic_impl_elements`]), so the
 /// index, its syntax lookups and member minting can never disagree about
 /// which elements exist or their order.
-fn trait_impl_elements(decl: &syntax::ast::Item) -> Vec<(syntax::ast::ImplElement, String)> {
+pub(crate) fn trait_impl_elements(
+    decl: &syntax::ast::Item,
+) -> Vec<(syntax::ast::ImplElement, String)> {
     item_tree::semantic_impl_elements(decl)
         .into_iter()
         .filter_map(|(element, home)| match home {
@@ -321,11 +323,23 @@ pub(crate) fn impl_dict_members(
         .collect()
 }
 
+/// The member of the impl at `site` that implements the requirement
+/// `name`. `None` is what "missing" means, for inference, dictionaries, the
+/// impl's error, its quick fix and member completion alike.
+pub(crate) fn implementing_member<'db>(
+    db: &'db dyn Db,
+    site: &ImplSite,
+    name: &str,
+) -> Option<&'db item_tree::MemberData> {
+    let qualified = format!("{}::{name}", site.head);
+    item_tree::type_members(db, site.owner.to_id(db))
+        .iter()
+        .find(|m| m.name == qualified)
+}
+
 /// What the impl at `site` holds for the requirement `name`.
 fn site_member(db: &dyn Db, site: &ImplSite, name: &str) -> ImplMember {
-    let qualified = format!("{}::{name}", site.head);
-    let members = item_tree::type_members(db, site.owner.to_id(db));
-    let Some(member) = members.iter().find(|m| m.name == qualified) else {
+    let Some(member) = implementing_member(db, site, name) else {
         return ImplMember::Missing {
             owner: site.owner.clone(),
         };

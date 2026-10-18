@@ -27,8 +27,8 @@ pub mod unsafe_check;
 mod tests;
 
 use base_db::{Db, SourceFile, parse};
-use syntax::TextRange;
 use syntax::ast::{self, AstNode as _};
+use syntax::{TextRange, TextSize};
 
 pub use body::{
     BindingId, Body, BodySourceMap, ExprId, PatId, PlaceChain, PlaceRoot, body_with_source_map,
@@ -2678,6 +2678,7 @@ fn missing_members_fix(
     let stubs: Vec<String> = stubbed
         .iter()
         .filter_map(|req| member_stub(&mut speller, req))
+        .map(|stub| stub.text())
         .collect();
     if stubs.is_empty() {
         return None;
@@ -2721,11 +2722,42 @@ fn members_fix(
     ))
 }
 
-/// `name = fn::<binder>(a: T, b: U) -> R { panic("unimplemented name") };`,
-/// its types written as `speller` spells them. The parameters get plain
-/// names; the unused-binding warning and its rename fix cover them.
-/// `panic(..)` types as `!`, so the body adds no error of its own.
-fn member_stub(speller: &mut StubSpeller<'_>, req: &ast::Member) -> Option<String> {
+/// Whether `member`, the syntax of one of the `missing` requirements,
+/// spells its full signature. One that doesn't carries its own error and
+/// gets no stub.
+fn spells_full_signature(missing: &[&item_tree::TraitRequirement], member: &ast::Member) -> bool {
+    let name = member.name().map(|n| n.text());
+    missing
+        .iter()
+        .any(|req| name.as_deref() == Some(req.name.as_str()) && req.sig.is_some())
+}
+
+/// An impl member written out from its requirement, up to its body:
+/// `name = fn::<binder>(a: T, b: U) -> R`.
+struct StubHead {
+    name: String,
+    /// The requirement's signature as written: `fn(Self) -> usize`.
+    requirement: String,
+    head: String,
+}
+
+impl StubHead {
+    /// The whole member, as the "Add missing members" fix writes it:
+    /// the head and a `panic` body, which types as `!` and so adds no
+    /// error of its own.
+    fn text(&self) -> String {
+        format!(
+            "{} {{ panic(\"unimplemented {}\") }};",
+            self.head, self.name
+        )
+    }
+}
+
+/// The head of a member stub for a requirement, its types written as
+/// `speller` spells them. The parameters get plain names; the
+/// unused-binding warning and its rename fix cover them. On `None` the
+/// speller keeps none of the imports it took on the way.
+fn member_stub(speller: &mut StubSpeller<'_>, req: &ast::Member) -> Option<StubHead> {
     let mark = speller.mark();
     let stub = write_member_stub(speller, req);
     if stub.is_none() {
@@ -2734,7 +2766,7 @@ fn member_stub(speller: &mut StubSpeller<'_>, req: &ast::Member) -> Option<Strin
     stub
 }
 
-fn write_member_stub(speller: &mut StubSpeller<'_>, req: &ast::Member) -> Option<String> {
+fn write_member_stub(speller: &mut StubSpeller<'_>, req: &ast::Member) -> Option<StubHead> {
     let name = req.name()?.text();
     let Some(ast::Type::FnType(fn_type)) = req.ty() else {
         return None;
@@ -2764,9 +2796,90 @@ fn write_member_stub(speller: &mut StubSpeller<'_>, req: &ast::Member) -> Option
         .collect::<Option<Vec<_>>>()?
         .join(", ");
     let ret = speller.spell(fn_type.ret_type()?.ty()?.syntax(), &binder)?;
-    Some(format!(
-        "{name} = fn{binder_text}({params}) -> {ret} {{ panic(\"unimplemented {name}\") }};"
-    ))
+    Some(StubHead {
+        requirement: fn_type.syntax().text().to_string(),
+        head: format!("{name} = fn{binder_text}({params}) -> {ret}"),
+        name,
+    })
+}
+
+/// A missing member of a trait impl, for member completion in its body.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MemberStub {
+    pub name: String,
+    /// The requirement's signature as written: `fn(Self) -> usize`, or
+    /// whatever of it the trait wrote.
+    pub requirement: String,
+    /// The member up to its body, `name = fn(a: Self) -> usize`; just
+    /// `name =` when the requirement does not spell its full signature or
+    /// names an item the impl's file has no free name for.
+    pub head: String,
+    /// The edit adding the `use` items this stub's names need in the
+    /// impl's file, if they need any.
+    pub imports: Option<syntax::TextEdit>,
+}
+
+/// The members the trait impl starting at `impl_start` (its `impl`
+/// keyword) does not implement yet, in requirement order: the same ones
+/// its "is missing the members" error names. Each stub's `imports` cover
+/// only its own names. Empty for an inherent impl or one whose head does
+/// not resolve.
+pub fn missing_member_stubs(
+    db: &dyn Db,
+    file: SourceFile,
+    impl_start: TextSize,
+) -> Vec<MemberStub> {
+    let impls = traits::trait_impls(db, file);
+    // Each owner's chain is walked once, however many impls it has.
+    let mut starts: rustc_hash::FxHashMap<ItemLoc, Vec<TextSize>> = Default::default();
+    let Some(site) = impls.sites_in(file).map(|(_, site)| site).find(|site| {
+        let owner_starts = starts.entry(site.owner.clone()).or_insert_with(|| {
+            item_source(db, site.owner.to_id(db))
+                .map(|decl| {
+                    (traits::trait_impl_elements(&decl).into_iter())
+                        .map(|(element, _)| element.syntax().text_range().start())
+                        .collect()
+                })
+                .unwrap_or_default()
+        });
+        owner_starts.get(site.ordinal as usize) == Some(&impl_start)
+    }) else {
+        return Vec::new();
+    };
+    let (Some(trait_loc), Some(_)) = (&site.trait_, &site.self_key) else {
+        return Vec::new();
+    };
+    let missing: Vec<&item_tree::TraitRequirement> =
+        item_tree::trait_requirements(db, trait_loc.to_id(db))
+            .iter()
+            .filter(|req| traits::implementing_member(db, site, &req.name).is_none())
+            .collect();
+    let names: Vec<&str> = missing.iter().map(|req| req.name.as_str()).collect();
+    requirement_members(db, trait_loc, &names)
+        .iter()
+        .filter_map(|req| {
+            let name = req.name()?.text();
+            let mut speller = StubSpeller::new(db, trait_loc.file, file);
+            let stub = spells_full_signature(&missing, req)
+                .then(|| member_stub(&mut speller, req))
+                .flatten();
+            Some(match stub {
+                Some(stub) => MemberStub {
+                    name: stub.name,
+                    requirement: stub.requirement,
+                    head: stub.head,
+                    imports: speller.imports_edit(),
+                },
+                None => MemberStub {
+                    requirement: (req.ty())
+                        .map_or_else(String::new, |ty| ty.syntax().text().to_string()),
+                    head: format!("{name} ="),
+                    name,
+                    imports: None,
+                },
+            })
+        })
+        .collect()
 }
 
 /// Writes a requirement's types for an impl in another file. A type or
@@ -3149,8 +3262,7 @@ fn trait_definition_diagnostics(db: &dyn Db, file: SourceFile, diagnostics: &mut
         let member_ranges = MemberNameRanges::new(db, owner_id);
         let mut missing: Vec<&item_tree::TraitRequirement> = Vec::new();
         for req in requirements {
-            let qualified = format!("{}::{}", site.head, req.name);
-            let Some(member) = site_members.iter().find(|m| m.name == qualified) else {
+            let Some(member) = traits::implementing_member(db, site, &req.name) else {
                 missing.push(req);
                 continue;
             };
@@ -3220,16 +3332,8 @@ fn trait_definition_diagnostics(db: &dyn Db, file: SourceFile, diagnostics: &mut
         {
             let names: Vec<&str> = missing.iter().map(|req| req.name.as_str()).collect();
             let missing_reqs = requirement_members(db, trait_loc, &names);
-            // A requirement that does not spell its full signature carries
-            // its own error and gets no stub.
-            let stubbed: Vec<ast::Member> = missing_reqs
-                .iter()
-                .filter(|member| {
-                    let name = member.name().map(|n| n.text());
-                    missing
-                        .iter()
-                        .any(|req| name.as_deref() == Some(req.name.as_str()) && req.sig.is_some())
-                })
+            let stubbed: Vec<ast::Member> = (missing_reqs.iter())
+                .filter(|member| spells_full_signature(&missing, member))
                 .cloned()
                 .collect();
             let names = names
