@@ -1696,6 +1696,39 @@ fn reject_nested_generic_binder(fn_literal: &ast::FnLiteral, errors: &mut Vec<Sy
     });
 }
 
+/// The edits that delete list element `node` and the comma before it,
+/// with the whitespace between them, but no comment written there. Back to
+/// `previous`'s end when no comma is found (broken source).
+fn removal_with_separator(node: &SyntaxNode, previous: &SyntaxNode) -> Vec<TextEdit> {
+    let end = node.text_range().end();
+    let mut cut = node.text_range().start();
+    let mut element = node.prev_sibling_or_token();
+    let mut comma = None;
+    while let Some(e) = element {
+        match e.kind() {
+            SyntaxKind::WHITESPACE if comma.is_none() && e.text_range().end() == cut => {
+                cut = e.text_range().start();
+            }
+            SyntaxKind::WHITESPACE | SyntaxKind::COMMENT => {}
+            SyntaxKind::COMMA => {
+                comma = Some(e.text_range());
+                break;
+            }
+            _ => break,
+        }
+        element = e.prev_sibling_or_token();
+    }
+    let delete = |range| TextEdit {
+        range,
+        insert: String::new(),
+    };
+    match comma {
+        Some(comma) if comma.end() == cut => vec![delete(TextRange::new(comma.start(), end))],
+        Some(comma) => vec![delete(comma), delete(TextRange::new(cut, end))],
+        None => vec![delete(TextRange::new(previous.text_range().end(), end))],
+    }
+}
+
 /// Region parameters come FIRST in every declared binder list
 /// (`fn::<@a, @b, T, U>`), before every type and const parameter.
 ///
@@ -1717,33 +1750,49 @@ fn require_regions_first(list: &ast::GenericParamList, errors: &mut Vec<SyntaxEr
     // The first type or const parameter, and the placeholder that stands
     // for it when it has no name (broken code): the ordering is about the
     // KINDS, so a nameless parameter counts as one.
-    let mut spellable: Option<(Option<ast::Name>, &str)> = None;
+    let mut spellable: Option<(ast::GenericParam, Option<ast::Name>, &str)> = None;
+    let mut previous: Option<ast::GenericParam> = None;
     for param in list.params() {
         match &param {
             ast::GenericParam::TypeParam(p) => {
-                spellable.get_or_insert((p.name(), "T"));
+                spellable.get_or_insert((param.clone(), p.name(), "T"));
             }
             ast::GenericParam::ConstParam(p) => {
-                spellable.get_or_insert((p.name(), "N"));
+                spellable.get_or_insert((param.clone(), p.name(), "N"));
             }
             ast::GenericParam::RegionParam(region) => {
-                let Some((earlier, placeholder)) = &spellable else {
-                    continue;
-                };
-                let name = region.name().unwrap_or_else(|| "@".to_owned());
-                let earlier = earlier
-                    .as_ref()
-                    .map_or_else(|| (*placeholder).to_owned(), |n| n.text());
-                errors.push(SyntaxError {
-                    message: format!(
-                        "region parameters come first in a binder; \
-                         move `{name}` before `{earlier}`"
-                    ),
-                    range: param.syntax().text_range(),
-                    fix: None,
-                });
+                if let Some((first, earlier, placeholder)) = &spellable {
+                    let name = region.name().unwrap_or_else(|| "@".to_owned());
+                    let earlier = earlier
+                        .as_ref()
+                        .map_or_else(|| (*placeholder).to_owned(), |n| n.text());
+                    // Moved, bounds and all, to just before the first type
+                    // or const parameter; the separator it leaves behind
+                    // goes with it, and a comment beside it stays.
+                    let range = param.syntax().text_range();
+                    let fix = previous.as_ref().map(|previous| {
+                        let mut edits = vec![TextEdit {
+                            range: TextRange::empty(first.syntax().text_range().start()),
+                            insert: format!("{}, ", param.syntax().text()),
+                        }];
+                        edits.extend(removal_with_separator(param.syntax(), previous.syntax()));
+                        Fix {
+                            label: format!("Move `{name}` before `{earlier}`"),
+                            edits,
+                        }
+                    });
+                    errors.push(SyntaxError {
+                        message: format!(
+                            "region parameters come first in a binder; \
+                             move `{name}` before `{earlier}`"
+                        ),
+                        range,
+                        fix,
+                    });
+                }
             }
         }
+        previous = Some(param);
     }
 }
 
@@ -1965,6 +2014,15 @@ const UNSAFE_ONLY_ON_EXTERN: &str = "only an `extern static` can be `unsafe`: th
 /// The colon-declared MEMBER signature is excused from one rule: its binder
 /// is live (a trait requirement may be a generic fn).
 fn validate_fn_type(fn_type: &ast::FnType, errors: &mut Vec<SyntaxError>) {
+    // A `fn` with a body after a construction field's `:` is a literal kept
+    // as an error node (the `:` error says what to write); its parameters
+    // are a literal's, and may well be named.
+    let in_literal = fn_type.syntax().parent().map(|p| p.kind()) == Some(SyntaxKind::ERROR);
+    if !in_literal {
+        for param in fn_type.param_list().iter().flat_map(|list| list.params()) {
+            reject_fn_type_param_pattern(&param, errors);
+        }
+    }
     let is_member_signature =
         fn_type.syntax().parent().map(|p| p.kind()) == Some(SyntaxKind::MEMBER);
     // A generic function is declared by an ITEM; a type mentions instances
@@ -1988,6 +2046,53 @@ fn validate_fn_type(fn_type: &ast::FnType, errors: &mut Vec<SyntaxError>) {
         });
     }
 }
+
+/// A fn type's parameter is a bare type: a leading `mut`, a `name:`, or a
+/// pattern before a `:` (`struct { x }: T`) is refused once, squiggling what
+/// is to go (only the `:` after a pattern), and the fix keeps only the type
+/// after it. A `:` with no type
+/// after it (`x:`) has nothing to keep and gets no fix.
+fn reject_fn_type_param_pattern(param: &ast::Param, errors: &mut Vec<SyntaxError>) {
+    let colon = param.colon_token();
+    // What is refused ends at the `:`, or at a `mut` written alone.
+    let Some(end) = (colon.clone().or_else(|| param.mut_token())).map(|t| t.text_range().end())
+    else {
+        return;
+    };
+    let start = param.syntax().text_range().start();
+    // The type that stays: the one after the `:`, or after `mut` alone.
+    let kept = param
+        .syntax()
+        .children()
+        .filter_map(ast::Type::cast)
+        .find(|ty| ty.syntax().text_range().start() >= end);
+    let fix = kept.map(|ty| Fix {
+        label: "Keep only the type".to_owned(),
+        edits: vec![TextEdit {
+            range: TextRange::new(start, ty.syntax().text_range().start()),
+            insert: String::new(),
+        }],
+    });
+    // A name or `mut` is squiggled whole; a pattern that parsed as a type
+    // (`struct { x }: T`) only at its `:`, so the squiggle stays narrow.
+    let pattern_before_colon = param
+        .syntax()
+        .children()
+        .filter_map(ast::Type::cast)
+        .any(|ty| ty.syntax().text_range().end() <= end);
+    let range = match colon {
+        Some(colon) if pattern_before_colon => colon.text_range(),
+        _ => TextRange::new(start, end),
+    };
+    errors.push(SyntaxError {
+        message: FN_TYPE_PARAM_IS_BARE.to_owned(),
+        range,
+        fix,
+    });
+}
+
+const FN_TYPE_PARAM_IS_BARE: &str =
+    "a function type's parameters are bare types, not patterns: write `fn(usize, str)`";
 
 /// `unsafe unsafe extern static`, `static const`: each marker and keyword
 /// is written once, and an item has one keyword. One error per extra token,

@@ -2599,9 +2599,10 @@ fn anon_fn_type(p: &mut Parser<'_>) -> CompletedMarker {
     anon_fn_type_deferring(p, None)
 }
 
-/// [`anon_fn_type`], holding the errors only a type has (a missing `(`, a
-/// named parameter) in `deferred` rather than reporting them, for a caller
-/// that may yet read the `fn` as a literal.
+/// [`anon_fn_type`], holding the error only a type has (a missing `(`) in
+/// `deferred` rather than reporting it, for a caller that may yet read the
+/// `fn` as a literal. A named parameter is validation's to refuse, which
+/// skips a fn type kept inside such a literal's error node.
 fn anon_fn_type_deferring(p: &mut Parser<'_>, mut deferred: Deferred<'_>) -> CompletedMarker {
     let m = p.start();
     p.eat(UNSAFE_KW);
@@ -2612,7 +2613,7 @@ fn anon_fn_type_deferring(p: &mut Parser<'_>, mut deferred: Deferred<'_>) -> Com
         generic_param_list(p);
     }
     if p.at(L_PAREN) {
-        fn_type_param_list(p, deferred);
+        fn_type_param_list(p);
     } else {
         defer_error(
             p,
@@ -2637,35 +2638,28 @@ fn anon_fn_type_deferring(p: &mut Parser<'_>, mut deferred: Deferred<'_>) -> Com
 /// fn-pointer types (E0561) — and the shapes that only a pattern could mean
 /// are refused where they are written instead of being reinterpreted as
 /// something else.
-fn fn_type_param_list(p: &mut Parser<'_>, mut deferred: Deferred<'_>) {
+fn fn_type_param_list(p: &mut Parser<'_>) {
     let m = p.start();
     p.bump(L_PAREN);
-    comma_list(p, R_PAREN, |p| fn_type_param(p, deferred.as_deref_mut()));
+    comma_list(p, R_PAREN, fn_type_param);
     m.complete(p, PARAM_LIST);
 }
 
 /// One parameter of a fn TYPE: a bare `Type`. A leading `mut` or `name:`, or
 /// a pattern that parsed as a type and then met its colon (`struct { x }:
-/// T`), is refused once and consumed, so one written mistake costs the
-/// reader one message, not the rest of the list.
-fn fn_type_param(p: &mut Parser<'_>, mut deferred: Deferred<'_>) {
+/// T`), is consumed into the `PARAM`, so one written mistake costs the
+/// reader one message (validation's, which carries the fix), not the rest
+/// of the list.
+fn fn_type_param(p: &mut Parser<'_>) {
     let m = p.start();
     let at_name = |p: &Parser<'_>| matches!(p.current(), IDENT | HOLE) && p.nth(1) == COLON;
-    let mut refuse = |p: &mut Parser<'_>| defer_error(p, &mut deferred, FN_TYPE_PARAM_IS_BARE);
-    let refused = p.at(MUT_KW) || at_name(p);
-    if refused {
-        refuse(p);
-        p.eat(MUT_KW);
-        if at_name(p) {
-            p.bump_any();
-            p.bump(COLON);
-        }
+    p.eat(MUT_KW);
+    if at_name(p) {
+        p.bump_any();
+        p.bump(COLON);
     }
     type_(p);
     if p.at(COLON) {
-        if !refused {
-            refuse(p);
-        }
         p.bump(COLON);
         type_(p);
     }
@@ -2682,9 +2676,6 @@ fn defer_error(p: &mut Parser<'_>, deferred: &mut Deferred<'_>, msg: &'static st
         None => p.error(msg),
     }
 }
-
-const FN_TYPE_PARAM_IS_BARE: &str =
-    "a function type's parameters are bare types, not patterns: write `fn(usize, str)`";
 
 /// The core (non-postfix) type. Returns `None` only when nothing was parsed
 /// (the `_ => error` arm), so the postfix loop in [`type_`] has no operand.
