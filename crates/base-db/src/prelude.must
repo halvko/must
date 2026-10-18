@@ -12,6 +12,14 @@ static index = const fn::<@a, T, const N: usize>(s: [T; N].&::<@a>, i: usize) ->
     }
 };
 
+// `a[i].&raw`: a panic unless `i` is an element of an `[_; N]`. Nothing is
+// borrowed, so raw pointers to other elements stay valid.
+static check_index = const fn::<const N: usize>(i: usize) -> () {
+    if i >= N {
+        index_out_of_bounds(N, i)
+    }
+};
+
 // `a[i]` written or borrowed `.&mut`: element `i` of `s`, or a panic.
 static index_mut = const fn::<@a, T, const N: usize>(s: [T; N].&mut::<@a>, i: usize) -> T.&mut::<@a> {
     if i >= N {

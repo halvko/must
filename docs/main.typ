@@ -1176,9 +1176,10 @@ beyond their frame's life, nor address preservation across copies: copying a
 value copies the pointer bits, never the pointee's identity. Return an
 `x.&raw` past the frame that owns `x` and a later deref is a dangling
 pointer. The interpreter *detects* the misuse cases and traps
-deterministically. Address-taking itself never bounds-checks —
-`a[i + 1].&raw` mints silently even past the end — so validity is
-judged where the pointer is *used*: every deref first checks liveness and
+deterministically. An element step is bounds-checked when the
+address is taken (`a[i].&raw` panics for `i` past the end, see Arrays), but
+a pointer moved with `add` or `offset` is not, so validity is judged where
+the pointer is *used*: every deref first checks liveness and
 the pointer's stored path, and a write through one mutates the pointee in
 place, so pointers into it survive the write, exactly like real memory. The
 traps: a deref after the owning frame returned
@@ -2106,7 +2107,20 @@ check-time error naming both lengths. Because the length is known, an index
 the checker can *evaluate* is bounds-checked right then: `let a = [1, 2];
 a[2]` is a compile-time squiggle reading `index out of bounds: the length is
 2 but the index is 2`. The identical text is what a genuinely runtime-only
-index traps with — squiggle text and trap text are one render.
+index panics with — squiggle text and panic text are one render.
+
+Indexing is a function call. `a[i]` is `index(a.&, i).*`, and an element that
+is written or borrowed `.&mut` goes through `index_mut(a.&mut, i)` instead:
+two `const fn`s in the prelude that panic when `i` is out of range. So the
+check happens wherever an element is reached, read, written or borrowed, and
+a const context can index; an index out of range there is a compile error.
+Because the call borrows the whole array, borrows of two different elements
+conflict exactly as two borrows of the array do, and an element that cannot
+be copied cannot be read out (`cannot move out of a borrow`). `a[i].&raw`
+checks the index the same way, through the prelude's `check_index`, but
+borrows nothing: taking `a[1].&raw` leaves an earlier `a[0].&raw` valid.
+There is no unchecked way to name an element: an address past the end is
+something only unsafe code makes, from a pointer it already has.
 
 Arrays are const-legal, which is the flagship pattern: build a table
 imperatively in a `const { ... }` block and *freeze* the finished value into

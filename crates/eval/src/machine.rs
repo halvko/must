@@ -810,24 +810,34 @@ impl<'db, M: Mode> Machine<'db, M> {
     /// the innermost frame outside the prelude: the program's `a[i]`, not
     /// the line of `index` that panicked.
     fn blame_caller_of_prelude(&self, mut err: EvalError) -> EvalError {
+        if let Some((loc, origin)) = &err.origin {
+            err.origin = Some(self.user_site(loc, *origin));
+        }
+        err
+    }
+
+    /// The site to report for `origin` in `loc`: itself, or, inside a
+    /// prelude item, the call in the innermost frame outside the prelude.
+    /// Borrows minted and accesses made while a prelude body runs are
+    /// recorded this way too, so their notes name the program's `a[i]`.
+    fn user_site(&self, loc: &ItemLoc, origin: ExprId) -> (ItemLoc, ExprId) {
         let prelude = base_db::prelude_file(self.db);
-        let Some((loc, _)) = &err.origin else {
-            return err;
-        };
         if loc.file != prelude {
-            return err;
+            return (loc.clone(), origin);
         }
         let caller = self
             .frames
             .iter()
             .rev()
             .find(|frame| frame.loc.file != prelude);
-        if let Some(frame) = caller {
-            let body = &self.lowered(&frame.loc).bodies[frame.body];
-            let origin = body.blocks[frame.block].terminator.origin;
-            err.origin = Some((frame.loc.clone(), origin));
+        match caller {
+            Some(frame) => {
+                let body = &self.lowered(&frame.loc).bodies[frame.body];
+                let origin = body.blocks[frame.block].terminator.origin;
+                (frame.loc.clone(), origin)
+            }
+            None => (loc.clone(), origin),
         }
-        err
     }
 
     fn step_frame(&mut self) -> Result<StepEvent, EvalError> {
@@ -3919,7 +3929,7 @@ enum Access {
     Write,
 }
 
-impl<M> Machine<'_, M> {
+impl<M: Mode> Machine<'_, M> {
     /// The root node of `alloc`, created on first use.
     fn borrow_root(&mut self, alloc: AllocId) -> BorrowTag {
         if let Some(&tag) = self.borrow_roots.get(&alloc) {
@@ -4075,6 +4085,7 @@ impl<M> Machine<'_, M> {
             },
         };
         self.borrow_nodes_scanned += scan.len() as u64;
+        let site = self.user_site(loc, origin);
         let mut touched = false;
         for other in scan {
             if other == tag {
@@ -4095,14 +4106,14 @@ impl<M> Machine<'_, M> {
             match access {
                 Access::Write => {
                     if victim.state != NodeState::Disabled {
-                        victim.invalidated = Some((loc.clone(), origin));
+                        victim.invalidated = Some(site.clone());
                     }
                     victim.state = NodeState::Disabled;
                 }
                 Access::Read => {
                     if victim.state == NodeState::Unique {
                         victim.state = NodeState::Frozen;
-                        victim.invalidated = Some((loc.clone(), origin));
+                        victim.invalidated = Some(site.clone());
                     }
                 }
             }
@@ -4211,7 +4222,7 @@ impl<M> Machine<'_, M> {
             } else {
                 NodeState::Frozen
             },
-            born: Some((loc.clone(), origin)),
+            born: Some(self.user_site(loc, origin)),
             invalidated: None,
         });
         let list = self.borrow_nodes_of.entry(alloc).or_default();

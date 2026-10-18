@@ -3286,6 +3286,31 @@ impl<'db> InferCtx<'db> {
         }
     }
 
+    /// [`Self::carry_borrow_projection`] for an element step `expr` of
+    /// `receiver`, whose type is `receiver_ty`. Outside the prelude `a[i]`
+    /// of an array is `index(a.&, i).*`, so it starts a borrow-rooted
+    /// chain the way a `.*` does: a read that would copy the element out
+    /// is judged by [`Self::finish_deref_reads`], and a place position
+    /// passes the question on.
+    fn carry_index_projection(
+        &mut self,
+        expr: ExprId,
+        receiver: ExprId,
+        receiver_ty: &Ty,
+        ty: &Ty,
+    ) {
+        if crate::scopes::index_is_a_call(self.db, self.file)
+            && matches!(receiver_ty, Ty::Array { .. })
+        {
+            self.deref_reads.push((expr, ty.clone()));
+            if self.place_positions.contains(&expr) {
+                self.borrow_projections.insert(expr);
+            }
+        } else {
+            self.carry_borrow_projection(expr, receiver, ty);
+        }
+    }
+
     /// Lower a type annotation under this body's generic binder (the
     /// param scope is empty outside generic items). Every annotation
     /// lowered during inference of this body must go through here, not
@@ -3640,7 +3665,15 @@ impl<'db> InferCtx<'db> {
                         ty
                     }
                     ProjectionKind::Index(index) => {
-                        self.index_element_ty(projection.expr, *index, resolved)
+                        let element =
+                            self.index_element_ty(projection.expr, *index, resolved.clone());
+                        self.carry_index_projection(
+                            projection.expr,
+                            projection.receiver,
+                            &resolved,
+                            &projection.value,
+                        );
+                        element
                     }
                 };
                 self.check(projection.expr, ty, &projection.value, projection.cause);
@@ -5214,15 +5247,17 @@ impl<'db> InferCtx<'db> {
                 let base_ty = self.infer_expr(base, &base_fresh);
                 // Indexing pins `usize` — a defining use.
                 self.infer_expr_with(index, &Ty::Int(IntKind::Usize), None);
-                let element = match self.resolve_shallow(&base_ty) {
+                match self.resolve_shallow(&base_ty) {
                     Ty::Infer(_) => {
                         let kind = ProjectionKind::Index(index);
                         self.defer_projection(expr, base, base_ty, kind, cause)
                     }
-                    resolved => self.index_element_ty(expr, index, resolved),
-                };
-                self.carry_borrow_projection(expr, base, &element);
-                element
+                    resolved => {
+                        let element = self.index_element_ty(expr, index, resolved.clone());
+                        self.carry_index_projection(expr, base, &resolved, &element);
+                        element
+                    }
+                }
             }
             // `place.&raw`: the operand reads like any
             // expression (so field chains get their diagnostics on the
