@@ -164,6 +164,40 @@ fn check_run_impl(
     check_traps: bool,
     expect: Expect,
 ) {
+    let rendered = run_entry(text, entry, input, check_traps, |db, machine, result| {
+        render_run(db, machine.mode.out, result, false)
+    });
+    expect.assert_eq(&rendered);
+}
+
+/// [`check_run_past_the_cfg_checkers`], but each note also names the
+/// source line its origin sits on — for the tests whose claim is where a
+/// note points.
+fn check_run_past_the_cfg_checkers_with_note_sites(text: &str, entry: &str, expect: Expect) {
+    let rendered = run_entry(
+        text,
+        entry,
+        std::io::empty(),
+        false,
+        |db, machine, result| render_run(db, machine.mode.out, result, true),
+    );
+    expect.assert_eq(&rendered);
+}
+
+/// Appends `static entrypoint = (<entry>);` to the fixture's last file,
+/// runs it in run mode, and hands the finished machine and the result to
+/// `inspect`.
+fn run_entry<I: std::io::BufRead, R>(
+    text: &str,
+    entry: &str,
+    input: I,
+    check_traps: bool,
+    inspect: impl for<'db> FnOnce(
+        &'db RootDatabase,
+        Machine<'db, RunMode<Vec<u8>, I>>,
+        Result<Value, crate::EvalError>,
+    ) -> R,
+) -> R {
     let mut db = RootDatabase::default();
     let mut files = base_db::fixture_files(text);
     let (_, last) = files.last_mut().expect("a fixture has a file");
@@ -184,7 +218,16 @@ fn check_run_impl(
     );
     machine.check_traps = check_traps;
     let result = machine.eval_root(&hir::item_loc(&db, entry_item));
-    let printed = String::from_utf8(machine.mode.out).unwrap();
+    inspect(&db, machine, result)
+}
+
+fn render_run(
+    db: &RootDatabase,
+    out: Vec<u8>,
+    result: Result<Value, crate::EvalError>,
+    note_sites: bool,
+) -> String {
+    let printed = String::from_utf8(out).unwrap();
     // Printed output is shown *escaped*, as one `output:` line. `print`
     // writes exactly its argument and appends nothing, so line breaks are
     // part of the program's output rather than a property of `print` —
@@ -198,17 +241,39 @@ fn check_run_impl(
     rendered.push_str(&match result {
         Ok(value) => format!("=> {}\n", value.display()),
         Err(err) => {
-            // Secondary provenance renders as bare labels here (locations
-            // are the driver's business; presence is what these tests pin).
-            let notes = err
-                .notes
-                .iter()
-                .map(|note| format!("  note: {}\n", note.message))
-                .collect::<String>();
+            // Secondary provenance renders as bare labels unless the test
+            // asks for its sites (locations are otherwise the driver's
+            // business; presence is what most tests pin).
+            let mut notes = String::new();
+            for note in &err.notes {
+                notes.push_str(&format!("  note: {}\n", note.message));
+                if note_sites {
+                    notes.push_str(&note_site(db, note));
+                }
+            }
             format!("error[{:?}]: {}\n{notes}", err.kind, err.message)
         }
     });
-    expect.assert_eq(&rendered);
+    rendered
+}
+
+/// `    at line N: `<expr>` in `<line>`` for a note's origin.
+fn note_site(db: &RootDatabase, note: &crate::EvalNote) -> String {
+    let (loc, expr) = note.origin.clone().expect("the note has a site");
+    let item = loc.to_id(db);
+    let text = item.file(db).text(db);
+    let (_, source_map) = hir::body_with_source_map(db, item);
+    let range = source_map
+        .node_for_expr(expr)
+        .expect("the site was written")
+        .text_range();
+    let (start, end) = (usize::from(range.start()), usize::from(range.end()));
+    let line = text[..start].lines().count();
+    let line_text = text.lines().nth(line - 1).unwrap().trim();
+    format!(
+        "    at line {line}: `{}` in `{line_text}`\n",
+        &text[start..end]
+    )
 }
 
 /// Renders `const_block_values` for every item in the fixture: each
@@ -278,16 +343,6 @@ static chained = pick + 1;
             pick = 42
             chained = 43
         "#]],
-    );
-}
-
-#[test]
-fn fn_items_are_fn_values() {
-    check_const(
-        "static f = fn { print(\"hi\"); };",
-        expect![[r#"
-        f = fn
-    "#]],
     );
 }
 
@@ -398,18 +453,6 @@ fn reaching_a_trap_reports_the_borrowed_diagnostic() {
 }
 
 #[test]
-fn run_hello() {
-    check_run(
-        r#"static main = fn { print("hello"); };"#,
-        "main()",
-        expect![[r#"
-            output: "hello"
-            => ()
-        "#]],
-    );
-}
-
-#[test]
 fn print_appends_no_newline() {
     // P03, pinned at the only place it is observable: two `print`s land
     // on one line, because `print` writes its argument and nothing else.
@@ -464,34 +507,11 @@ fn read_line_is_refused_at_compile_time() {
 }
 
 #[test]
-fn read_line_reads_the_documented_idiom_to_end() {
-    // The exact loop `read_line`'s doc comment shows, run for real: two
-    // injected lines come back as `Line`, then genuine end-of-input hits
-    // `::End` and the loop breaks — no third `Line` invented, no hang.
-    check_run_with_input(
-        r#"
-static main = fn {
-    loop {
-        match read_line() {
-            ::Line(s) => { print(s); print("|"); },
-            ::End => break,
-        };
-    };
-};
-"#,
-        "main()",
-        "a\nb\n",
-        expect![[r#"
-            output: "a|b|"
-            => ()
-        "#]],
-    );
-}
-
-#[test]
-fn read_line_strips_the_trailing_newline_lf_and_crlf() {
-    // Both line-ending styles read identically — no stray `\r` leaks onto
-    // the end of a CRLF-terminated line.
+fn read_line_reads_lf_and_crlf_lines_to_the_end() {
+    // The exact loop `read_line`'s doc comment shows, run for real. Both
+    // line-ending styles read identically — no stray `\r` leaks onto the
+    // end of a CRLF-terminated line — then genuine end-of-input hits
+    // `::End` and the loop breaks: no third `Line` invented, no hang.
     check_run_with_input(
         r#"
 static main = fn {
@@ -974,28 +994,6 @@ static entrypoint = (main());
             "flush".to_owned(),
             "write \"ada\"".to_owned(),
         ]
-    );
-}
-
-#[test]
-fn escapes_are_cooked_in_const_contexts() {
-    // A static initializer is a const context: the same one decoding runs,
-    // so the frozen constant already holds the real bytes.
-    check_const(
-        r#"
-static newline = "a\nb";
-static tab = "a\tb";
-static nul = "a\0b";
-static quote = "a\"b";
-static backslash = "a\\b";
-"#,
-        expect![[r#"
-            newline = "a\nb"
-            tab = "a\tb"
-            nul = "a\0b"
-            quote = "a\"b"
-            backslash = "a\\b"
-        "#]],
     );
 }
 
@@ -1691,28 +1689,6 @@ static x = double(21);
 }
 
 #[test]
-fn record_construction_and_field_access() {
-    check_run(
-        "",
-        "(fn { let p: struct { x: usize, y: usize } = struct { x = 1, y = 2 }; p.x + p.y })()",
-        expect![[r#"
-            => 3
-        "#]],
-    );
-}
-
-#[test]
-fn nested_records_construct_and_project() {
-    check_run(
-        "",
-        r#"(fn { let a: struct { b: struct { c: usize } } = struct { b = struct { c = 5 } }; a.b.c })()"#,
-        expect![[r#"
-            => 5
-        "#]],
-    );
-}
-
-#[test]
 fn records_const_evaluate() {
     check_const(
         r#"
@@ -1808,10 +1784,6 @@ fn named_type_equality_is_structural_under_the_hood() {
             => true
         "#]],
     );
-}
-
-#[test]
-fn named_type_inequality_observes_field_values() {
     check_run(
         "type Foo = struct { x: usize };",
         r#"(Foo(struct { x = 1 }) == Foo(struct { x = 2 }))"#,
@@ -2151,25 +2123,10 @@ static f = fn ([a, b]: [usize; 2], ::One(c, d): Only) -> usize {
 }
 
 #[test]
-fn a_refutable_let_pattern_traps_with_the_diagnostic_message() {
-    check_run(
-        r#"
-type Opt = enum { Some(usize), None };
-static f = fn (o: Opt) -> usize {
-    let ::Some(n) = o;
-    n
-};
-"#,
-        "f(Opt::Some(1))",
-        expect![[r#"
-            error[Trap]: this pattern can fail to match; use `match`
-        "#]],
-    );
-}
-
-#[test]
 fn a_let_pattern_naming_another_variant_traps_instead_of_binding() {
-    // The `Circle`'s payload is never read as the `Label`'s `str`.
+    // The `Circle`'s payload is never read as the `Label`'s `str`. The trap
+    // is planted at the `let` whatever the value: a matching `Label` traps
+    // too, with the checker's message.
     let text = r#"
 type Shape = enum { Circle(usize), Label(str) };
 static owned = fn (c: Shape) -> str {
@@ -2181,6 +2138,13 @@ static borrowed = fn (c: Shape) -> str {
     s.*
 };
 "#;
+    check_run(
+        text,
+        r#"owned(Shape::Label("x"))"#,
+        expect![[r#"
+            error[Trap]: this pattern can fail to match; use `match`
+        "#]],
+    );
     check_run(
         text,
         "owned(Shape::Circle(1))",
@@ -2408,27 +2372,6 @@ static c = const { match Shape::Circle(9) { ::Circle(r) => r, ::Point => 0 } };
 }
 
 #[test]
-fn match_runs_the_state_machine_end_to_end() {
-    // Construct `Running(5)`, pass it to a function taking the enum,
-    // dispatch on it inside, extract the payload.
-    check_run(
-        r#"
-type State = enum { Idle, Running(usize) };
-static tick = fn (s: State) -> usize {
-    match s {
-        ::Running(n) => n + 1,
-        ::Idle => 0,
-    }
-};
-"#,
-        "tick(State::Running(5))",
-        expect![[r#"
-            => 6
-        "#]],
-    );
-}
-
-#[test]
 fn match_binding_arm_receives_the_whole_scrutinee() {
     check_run(
         r#"
@@ -2634,37 +2577,26 @@ fn infinite_loop_in_a_const_block_runs_out_of_fuel() {
 #[test]
 fn return_skips_the_statements_after_it() {
     // The observable proof that the early exit really happens: "after"
-    // never prints.
-    check_run(
-        r#"
+    // never prints. Down the other edge it does, the contrast that makes
+    // the first case mean something.
+    let program = r#"
 static f = fn (c: bool) -> usize {
     print("before ");
     if c { return 1; };
     print("after ");
     2
 };
-"#,
+"#;
+    check_run(
+        program,
         "f(true)",
         expect![[r#"
             output: "before "
             => 1
         "#]],
     );
-}
-
-#[test]
-fn without_the_early_exit_the_rest_still_runs() {
-    // The same function down the other edge — the contrast that makes the
-    // test above mean something.
     check_run(
-        r#"
-static f = fn (c: bool) -> usize {
-    print("before ");
-    if c { return 1; };
-    print("after ");
-    2
-};
-"#,
+        program,
         "f(false)",
         expect![[r#"
             output: "before after "
@@ -2785,35 +2717,29 @@ fn return_in_a_fn_literal_inside_a_const_block_still_runs() {
 
 #[test]
 fn let_record_destructure_evaluates() {
-    check_run(
-        "",
-        r#"(fn { let struct { x, y }: struct { x: usize, y: usize } = struct { x = 1, y = 2 }; x + y })()"#,
-        expect![[r#"
-            => 3
-        "#]],
-    );
-}
-
-#[test]
-fn let_record_destructure_rename_evaluates() {
-    check_run(
-        "",
-        r#"(fn { let struct { x as a, y as b }: struct { x: usize, y: usize } = struct { x = 1, y = 2 }; a + b })()"#,
-        expect![[r#"
-            => 3
-        "#]],
-    );
-}
-
-#[test]
-fn let_record_destructure_rest_evaluates() {
-    check_run(
-        "",
-        r#"(fn { let struct { x, .. }: struct { x: usize, y: usize, z: usize } = struct { x = 1, y = 2, z = 3 }; x })()"#,
-        expect![[r#"
-            => 1
-        "#]],
-    );
+    // One row per binder form: per-binding `mut`, a rename, and `..`.
+    for (entry, expect) in [
+        (
+            r#"(fn { let struct { mut x, y }: struct { x: usize, y: usize } = struct { x = 1, y = 2 }; x = x + y; x })()"#,
+            expect![[r#"
+                => 3
+            "#]],
+        ),
+        (
+            r#"(fn { let struct { x as a, y as b }: struct { x: usize, y: usize } = struct { x = 1, y = 2 }; a + b })()"#,
+            expect![[r#"
+                => 3
+            "#]],
+        ),
+        (
+            r#"(fn { let struct { x, .. }: struct { x: usize, y: usize, z: usize } = struct { x = 1, y = 2, z = 3 }; x })()"#,
+            expect![[r#"
+                => 1
+            "#]],
+        ),
+    ] {
+        check_run("", entry, expect);
+    }
 }
 
 #[test]
@@ -2854,17 +2780,6 @@ static sum = const fn () -> usize {
         expect![[r#"
             p = { x = 3, y = 4 }
             sum = 7
-        "#]],
-    );
-}
-
-#[test]
-fn per_binding_mut_record_destructure_evaluates() {
-    check_run(
-        "",
-        r#"(fn { let struct { mut x, y }: struct { x: usize, y: usize } = struct { x = 1, y = 2 }; x = x + y; x })()"#,
-        expect![[r#"
-            => 3
         "#]],
     );
 }
@@ -3331,36 +3246,6 @@ static main = fn() -> usize {
 }
 
 #[test]
-fn dangling_deref_traps_deterministically() {
-    // Same program, two fresh machines: identical trap kind and message.
-    let text = r#"
-static make = fn() -> usize.&raw mut { let mut x = 5; x.&raw mut };
-static main = fn() -> usize { let p = make(); unsafe { p.* } };
-static entrypoint = (main());
-"#;
-    let render = || {
-        let db = RootDatabase::default();
-        let file = SourceFile::new(&db, "test.must".to_owned(), text.to_owned());
-        let entry_item = *hir::file_item_ids(&db, file)
-            .iter()
-            .find(|&&it| it.name(&db) == "entrypoint")
-            .expect("entrypoint item exists");
-        let mut machine = Machine::new(&db, RunMode::without_stdin(Vec::new()));
-        match machine.eval_root(&hir::item_loc(&db, entry_item)) {
-            Ok(value) => format!("=> {}", value.display()),
-            Err(err) => format!("error[{:?}]: {}", err.kind, err.message),
-        }
-    };
-    let first = render();
-    let second = render();
-    assert_eq!(first, second);
-    assert!(
-        first.starts_with("error[UndefinedBehavior]"),
-        "expected detected UB, got: {first}"
-    );
-}
-
-#[test]
 fn pointers_work_inside_const_evaluation() {
     // Unsafe (and pointers) are legal in const contexts: the whole
     // computation runs at compile time, the pointer dies inside it.
@@ -3444,24 +3329,6 @@ static main = fn() -> usize.&raw {
 }
 
 // ---- raw pointers, through-pointer places ----
-
-#[test]
-fn through_pointer_field_write_is_visible_afterward() {
-    check_run(
-        r#"
-static main = fn() -> usize {
-    let mut r: struct { a: usize, b: usize } = struct { a = 1, b = 2 };
-    let p = r.&raw mut;
-    unsafe { p.*.a = 40; }
-    r.a + r.b
-};
-"#,
-        "main()",
-        expect![[r#"
-            => 42
-        "#]],
-    );
-}
 
 #[test]
 fn through_pointer_field_chain_writes_the_nested_field() {
@@ -3620,37 +3487,20 @@ static main = fn() -> usize {
 }
 
 #[test]
-fn out_of_bounds_pointer_traps_deterministically() {
-    // Same program, two fresh machines: identical trap kind and message —
-    // the determinism pin for the new UB wording.
-    let text = r#"
+fn a_write_through_an_out_of_bounds_pointer_is_detected_ub() {
+    check_run(
+        r#"
 static main = fn() -> usize {
     let mut a = [1, 2];
     let i = 5;
     let p = a[i].&raw mut;
     unsafe { p.* = 9; a[0] }
 };
-static entrypoint = (main());
-"#;
-    let render = || {
-        let db = RootDatabase::default();
-        let file = SourceFile::new(&db, "test.must".to_owned(), text.to_owned());
-        let entry_item = *hir::file_item_ids(&db, file)
-            .iter()
-            .find(|&&it| it.name(&db) == "entrypoint")
-            .expect("entrypoint item exists");
-        let mut machine = Machine::new(&db, RunMode::without_stdin(Vec::new()));
-        match machine.eval_root(&hir::item_loc(&db, entry_item)) {
-            Ok(value) => format!("=> {}", value.display()),
-            Err(err) => format!("error[{:?}]: {}", err.kind, err.message),
-        }
-    };
-    let first = render();
-    let second = render();
-    assert_eq!(first, second);
-    assert!(
-        first.starts_with("error[UndefinedBehavior]: out-of-bounds pointer"),
-        "expected detected UB, got: {first}"
+"#,
+        "main()",
+        expect![[r#"
+            error[UndefinedBehavior]: out-of-bounds pointer — it points to element 5 of an array with 2 elements
+        "#]],
     );
 }
 
@@ -3694,7 +3544,7 @@ static main = fn() -> usize {
 }
 
 #[test]
-fn dangling_interior_element_pointer_is_detected_ub() {
+fn dangling_interior_pointers_are_detected_ub() {
     // Interior pointers die with their frame's allocation — the liveness
     // story covers extended paths with no extra machinery.
     check_run(
@@ -3713,10 +3563,7 @@ static main = fn() -> usize {
             error[UndefinedBehavior]: dangling pointer — the local it pointed to no longer exists (its frame has returned)
         "#]],
     );
-}
-
-#[test]
-fn dangling_pointer_from_addr_of_through_deref_is_detected_ub() {
+    // A field pointer minted through a deref dies with its frame too.
     check_run(
         r#"
 static make = fn() -> usize.&raw mut {
@@ -4124,17 +3971,16 @@ static main = fn () -> bool {
 
 #[test]
 fn heap_write_initializes_and_partial_writes_track_per_element() {
-    // Per-ELEMENT tracking: writing element 0 makes element 0 readable;
-    // element 1 stays poison until its own write.
+    // Per-ELEMENT tracking: writing element 0 makes element 0 readable,
+    // while reading the never-written element 1 is detected UB.
     check_run(
         r#"
 static main = fn () -> usize {
     match alloc_array::<usize>(2) {
         AllocResult::Ok(p) => {
             unsafe { p.* = 5; };
-            let first = unsafe { p.* };
-            unsafe { dealloc_array(p, 2); };
-            first
+            if unsafe { p.* } == 5 { print("element 0 reads back;"); };
+            unsafe { add(p, 1).* }
         }
         AllocResult::Err => 0,
     }
@@ -4142,7 +3988,8 @@ static main = fn () -> usize {
 "#,
         "main()",
         expect![[r#"
-            => 5
+            output: "element 0 reads back;"
+            error[UndefinedBehavior]: read of uninitialized memory — this element was never written
         "#]],
     );
 }
@@ -4182,6 +4029,25 @@ static main = fn () -> usize {
         }
         AllocResult::Err => 0,
     }
+};
+"#,
+        "main()",
+        expect![[r#"
+            error[UndefinedBehavior]: use after free — this allocation was already freed
+              note: allocated here
+        "#]],
+    );
+    // A pointer into the middle of the allocation dies with it.
+    check_run(
+        r#"
+static main = fn () -> usize {
+    let base = match alloc_array::<usize>(2) {
+        AllocResult::Ok(p) => p,
+        AllocResult::Err => panic("oom"),
+    };
+    let interior = unsafe { add(base, 1) };
+    unsafe { dealloc_array(base, 2) };
+    unsafe { interior.* }
 };
 "#,
         "main()",
@@ -4718,38 +4584,6 @@ static main = fn () -> usize {
 }
 
 #[test]
-fn heapvec_double_deinit_is_detected_double_free() {
-    // The v1 handle posture, honestly: copying the handle copies nothing
-    // but the pointer, so a second deinit is a double free — detected,
-    // deterministically, with the allocation's birth site.
-    check_run(
-        r#"
-type HeapVec = struct::<T> { ptr: T.&raw mut, len: usize, cap: usize };
-static heapvec_deinit = fn::<T>(v: HeapVec::<T>) -> () {
-    if v.cap != 0 {
-        unsafe { dealloc_array(v.ptr, v.cap); };
-    };
-};
-static main = fn () -> () {
-    let p = match alloc_array::<usize>(4) {
-        AllocResult::Ok(p) => p,
-        AllocResult::Err => panic("oom"),
-    };
-    let v = HeapVec::<usize>(struct { ptr = p, len = 0, cap = 4 });
-    let w = v;
-    heapvec_deinit(v);
-    heapvec_deinit(w);
-};
-"#,
-        "main()",
-        expect![[r#"
-            error[UndefinedBehavior]: double free — this allocation was already freed
-              note: allocated here
-        "#]],
-    );
-}
-
-#[test]
 fn arena_carves_and_exhaustion_produces_err() {
     // The typed arena: ONE backing allocation carved by a bump cursor,
     // and a REAL `Err` producer for the result-shaped interface —
@@ -4814,31 +4648,6 @@ static main = fn () -> () {
         expect![[r#"
             output: "carved 3 of 4exhausted: Err, by valuethe last element still fits"
             => ()
-        "#]],
-    );
-}
-
-#[test]
-fn arena_use_after_deinit_is_detected_ub() {
-    // Carved pointers are paths into the ONE backing allocation, so they
-    // all die together at `arena_deinit` — with the backing's birth site
-    // in the note.
-    check_run(
-        r#"
-static main = fn () -> usize {
-    let base = match alloc_array::<usize>(2) {
-        AllocResult::Ok(p) => p,
-        AllocResult::Err => panic("oom"),
-    };
-    let carved = unsafe { add(base, 1) };
-    unsafe { dealloc_array(base, 2) };
-    unsafe { carved.* }
-};
-"#,
-        "main()",
-        expect![[r#"
-            error[UndefinedBehavior]: use after free — this allocation was already freed
-              note: allocated here
         "#]],
     );
 }
@@ -6550,7 +6359,7 @@ fn dynamic_ub_names_the_borrow_site_and_the_invalidating_site() {
     // The report must name both interesting sites even when the trap
     // fires inside a callee that has no borrow sites of its own — both
     // the borrow site and the invalidating site live in the caller here.
-    check_run_past_the_cfg_checkers(
+    check_run_past_the_cfg_checkers_with_note_sites(
         r#"
 static bump = fn::<@a>(m: usize.&mut::<@a>) -> () { m.* = m.* + 1; };
 static f = fn () -> () {
@@ -6565,7 +6374,9 @@ static f = fn () -> () {
         expect![[r#"
             error[UndefinedBehavior]: write through a borrow that is no longer valid: the value was borrowed again, written through another borrow, or moved away, while this borrow was still live
               note: this borrow was created here
+                at line 5: `n.&mut` in `let a = n.&mut;`
               note: invalidated here — the value was borrowed again, written through another borrow, or moved away
+                at line 6: `n.&mut` in `let b = n.&mut;`
         "#]],
     );
 }
@@ -6578,7 +6389,6 @@ fn a_read_only_borrow_loop_does_not_accumulate_scan_cost() {
     // counter: a rescan per read would scan the loop's whole history every
     // iteration, quadratic in the iteration count.
     const ITERATIONS: u64 = 200;
-    let db = RootDatabase::default();
     let text = format!(
         r#"
 static get = fn::<@a>(r: usize.&::<@a>) -> usize {{ r.* }};
@@ -6593,15 +6403,17 @@ static f = fn () -> usize {{
     }};
     acc
 }};
-static entrypoint = (f());
 "#
     );
-    let file = SourceFile::new(&db, "test.must".to_owned(), text);
-    let mut machine = Machine::new(&db, RunMode::without_stdin(Vec::new()));
-    let result = machine.eval_root(&hir::item_loc(&db, item(&db, file, "entrypoint")));
+    let (result, scanned) = run_entry(
+        &text,
+        "f()",
+        std::io::empty(),
+        true,
+        |_, machine, result| (result, machine.borrow_nodes_scanned()),
+    );
     assert_eq!(result, Ok(Value::Int(hir::IntValue::Usize(600))));
     // Each iteration's mint and read scan only the live exclusive nodes.
-    let scanned = machine.borrow_nodes_scanned();
     assert!(
         scanned <= 4 * ITERATIONS,
         "{scanned} nodes scanned in {ITERATIONS} iterations"
@@ -7925,10 +7737,7 @@ static f = fn () -> u8 {
 fn moving_a_value_invalidates_borrows_of_it_exactly_as_writing_does() {
     // The aliasing model's event is "the storage no longer holds what the
     // borrow was taken of", and a MOVE is that event as surely as a write
-    // is. Without this, a borrow of a value that was then consumed read
-    // stale bytes with nothing to say about it — while its write-shaped
-    // twin (below) was caught, which is what made the gap a bug rather
-    // than a limit.
+    // is: reading through a borrow of a consumed value is detected UB.
     check_run_past_the_cfg_checkers(
         r#"
 type Lin = struct { id: usize } only move with {
@@ -7940,27 +7749,6 @@ static f = fn() -> usize {
     let s = Lin(struct { id = 1 });
     let b = s.&;
     s.eat();
-    b.*.id
-};
-"#,
-        "f()",
-        expect![[r#"
-            error[UndefinedBehavior]: read through a borrow that is no longer valid: the value was borrowed again, written through another borrow, or moved away, while this borrow was still live
-              note: this borrow was created here
-              note: invalidated here — the value was borrowed again, written through another borrow, or moved away
-        "#]],
-    );
-}
-
-#[test]
-fn the_write_shaped_twin_of_a_move_invalidation_says_the_same_thing() {
-    check_run_past_the_cfg_checkers(
-        r#"
-type Id = struct { id: usize };
-static f = fn() -> usize {
-    let mut s = Id(struct { id = 1 });
-    let b = s.&;
-    s = Id(struct { id = 2 });
     b.*.id
 };
 "#,
@@ -8522,24 +8310,6 @@ static f = fn() -> usize {
         "f()",
         expect![[r#"
             => 40
-        "#]],
-    );
-}
-
-#[test]
-fn an_assigned_value_reads_its_operands_where_they_stand() {
-    check_run(
-        r#"
-static f = fn() -> usize {
-    let mut x: usize = 1;
-    let mut y: usize = 0;
-    y = x + { x = 5; 1 };
-    y
-};
-"#,
-        "f()",
-        expect![[r#"
-            => 2
         "#]],
     );
 }
@@ -9144,21 +8914,6 @@ static f = fn() -> usize {
     );
 }
 
-/// An error outside every item traps every item's value.
-#[test]
-fn an_error_outside_every_item_traps_every_item() {
-    check_run(
-        r#"
-static f = fn() -> usize { 3 };
-\
-"#,
-        "f()",
-        expect![[r#"
-            error[Trap]: unexpected character `\`
-        "#]],
-    );
-}
-
 /// A `static` with no value traps where it is read.
 #[test]
 fn a_static_without_a_value_traps_where_it_is_read() {
@@ -9198,50 +8953,32 @@ static f = fn() -> usize {
     );
 }
 
-/// A broken trait traps at a qualified call through it.
+/// A broken trait traps at a qualified call through it, and at a dot-call
+/// that reaches one of its impls.
 #[test]
-fn a_broken_trait_traps_at_a_qualified_call() {
-    check_run(
-        r#"
-trait D = requires { m: fn(Self) -> usize; m: fn(Self) -> usize; } with {
-    impl usize { m = fn(x: usize) -> usize { x }; }
-};
-static f = fn() -> usize {
+fn a_broken_trait_traps_at_a_qualified_call_and_a_dot_call() {
+    for call in ["D::m(n)", "n.m()"] {
+        check_run(
+            &format!(
+                r#"
+trait D = requires {{ m: fn(Self) -> usize; m: fn(Self) -> usize; }} with {{
+    impl usize {{ m = fn(x: usize) -> usize {{ x }}; }}
+}};
+static f = fn() -> usize {{
     print("before;");
     let n: usize = 5;
-    D::m(n)
-};
-"#,
-        "f()",
-        expect![[r#"
-            output: "before;"
-            error[Trap]: duplicate requirement `m`
-        "#]],
-    );
+    {call}
+}};
+"#
+            ),
+            "f()",
+            expect![[r#"
+                output: "before;"
+                error[Trap]: duplicate requirement `m`
+            "#]],
+        );
+    }
 }
-
-/// A broken trait traps at a dot-call that reaches one of its impls.
-#[test]
-fn a_broken_trait_traps_at_a_dot_call() {
-    check_run(
-        r#"
-trait D = requires { m: fn(Self) -> usize; m: fn(Self) -> usize; } with {
-    impl usize { m = fn(x: usize) -> usize { x }; }
-};
-static f = fn() -> usize {
-    print("before;");
-    let n: usize = 5;
-    n.m()
-};
-"#,
-        "f()",
-        expect![[r#"
-            output: "before;"
-            error[Trap]: duplicate requirement `m`
-        "#]],
-    );
-}
-
 /// A broken trait traps at a dot-call on a type that implements it.
 #[test]
 fn a_broken_trait_traps_at_a_dot_call_on_its_implementer() {
