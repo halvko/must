@@ -111,6 +111,32 @@ impl<'t> Parser<'t> {
         self.pos.checked_sub(1).map(|i| self.tokens[i])
     }
 
+    /// A point [`Parser::rewind`] can return to, for a fork only reading
+    /// on can settle.
+    pub(crate) fn checkpoint(&self) -> Checkpoint {
+        Checkpoint {
+            pos: self.pos,
+            events: self.events.len(),
+        }
+    }
+
+    /// Drop everything parsed since `checkpoint`. Every marker started
+    /// since must already be completed or abandoned.
+    pub(crate) fn rewind(&mut self, checkpoint: Checkpoint) {
+        self.pos = checkpoint.pos;
+        self.events.truncate(checkpoint.events);
+    }
+
+    /// Whether anything parsed since `checkpoint` reported an error.
+    pub(crate) fn erred_since(&self, checkpoint: &Checkpoint) -> bool {
+        self.events[checkpoint.events..]
+            .iter()
+            .any(|event| match event {
+                Event::Error { .. } | Event::DigitGroupCommas { .. } => true,
+                Event::Start { .. } | Event::Token | Event::Finish => false,
+            })
+    }
+
     pub(crate) fn bump_any(&mut self) {
         if !self.at(EOF) {
             self.pos += 1;
@@ -295,6 +321,11 @@ impl<'t> Parser<'t> {
         });
         Marker { pos }
     }
+}
+
+pub(crate) struct Checkpoint {
+    pos: usize,
+    events: usize,
 }
 
 pub(crate) struct Marker {

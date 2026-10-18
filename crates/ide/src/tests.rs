@@ -2251,6 +2251,24 @@ static f = fn {
 }
 
 #[test]
+fn completions_dot_in_a_field_written_name_colon_value_completes_the_receiver() {
+    // `x: p.` is the retired construction spelling. It parses as a value,
+    // so the dot completes `p`, not the half-written literal itself.
+    check_completions(
+        r#"
+type Point = struct { x: usize, y: usize };
+static f = fn (p: Point) -> Point {
+    Point(struct { x: p.$0 })
+};
+"#,
+        expect_test::expect![[r#"
+            x Field (usize)
+            y Field (usize)
+        "#]],
+    );
+}
+
+#[test]
 fn completions_dot_field_access_through_named_type_erasure() {
     check_completions(
         r#"
