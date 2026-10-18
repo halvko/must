@@ -616,8 +616,26 @@ fn fn_type_requires_parens() {
                       INT_NUMBER@41..42 "1"
                     WHITESPACE@42..43 " "
                     R_BRACE@43..44 "}"
-            error 13..15: expected `(`: function types are written `fn(...) -> ...`
+            error 10..12: expected `(`: function types are written `fn(...) -> ...`
         "#]],
+    );
+}
+
+#[test]
+fn a_fn_type_without_parens_squiggles_its_head() {
+    // From `unsafe`, and through the binder.
+    check_errors(
+        "static f: unsafe fn -> usize = g;",
+        expect![[r#"
+        10..19: expected `(`: function types are written `fn(...) -> ...`
+    "#]],
+    );
+    check_errors(
+        "static f: fn::<T> -> usize = g;",
+        expect![[r#"
+        10..17: expected `(`: function types are written `fn(...) -> ...`
+        12..17: a function type has no generic binder: a generic function is declared by an item, and a type names one of its instances
+    "#]],
     );
 }
 
@@ -15060,6 +15078,155 @@ fn region_params_come_first_in_a_binder() {
     );
 }
 
+/// `text` has one error, whose fix is labelled `label` and turns it into
+/// `fixed`, which has none.
+fn check_fix(text: &str, label: &str, fixed: &str) {
+    let parse = crate::parse(text);
+    let [err] = parse.errors() else {
+        panic!("expected one error for {text:?}: {:?}", parse.errors());
+    };
+    let fix = err.fix.as_ref().expect("expected a fix");
+    assert_eq!(fix.label, label);
+    assert_eq!(apply_fix(text, fix), fixed);
+    assert!(crate::parse(fixed).errors().is_empty(), "{fixed:?}");
+}
+
+#[test]
+fn a_region_parameter_after_a_type_parameter_is_moved_to_the_front() {
+    check_fix(
+        "static f = fn::<T, @a>(x: T.&::<@a>) -> () {};",
+        "Move `@a` before `T`",
+        "static f = fn::<@a, T>(x: T.&::<@a>) -> () {};",
+    );
+    // With bounds, and before the first type or const parameter.
+    check_fix(
+        "static f = fn::<@a, T, const N: usize, @b: @a>(x: T.&::<@b>) -> () {};",
+        "Move `@b` before `T`",
+        "static f = fn::<@a, @b: @a, T, const N: usize>(x: T.&::<@b>) -> () {};",
+    );
+    check_fix(
+        "static f = fn::<T, @a, U>(x: T.&::<@a>, y: U) -> () {};",
+        "Move `@a` before `T`",
+        "static f = fn::<@a, T, U>(x: T.&::<@a>, y: U) -> () {};",
+    );
+}
+
+#[test]
+fn moving_a_region_parameter_keeps_the_comments_around_it() {
+    check_fix(
+        "static f = fn::<T, /* the region */ @a>(x: T.&::<@a>) -> () {};",
+        "Move `@a` before `T`",
+        "static f = fn::<@a, T /* the region */>(x: T.&::<@a>) -> () {};",
+    );
+    check_fix(
+        "static f = fn::<T /* only T */, @a>(x: T.&::<@a>) -> () {};",
+        "Move `@a` before `T`",
+        "static f = fn::<@a, T /* only T */>(x: T.&::<@a>) -> () {};",
+    );
+}
+
+#[test]
+fn moving_a_region_parameter_takes_its_separator_however_spaced() {
+    check_fix(
+        "static f = fn::<T,@a>(x: T.&::<@a>) -> () {};",
+        "Move `@a` before `T`",
+        "static f = fn::<@a, T>(x: T.&::<@a>) -> () {};",
+    );
+    check_fix(
+        r#"
+static f = fn::<
+    T,
+    @a,
+>(x: T.&::<@a>) -> () {};
+"#,
+        "Move `@a` before `T`",
+        r#"
+static f = fn::<
+    @a, T,
+>(x: T.&::<@a>) -> () {};
+"#,
+    );
+}
+
+#[test]
+fn a_fn_types_parameter_pattern_is_cut_back_to_its_type() {
+    check_fix(
+        "static f: fn(x: usize, str) -> usize = g;",
+        "Keep only the type",
+        "static f: fn(usize, str) -> usize = g;",
+    );
+    check_fix(
+        "static f: fn(mut x: usize) -> usize = g;",
+        "Keep only the type",
+        "static f: fn(usize) -> usize = g;",
+    );
+    check_fix(
+        "static f: fn(mut usize) -> usize = g;",
+        "Keep only the type",
+        "static f: fn(usize) -> usize = g;",
+    );
+    check_fix(
+        "static f: fn(struct { x: usize }: P) -> usize = g;",
+        "Keep only the type",
+        "static f: fn(P) -> usize = g;",
+    );
+    // Two `:`s: the squiggle and the fix both reach the last one.
+    check_errors_and_fixes(
+        "static f: fn(x: A: T) -> usize = g;",
+        expect![[r#"
+        13..18: a function type's parameters are bare types, not patterns: write `fn(usize, str)`
+            Keep only the type: static f: fn(T) -> usize = g;
+    "#]],
+    );
+    // A pattern with nothing after its `:` keeps nothing either.
+    check_errors_and_fixes(
+        "static f: fn(struct { x: usize }:) -> usize = g;",
+        expect![[r#"
+        13..33: a function type's parameters are bare types, not patterns: write `fn(usize, str)`
+            -
+        33..34: expected a type
+            -
+    "#]],
+    );
+    // Nothing after the `:` to keep: refused, with no fix.
+    check_errors_and_fixes(
+        "static f: fn(x:) -> usize = g;",
+        expect![[r#"
+        13..15: a function type's parameters are bare types, not patterns: write `fn(usize, str)`
+            -
+        15..16: expected a type
+            -
+    "#]],
+    );
+}
+
+#[test]
+fn a_fn_literal_after_a_fields_colon_is_not_refused_as_a_fn_type() {
+    // Only the `:` error: the literal's named parameters, binder and missing
+    // `(` are a literal's, not a fn type's.
+    check_errors_and_fixes(
+        "static s = struct { g: fn(a: usize) -> usize { a } };",
+        expect![[r#"
+            21..22: record fields are defined with `=` (`name = value`); `:` annotates a type
+                Replace `:` with `=`: static s = struct { g = fn(a: usize) -> usize { a } };
+        "#]],
+    );
+    check_errors_and_fixes(
+        "static s = struct { g: fn::<T>(a: T) -> T { a } };",
+        expect![[r#"
+            21..22: record fields are defined with `=` (`name = value`); `:` annotates a type
+                Replace `:` with `=`: static s = struct { g = fn::<T>(a: T) -> T { a } };
+        "#]],
+    );
+    check_errors_and_fixes(
+        "static s = struct { g: fn -> usize { 1 } };",
+        expect![[r#"
+            21..22: record fields are defined with `=` (`name = value`); `:` annotates a type
+                Replace `:` with `=`: static s = struct { g = fn -> usize { 1 } };
+        "#]],
+    );
+}
+
 #[test]
 fn a_borrow_expressions_turbofish_parses_and_is_refused() {
     // The borrow OPERATOR's turbofish still parses on the expression side —
@@ -15410,7 +15577,7 @@ fn a_fn_type_parameter_name_is_refused() {
                     WHITESPACE@59..60 " "
                     R_BRACE@60..61 "}"
                 SEMICOLON@61..62 ";"
-            error 13..14: a function type's parameters are bare types, not patterns: write `fn(usize, str)`
+            error 13..15: a function type's parameters are bare types, not patterns: write `fn(usize, str)`
         "#]],
     );
 }
@@ -15690,11 +15857,11 @@ static c: fn(x:) -> usize = g;
 trait D = requires { m: fn(mut n: usize) -> usize; };
 "#,
         expect![[r#"
-            14..17: a function type's parameters are bare types, not patterns: write `fn(usize, str)`
-            74..75: a function type's parameters are bare types, not patterns: write `fn(usize, str)`
-            110..111: a function type's parameters are bare types, not patterns: write `fn(usize, str)`
+            14..20: a function type's parameters are bare types, not patterns: write `fn(usize, str)`
+            55..75: a function type's parameters are bare types, not patterns: write `fn(usize, str)`
+            110..112: a function type's parameters are bare types, not patterns: write `fn(usize, str)`
             112..113: expected a type
-            155..158: a function type's parameters are bare types, not patterns: write `fn(usize, str)`
+            155..161: a function type's parameters are bare types, not patterns: write `fn(usize, str)`
         "#]],
     );
 }
