@@ -1,7 +1,7 @@
-use std::cell::RefCell;
 use std::collections::BTreeSet;
 use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
+use std::sync::OnceLock;
 
 use ide::{AnalysisHost, HlTag};
 use sha2::{Digest, Sha256};
@@ -166,7 +166,7 @@ fn agrees(
     file: &str,
     capture: Option<(&str, &str)>,
     tag: Option<HlTag>,
-    used: &RefCell<BTreeSet<Row>>,
+    used: &mut BTreeSet<Row>,
 ) -> bool {
     if capture.is_none() && tag.is_none() {
         return true;
@@ -186,7 +186,7 @@ fn agrees(
             && row.only_in.is_none_or(|only| only == file)
     });
     if let Some(row) = allowed {
-        used.borrow_mut().insert(*row);
+        used.insert(*row);
     }
     allowed.is_some()
 }
@@ -258,7 +258,7 @@ fn paint<'c>(captures: &'c [Capture<'_>], len: usize) -> Vec<Option<&'c Capture<
 #[derive(Default)]
 struct Comparison {
     failures: Vec<String>,
-    used: RefCell<BTreeSet<Row>>,
+    used: BTreeSet<Row>,
     /// The query patterns that matched somewhere in the corpus.
     matched: BTreeSet<usize>,
 }
@@ -318,7 +318,7 @@ fn compare(sample: &corpus::Sample, query: &Query, out: &mut Comparison) {
             .collect();
         for winner in &winners {
             for tag in &tags {
-                if agrees(&sample.name, *winner, tag_of(tag), &out.used) {
+                if agrees(&sample.name, *winner, tag_of(tag), &mut out.used) {
                     continue;
                 }
                 let (line, col) = line_col(text, range.start);
@@ -357,13 +357,17 @@ fn highlights_query() -> Query {
         .expect("queries/highlights.scm compiles against the grammar")
 }
 
-fn compare_corpus() -> Comparison {
-    let query = highlights_query();
-    let mut comparison = Comparison::default();
-    for sample in corpus::samples() {
-        compare(&sample, &query, &mut comparison);
-    }
-    comparison
+/// The whole corpus compared once and shared by the tests that read it.
+fn compare_corpus() -> &'static Comparison {
+    static COMPARISON: OnceLock<Comparison> = OnceLock::new();
+    COMPARISON.get_or_init(|| {
+        let query = highlights_query();
+        let mut comparison = Comparison::default();
+        for sample in corpus::samples() {
+            compare(&sample, &query, &mut comparison);
+        }
+        comparison
+    })
 }
 
 /// Every `ERROR` and `MISSING` node under `node`, as `line:col kind`.
@@ -428,8 +432,9 @@ fn tree_sitter_agrees_with_semantic_highlighting() {
 #[test]
 fn every_agreement_table_row_is_exercised() {
     let comparison = compare_corpus();
-    let used = comparison.used.borrow();
-    let stale: Vec<_> = table_rows().filter(|row| !used.contains(row)).collect();
+    let stale: Vec<_> = table_rows()
+        .filter(|row| !comparison.used.contains(row))
+        .collect();
     assert!(
         stale.is_empty(),
         "stale table rows: nothing in the corpus needs them, so they only \
@@ -443,7 +448,7 @@ fn every_agreement_table_row_is_exercised() {
 fn every_highlight_pattern_is_matched() {
     let query = highlights_query();
     let source = canonical_highlights();
-    let matched = compare_corpus().matched;
+    let matched = &compare_corpus().matched;
     let mut unmatched = String::new();
     for pattern in (0..query.pattern_count()).filter(|p| !matched.contains(p)) {
         let start = query.start_byte_for_pattern(pattern);
