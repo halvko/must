@@ -982,6 +982,11 @@ impl Param {
     pub fn is_mut(&self) -> bool {
         self.mut_token().is_some()
     }
+    /// The `:` before the type: always written in a fn literal's parameter,
+    /// and refused in a fn type's.
+    pub fn colon_token(&self) -> Option<SyntaxToken> {
+        token(&self.syntax, COLON)
+    }
     pub fn pat(&self) -> Option<Pat> {
         child(&self.syntax)
     }
