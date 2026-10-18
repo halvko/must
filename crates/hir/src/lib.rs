@@ -2832,16 +2832,20 @@ fn const_context_reason(
 /// mirror-exempt (they name traits/implementers, judged by the trait
 /// definition diagnostics, not the type mirror).
 fn in_reserved_with_region(node: &syntax::SyntaxNode) -> bool {
-    if node
-        .ancestors()
-        .any(|n| ast::ImplElement::can_cast(n.kind()))
-        && !node.ancestors().any(|n| ast::Member::can_cast(n.kind()))
-    {
-        // Inside an impl element but outside any member: the head.
-        return true;
+    // Walk up to the nearest `with` group or element (`impl`, `unsafe`,
+    // `for`, even one written without its group). Under an element and
+    // outside a member is a head, so reserved; elsewhere it is reserved
+    // unless the member context is live.
+    let mut in_member = false;
+    for n in node.ancestors() {
+        if ast::Member::can_cast(n.kind()) {
+            in_member = true;
+        } else if ast::Element::can_cast(n.kind()) || ast::WithGroup::can_cast(n.kind()) {
+            let head = !in_member && ast::Element::can_cast(n.kind());
+            return head || syntax::semantic_member_context(node).is_none();
+        }
     }
-    node.ancestors().any(|n| ast::WithGroup::can_cast(n.kind()))
-        && syntax::semantic_member_context(node).is_none()
+    false
 }
 
 /// A MEMBER's own turbofish list on the node that carries it: one level

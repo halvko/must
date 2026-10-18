@@ -147,6 +147,10 @@ pub(crate) fn validate(root: &SyntaxNode) -> Vec<SyntaxError> {
             validate_with_group(&group, &mut errors);
         } else if let Some(only) = ast::OnlyClause::cast(node.clone()) {
             validate_only_clause(&only, &mut errors);
+        } else if let Some(element) = ast::Element::cast(node.clone())
+            && let Some(owner) = node.parent().filter(|p| ast::Item::can_cast(p.kind()))
+        {
+            reject_element_outside_group(&element, &owner, &mut errors);
         } else if let Some(unsafe_element) = ast::UnsafeElement::cast(node.clone()) {
             // Reserved (TR01): the `unsafe` modifier head — `unsafe impl
             // send;` markers and `unsafe { ... }` element groups.
@@ -454,6 +458,142 @@ fn ceiling_error(name: &str, seen: &[String]) -> Option<String> {
     ))
 }
 
+/// An element written straight after the item's value, its `with { ... }`
+/// left out (`type P = struct { ... } impl Self { ... };`): on a `type` or
+/// `trait`, reports the missing group, echoing the element, with a fix that
+/// wraps it (and writes a type's headless `impl` as `impl Self`); on a
+/// `static`, which takes no group, refuses it.
+fn reject_element_outside_group(
+    element: &ast::Element,
+    owner: &SyntaxNode,
+    errors: &mut Vec<SyntaxError>,
+) {
+    let what = match element {
+        ast::Element::ImplElement(_) => "an `impl`",
+        ast::Element::UnsafeElement(_) => "an `unsafe` element",
+        ast::Element::ForElement(_) => "a `for` element",
+    };
+    let node = element.syntax();
+    let range = node.text_range();
+    let Some(first) = node.first_token() else {
+        return;
+    };
+    if ast::StaticItem::can_cast(owner.kind()) {
+        errors.push(SyntaxError {
+            message: format!("{what} does not belong on a `static` item"),
+            range: first.text_range(),
+            fix: None,
+        });
+        return;
+    }
+    // The element as written, up to its body's `{` or its `;`.
+    let (end, body) = element_body_start(node);
+    let text = node.text().to_string();
+    let mut head = text[..usize::from(end - range.start())]
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
+    // A bare element's missing head is this error's to fix (in a group,
+    // `require_impl_head` reports it).
+    let mut head_edit = None;
+    if let ast::Element::ImplElement(impl_element) = element
+        && impl_element.head().is_none()
+    {
+        let missing = missing_impl_head(owner);
+        head.push(' ');
+        head.push_str(missing.unwrap_or("<name>"));
+        head_edit = missing
+            .zip(impl_element.impl_token())
+            .map(|(head, impl_token)| TextEdit {
+                range: TextRange::empty(impl_token.text_range().end()),
+                insert: format!(" {head}"),
+            });
+    }
+    let written = if body {
+        format!("{head} {{ ... }}")
+    } else {
+        format!("{head};")
+    };
+    errors.push(SyntaxError {
+        message: format!("{what} goes inside a `with` group: `with {{ {written} }}`"),
+        range: first.text_range(),
+        fix: Some(Fix {
+            label: "Wrap in `with { ... }`".to_owned(),
+            edits: std::iter::once(TextEdit {
+                range: TextRange::empty(range.start()),
+                insert: "with { ".to_owned(),
+            })
+            .chain(head_edit)
+            .chain(std::iter::once(TextEdit {
+                range: TextRange::empty(range.end()),
+                insert: " }".to_owned(),
+            }))
+            .collect(),
+        }),
+    });
+}
+
+/// Where an element's body starts: its own `{` or `;`, or the one of the
+/// element a modifier head wraps (`for T impl Show {`), and whether it is a
+/// `{`. A type in the head may hold braces of its own, so only the
+/// element's direct tokens count.
+fn element_body_start(node: &SyntaxNode) -> (text_size::TextSize, bool) {
+    for child in node.children_with_tokens() {
+        match child {
+            SyntaxElement::Token(t) if t.kind() == SyntaxKind::L_BRACE => {
+                return (t.text_range().start(), true);
+            }
+            SyntaxElement::Token(t) if t.kind() == SyntaxKind::SEMICOLON => {
+                return (t.text_range().start(), false);
+            }
+            SyntaxElement::Node(n) if ast::Element::can_cast(n.kind()) => {
+                return element_body_start(&n);
+            }
+            _ => {}
+        }
+    }
+    (node.text_range().end(), false)
+}
+
+/// What a headless `impl` stands for in `owner`'s chain: `Self` on a
+/// `type` (its own members); nothing on a `trait`, whose impls name the
+/// implementing type.
+fn missing_impl_head(owner: &SyntaxNode) -> Option<&'static str> {
+    ast::TypeItem::can_cast(owner.kind()).then_some("Self")
+}
+
+/// `impl { ... }`: the head is not optional. Reported here rather than by
+/// the parser because the owner says whether `Self` is the fix. Returns
+/// whether the head is there, so the liveness checks never judge a missing
+/// one as an unsupported trait impl.
+fn require_impl_head(impl_element: &ast::ImplElement, errors: &mut Vec<SyntaxError>) -> bool {
+    if impl_element.head().is_some() {
+        return true;
+    }
+    let Some(impl_token) = impl_element.impl_token() else {
+        return false;
+    };
+    let fix = impl_element
+        .syntax()
+        .ancestors()
+        .find(|n| ast::Item::can_cast(n.kind()))
+        .as_ref()
+        .and_then(missing_impl_head)
+        .map(|head| Fix {
+            label: format!("Insert `{head}`"),
+            edits: vec![TextEdit {
+                range: TextRange::empty(impl_token.text_range().end()),
+                insert: format!(" {head}"),
+            }],
+        });
+    errors.push(SyntaxError {
+        message: "expected a name after `impl`".to_owned(),
+        range: impl_token.text_range(),
+        fix,
+    });
+    false
+}
+
 /// The liveness/reservation checks for one `impl` element. Live forms:
 /// `impl Self { members }` on a type, `impl Trait { members }`
 /// on a non-generic type and `impl Type { members }` on a trait
@@ -462,6 +602,9 @@ fn ceiling_error(name: &str, seen: &[String]) -> Option<String> {
 /// under a modifier head or non-plain group (those carry their own
 /// reservations).
 fn validate_impl_element(impl_element: &ast::ImplElement, errors: &mut Vec<SyntaxError>) {
+    if !require_impl_head(impl_element, errors) {
+        return;
+    }
     let anchor = impl_element
         .head()
         .map(|head| head.syntax().text_range())

@@ -17274,6 +17274,107 @@ fn the_retired_declaration_clause_is_consumed_whole() {
     );
 }
 
+/// Each error with its quick fix applied alone, the fixed line or `-` when
+/// it has none: what a fix produces is part of what the error says.
+fn check_errors_and_fixes(input: &str, expect: Expect) {
+    let parse = crate::parse(input);
+    let text: String = parse
+        .errors()
+        .iter()
+        .map(|err| {
+            let fixed = err.fix.as_ref().map_or_else(
+                || "-".to_owned(),
+                |fix| {
+                    let start = usize::from(err.range.start());
+                    let line_start = input[..start].rfind('\n').map_or(0, |i| i + 1);
+                    let fixed = apply_fix(input, fix);
+                    let line_end = fixed[line_start..]
+                        .find('\n')
+                        .map_or(fixed.len(), |i| line_start + i);
+                    format!("{}: {}", fix.label, &fixed[line_start..line_end])
+                },
+            );
+            format!(
+                "{:?}..{:?}: {}\n    {fixed}\n",
+                u32::from(err.range.start()),
+                u32::from(err.range.end()),
+                err.message
+            )
+        })
+        .collect();
+    expect.assert_eq(&text);
+}
+
+#[test]
+fn an_impl_without_its_with_group_says_with_and_wraps() {
+    // The group's `with { ... }` left out: one error on `impl`, naming
+    // `with`, instead of "expected an item" on every token after it. A
+    // type's headless `impl {` is its own members, so the fix writes `Self`
+    // and leaves a clean file.
+    let text = "type Point = struct { x: usize, y: usize } impl {};";
+    check_errors_and_fixes(
+        text,
+        expect![[r#"
+            43..47: an `impl` goes inside a `with` group: `with { impl Self { ... } }`
+                Wrap in `with { ... }`: type Point = struct { x: usize, y: usize } with { impl Self {} };
+        "#]],
+    );
+    let fix = crate::parse(text).errors()[0].fix.clone().expect("a fix");
+    assert!(crate::parse(&apply_fix(text, &fix)).errors().is_empty());
+}
+
+#[test]
+fn every_element_written_without_its_group_is_one_error() {
+    // A written head is kept; each bare element is one error and the next
+    // item still parses. A trait's headless `impl {` has no head to guess,
+    // so the message shows a hole and the missing head is reported once
+    // the group is there. A `static` takes no group, so it gets no fix.
+    check_errors_and_fixes(
+        r#"
+type P = struct { x: usize } impl Show { show = fn(p: Self) -> usize { p.x }; } impl Self {};
+trait Show = requires { show: fn(Self) -> usize; } impl usize { show = fn(n: usize) -> usize { n }; } impl {};
+type Q = struct {} unsafe impl send; for Box::<Self> impl Show {};
+static n: usize = 1 impl Self {};
+static m: usize = 2;
+"#,
+        expect![[r#"
+            30..34: an `impl` goes inside a `with` group: `with { impl Show { ... } }`
+                Wrap in `with { ... }`: type P = struct { x: usize } with { impl Show { show = fn(p: Self) -> usize { p.x }; } } impl Self {};
+            81..85: an `impl` goes inside a `with` group: `with { impl Self { ... } }`
+                Wrap in `with { ... }`: type P = struct { x: usize } impl Show { show = fn(p: Self) -> usize { p.x }; } with { impl Self {} };
+            146..150: an `impl` goes inside a `with` group: `with { impl usize { ... } }`
+                Wrap in `with { ... }`: trait Show = requires { show: fn(Self) -> usize; } with { impl usize { show = fn(n: usize) -> usize { n }; } } impl {};
+            197..201: an `impl` goes inside a `with` group: `with { impl <name> { ... } }`
+                Wrap in `with { ... }`: trait Show = requires { show: fn(Self) -> usize; } impl usize { show = fn(n: usize) -> usize { n }; } with { impl {} };
+            225..231: an `unsafe` element goes inside a `with` group: `with { unsafe impl send; }`
+                Wrap in `with { ... }`: type Q = struct {} with { unsafe impl send; } for Box::<Self> impl Show {};
+            243..246: a `for` element goes inside a `with` group: `with { for Box::<Self> impl Show { ... } }`
+                Wrap in `with { ... }`: type Q = struct {} unsafe impl send; with { for Box::<Self> impl Show {} };
+            293..297: an `impl` does not belong on a `static` item
+                -
+        "#]],
+    );
+}
+
+#[test]
+fn a_headless_impl_in_a_group_names_self_only_on_a_type() {
+    // A type's headless `impl {` is its own members, so the fix writes
+    // `Self`; on a trait it names the implementing type, which cannot be
+    // guessed, so there is no fix.
+    check_errors_and_fixes(
+        r#"
+type P = struct {} with { impl {} };
+trait T = requires {} with { impl {} };
+"#,
+        expect![[r#"
+            27..31: expected a name after `impl`
+                Insert `Self`: type P = struct {} with { impl Self {} };
+            67..71: expected a name after `impl`
+                -
+        "#]],
+    );
+}
+
 #[test]
 fn only_and_with_compose_in_either_order() {
     // One loop parses both, so neither order is privileged by the grammar.

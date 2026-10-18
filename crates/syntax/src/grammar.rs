@@ -193,15 +193,24 @@ fn use_name(p: &mut Parser<'_>) {
 /// — one loop, so the pair reads as a pair and no order is privileged by
 /// the grammar.
 ///
+/// An element written without its group (`type P = struct { ... } impl
+/// Self { ... };`) is superset too: validation reports the missing
+/// `with { ... }`, instead of an "expected an item" cascade.
+///
 /// Superset on every item head, `extern` included: validation rejects a
 /// clause wherever it is not at home, in that head's own words. An `extern` item
 /// is why this is a function and not a loop written once — it has no
 /// `= rhs` for a clause to trail, so it needs the same call from its own
 /// arm.
 fn trailing_clauses(p: &mut Parser<'_>) {
-    while p.at(WITH_KW) || p.at(ONLY_KW) || p.at_word("without") {
+    let at_element = |p: &Parser<'_>| {
+        p.at(IMPL_KW) || p.at(FOR_KW) || (p.at(UNSAFE_KW) && matches!(p.nth(1), IMPL_KW | FOR_KW))
+    };
+    while p.at(WITH_KW) || p.at(ONLY_KW) || at_element(p) || p.at_word("without") {
         if p.at(WITH_KW) {
             with_group(p);
+        } else if at_element(p) {
+            element(p);
         } else if p.at(ONLY_KW) {
             only_clause(p);
         } else {
@@ -438,7 +447,7 @@ fn at_member_recovery(p: &Parser<'_>) -> bool {
 /// One element of a `with` group: an `impl` element, or a modifier head
 /// (`unsafe`, `for ⟨Type⟩`) applying to the next element or a brace group
 /// (TR01; composition is `for` outside `unsafe`). Both modifier heads are
-/// reserved — the one supported form is the bare `impl` element.
+/// reserved — the one supported form is the plain `impl` element.
 fn element(p: &mut Parser<'_>) {
     match p.current() {
         IMPL_KW => impl_element(p),
@@ -474,15 +483,12 @@ fn element_or_group(p: &mut Parser<'_>) {
 /// `impl ⟨head⟩ { member* }` (or the body-elided marker form
 /// `impl ⟨head⟩;`). The head is a type mention: `Self` (inherent) or a
 /// bare trait/type name (a trait impl) is supported; a generic-owner
-/// name or a marker is superset-parsed and rejected by validation.
+/// name or a marker is superset-parsed and rejected by validation, a
+/// missing head included (where the owner says whether `Self` fits).
 fn impl_element(p: &mut Parser<'_>) {
     let m = p.start();
     p.bump(IMPL_KW);
-    if p.at(L_BRACE) || p.at(SEMICOLON) {
-        // A head is not optional: saying so here is what stops validation
-        // from reporting a *missing* head as an unsupported trait impl.
-        p.error("expected a name after `impl`");
-    } else {
+    if !p.at(L_BRACE) && !p.at(SEMICOLON) {
         type_(p);
     }
     if p.at(L_BRACE) {
