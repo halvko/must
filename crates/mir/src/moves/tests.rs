@@ -1951,7 +1951,10 @@ const OPTION_MEMBERS: &str = r#"    impl Self {
             }
         }
         map = fn::<U>(f: fn(T) -> U, s: Self) -> Option::<U> {
-            s.flat_map(fn(t) { Option::Some(f(t)) })
+            match s {
+                ::Some(t) => Option::Some(f(t)),
+                ::None => Option::None,
+            }
         }
         as_ref = fn::<@a>(s: Self.&::<@a>) -> Option::<T.&::<@a>> {
             match s {

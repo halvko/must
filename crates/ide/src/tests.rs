@@ -639,6 +639,21 @@ fn diagnostics_include_mir_findings() {
     assert_eq!(u32::from(diagnostics[0].range.start()), 64);
 }
 
+/// A member's MIR lowering findings are reported with the file's
+/// diagnostics (halvko/must#94).
+#[test]
+fn diagnostics_include_members_mir_findings() {
+    let (analysis, file, _pos) = fixture(
+        "type S = struct {} with { impl Self { m = fn () -> usize { let a = 1; let g = fn () -> usize { a$0 }; g() } } };",
+    );
+    let diagnostics = analysis.diagnostics(file);
+    assert_eq!(diagnostics.len(), 1, "{diagnostics:?}");
+    assert_eq!(
+        diagnostics[0].message,
+        "`a` is a local of an enclosing function; captures are not supported yet"
+    );
+}
+
 /// A member's loan findings are reported with the file's diagnostics.
 #[test]
 fn diagnostics_include_members_loan_findings() {
