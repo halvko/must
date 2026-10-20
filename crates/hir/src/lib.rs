@@ -46,8 +46,9 @@ pub use outlives::{OutlivesDiagnostic, outlives_check};
 pub use scopes::{
     ALLOC_RESULT_NAME, Builtin, ConstLegality, ExprScopes, FileScope, NEXT_CHAR_NAME,
     READ_LINE_RESULT_NAME, Resolution, SyntheticDecl, TypeScope, UTF8_RESULT_NAME,
-    alloc_result_loc, expr_scopes, file_scope, next_char_loc, read_line_result_loc, resolutions,
-    synthetic_decl_loc, synthetic_decl_named, synthetic_decls, type_scope, utf8_result_loc,
+    alloc_result_loc, expr_scopes, file_scope, index_is_a_call, next_char_loc, prelude_index_loc,
+    read_line_result_loc, resolutions, synthetic_decl_loc, synthetic_decl_named, synthetic_decls,
+    type_scope, utf8_result_loc,
 };
 pub use traits::{BoundDotOffer, BoundSlot, bound_dot_offers, bound_slots, dict_param_count};
 pub use trap_sites::{

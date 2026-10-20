@@ -2111,7 +2111,19 @@ check-time error naming both lengths. Because the length is known, an index
 the checker can *evaluate* is bounds-checked right then: `let a = [1, 2];
 a[2]` is a compile-time squiggle reading `index out of bounds: the length is
 2 but the index is 2`. The identical text is what a genuinely runtime-only
-index traps with — squiggle text and trap text are one render.
+index panics with — squiggle text and panic text are one render.
+
+Indexing is a function call. `a[i]` is `index(a.&, i).*`, and an element that
+is written or borrowed `.&mut` goes through `index_mut(a.&mut, i)` instead:
+two `const fn`s in the prelude that panic when `i` is out of range. So the
+check happens wherever an element is reached, read, written or borrowed, and
+a const context can index; an index out of range there is a compile error.
+Because the call borrows the whole array, borrows of two different elements
+conflict exactly as two borrows of the array do, and an element that cannot
+be copied cannot be read out (`cannot move out of a borrow`). `a[i].&raw`
+goes through the same call, so taking a raw pointer to an element checks the
+index too. There is no unchecked way to name an element: an address past the
+end is something only unsafe code makes, from a pointer it already has.
 
 Arrays are const-legal, which is the flagship pattern: build a table
 imperatively in a `const { ... }` block and *freeze* the finished value into

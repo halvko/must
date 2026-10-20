@@ -12,7 +12,7 @@ use std::cell::OnceCell;
 use syntax::TextRange;
 
 use crate::cfg::{self, BitSet, Point};
-use crate::{LocalId, MirBody, ProjElem, StatementKind};
+use crate::{LocalId, MirBody, ProjElem, StatementKind, TerminatorKind, ValueExpr};
 
 #[cfg(test)]
 mod tests;
@@ -102,16 +102,17 @@ struct ItemCheck<'db> {
 
 impl ItemCheck<'_> {
     fn body(&self, body: &MirBody, out: &mut Vec<UnusedDiagnostic>) {
+        let elements = ElementSteps::new(self.db, body);
         // Per local, the binding it is judged as. A linear local's loss is
-        // the leak error's; a raw pointer can read an addressable one.
+        // the leak error's; a pointer can read one whose address escapes.
         let tracked: Vec<Option<BindingId>> = body
             .locals
             .iter()
-            .map(|(_, data)| {
+            .map(|(local, data)| {
                 let binding = data.binding?;
                 let name = self.hir_body.bindings[binding].written_name()?;
                 let skip = name.starts_with('_')
-                    || data.addressable
+                    || elements.escapes.contains(cfg::local_index(local))
                     || matches!(data.ty, hir::Ty::Error)
                     || !hir::capability::has_forget(self.db, &data.ty);
                 (!skip).then_some(binding)
@@ -120,7 +121,7 @@ impl ItemCheck<'_> {
         if tracked.iter().all(Option::is_none) {
             return;
         }
-        let reads = |point| reads_at(body, point);
+        let reads = |point| reads_at(body, &elements, point);
         // Reads in unreachable code count: the binding is used there.
         let mut used = BitSet::new(body.locals.len());
         for (block, _) in body.blocks.iter() {
@@ -138,7 +139,8 @@ impl ItemCheck<'_> {
                 continue;
             }
             for point in cfg::points_of(body, block) {
-                let Some(local) = cfg::def_at(body, point).or_else(|| in_place_write(body, point))
+                let Some(local) =
+                    cfg::def_at(body, point).or_else(|| in_place_write(body, &elements, point))
                 else {
                     continue;
                 };
@@ -251,23 +253,170 @@ fn root_binding(
     }
 }
 
-/// The locals a point reads, where a write into a local (`s.f = v`) does
-/// not read it.
-fn reads_at(body: &MirBody, point: Point) -> Vec<LocalId> {
+/// The `a[i]` steps ([`cfg::IndexStep`]) as this pass sees them. Their
+/// array borrows reach no further than their calls, so they do not let a
+/// pointer read the array later; and a step only ever written through
+/// (`a[i] = v`, `a[i].f = v`, `a[i][j] = v`) is a write into `a`, which is
+/// how the lowering's borrow and call read before it.
+struct ElementSteps {
+    /// The locals whose address a pointer that outlives its statement may
+    /// hold: named by a `.&raw`, a borrow other than a step's array
+    /// borrow, or a borrow of an element a step returns.
+    escapes: BitSet,
+    /// The array borrows of the write-only steps, with the local the
+    /// write lands in: borrowing for the write is no read of it.
+    borrows: FxHashMap<LocalId, LocalId>,
+    /// The element borrows of the write-only steps, with the same local.
+    writes: FxHashMap<LocalId, LocalId>,
+}
+
+impl ElementSteps {
+    fn new(db: &dyn Db, body: &MirBody) -> ElementSteps {
+        let steps = cfg::index_steps(db, body);
+        let by_dest: FxHashMap<LocalId, &cfg::IndexStep> =
+            steps.iter().map(|step| (step.dest, step)).collect();
+        let step_borrows: FxHashSet<LocalId> = steps.iter().map(|step| step.borrow).collect();
+        let root = |place: &crate::Place| step_root(&by_dest, place);
+        let mut escapes = BitSet::new(body.locals.len());
+        // The locals read other than by a step's own plumbing, and the
+        // step a step's array borrow is rooted in.
+        let mut read = BitSet::new(body.locals.len());
+        let mut feeds: FxHashMap<LocalId, LocalId> = FxHashMap::default();
+        let mut mark = |place: &crate::Place| {
+            read.insert(cfg::local_index(place.local));
+        };
+        for (_, data) in body.blocks.iter() {
+            for stmt in &data.statements {
+                let StatementKind::Assign { dest, value } = &stmt.kind else {
+                    continue;
+                };
+                match value {
+                    ValueExpr::Borrow { place, .. } if step_borrows.contains(&dest.local) => {
+                        if by_dest.contains_key(&place.local) {
+                            feeds.insert(place.local, dest.local);
+                        }
+                        place_operands(place, &mut mark);
+                    }
+                    ValueExpr::Borrow { place, .. } | ValueExpr::AddrOf { place, .. } => {
+                        let (local, direct) = root(place);
+                        if direct {
+                            escapes.insert(cfg::local_index(local));
+                        }
+                        cfg::place_places(place, &mut mark);
+                    }
+                    value => cfg::value_places(value, &mut mark),
+                }
+                place_operands(dest, &mut mark);
+            }
+            match &data.terminator.kind {
+                // The callee and the array borrow are the step's own.
+                TerminatorKind::Call { args, dest, .. } if by_dest.contains_key(dest) => {
+                    if let Some(index) = args.get(1) {
+                        cfg::operand_places(index, &mut mark);
+                    }
+                }
+                TerminatorKind::Call { callee, args, .. } => {
+                    cfg::operand_places(callee, &mut mark);
+                    for arg in args {
+                        cfg::operand_places(arg, &mut mark);
+                    }
+                }
+                TerminatorKind::SwitchBool { discr, .. }
+                | TerminatorKind::SwitchVariant { discr, .. } => {
+                    cfg::operand_places(discr, &mut mark);
+                }
+                _ => {}
+            }
+        }
+        // A step is write-only when its element borrow is read by nothing
+        // but the array borrow of a step that is write-only itself.
+        let borrow_dest: FxHashMap<LocalId, LocalId> =
+            steps.iter().map(|step| (step.borrow, step.dest)).collect();
+        let write_only = |mut dest: LocalId| loop {
+            if read.contains(cfg::local_index(dest)) {
+                break false;
+            }
+            match feeds.get(&dest).and_then(|borrow| borrow_dest.get(borrow)) {
+                Some(&next) => dest = next,
+                None => break true,
+            }
+        };
+        let mut borrows = FxHashMap::default();
+        let mut writes = FxHashMap::default();
+        for step in &steps {
+            let (local, direct) = root(&step.place);
+            if direct && write_only(step.dest) {
+                borrows.insert(step.borrow, local);
+                writes.insert(step.dest, local);
+            }
+        }
+        ElementSteps {
+            escapes,
+            borrows,
+            writes,
+        }
+    }
+}
+
+/// The local `place` stands in, through the steps it is rooted at, and
+/// whether the path there leads through no other pointer.
+fn step_root<'a>(
+    by_dest: &FxHashMap<LocalId, &'a cfg::IndexStep>,
+    mut place: &'a crate::Place,
+) -> (LocalId, bool) {
+    loop {
+        match by_dest.get(&place.local) {
+            Some(step) => place = &step.place,
+            None => {
+                break (
+                    place.local,
+                    place.projection.first() != Some(&ProjElem::Deref),
+                );
+            }
+        }
+    }
+}
+
+/// The places a place's element indices read.
+fn place_operands(place: &crate::Place, f: &mut impl FnMut(&crate::Place)) {
+    for elem in &place.projection {
+        if let ProjElem::Index(op) = elem {
+            cfg::operand_places(op, f);
+        }
+    }
+}
+
+/// The locals a point reads, where a write into a local (`s.f = v`, and
+/// the borrow an `s[i] = v` writes through) does not read it.
+fn reads_at(body: &MirBody, elements: &ElementSteps, point: Point) -> Vec<LocalId> {
     let mut reads = cfg::uses_at(body, point);
-    if let Some(written) = in_place_write(body, point) {
+    if let Some(written) = in_place_write(body, elements, point) {
+        reads.retain(|&local| local != written);
+    }
+    if let Some(StatementKind::Assign { dest, .. }) = body.blocks[point.block]
+        .statements
+        .get(point.index)
+        .map(|stmt| &stmt.kind)
+        && let Some(&written) = elements.borrows.get(&dest.local)
+    {
         reads.retain(|&local| local != written);
     }
     reads
 }
 
 /// The local `s` of a write into it, `s.f = v` or `s[i] = v`, when nothing
-/// else in the statement reads `s`. A write through a deref is not one.
-fn in_place_write(body: &MirBody, point: Point) -> Option<LocalId> {
+/// else in the statement reads `s`. A write through a deref is not one,
+/// unless the deref is a write-only `a[i]` step's.
+fn in_place_write(body: &MirBody, elements: &ElementSteps, point: Point) -> Option<LocalId> {
     let stmt = body.blocks[point.block].statements.get(point.index)?;
     let StatementKind::Assign { dest, value } = &stmt.kind else {
         return None;
     };
+    if let Some(&written) = elements.writes.get(&dest.local) {
+        let mut read = false;
+        cfg::value_places(value, &mut |place| read |= place.local == written);
+        return (!read).then_some(written);
+    }
     if dest.projection.is_empty()
         || dest
             .projection

@@ -1374,7 +1374,7 @@ impl LowerCtx<'_> {
                 Operand::Copy(dest.into())
             }
             // `a[i]`: base and index evaluate, then the element is read
-            // with a runtime bounds check (an ordinary trap, not UB). A
+            // through the prelude's `index` (see `Self::index_call`). A
             // diagnosed base (not an array / unknown type) or a
             // compile-time OOB is a pending value trap on this expression;
             // the placeholder is never observed.
@@ -1398,6 +1398,21 @@ impl LowerCtx<'_> {
                     return Operand::Const(Const::Unit);
                 }
                 match self.ty(*base) {
+                    // A value with no place of its own (a call's result, a
+                    // literal, an item's value) is stored in a temp the
+                    // prelude's `index` can borrow.
+                    array @ Ty::Array { .. } if hir::index_is_a_call(self.db, self.loc.file) => {
+                        let temp = b.temp(array.clone());
+                        b.push_assign(temp, ValueExpr::Use(base_op), *base);
+                        let base = PlaceBase::Place(temp.into());
+                        let Some(place) = self.index_call(b, expr, array, base, index_op, false)
+                        else {
+                            return Operand::Const(Const::Unit);
+                        };
+                        let dest = b.temp(self.ty(expr));
+                        b.push_assign(dest, ValueExpr::Use(Operand::Copy(place)), expr);
+                        Operand::Copy(dest.into())
+                    }
                     Ty::Array { .. } => {
                         let dest = b.temp(self.ty(expr));
                         b.push_assign(
@@ -2645,12 +2660,14 @@ impl LowerCtx<'_> {
             // `{error}`-typed links skip the write silently, keeping
             // lowering total, like the name-rooted path's missing-index
             // case.
-            let Some(projection) =
-                self.lower_place_projection(b, &chain, Some(crate::ProjElem::Deref))
-            else {
+            let root = PlaceBase::Place(Place {
+                local,
+                projection: vec![crate::ProjElem::Deref],
+            });
+            let Some(place) = self.lower_place_projection(b, &chain, root, true) else {
                 return;
             };
-            b.push_assign(Place { local, projection }, ValueExpr::Use(value_op), value);
+            b.push_assign(place.into_place(), ValueExpr::Use(value_op), value);
             return;
         }
         // Inference rejected the root as an assignment target (immutable
@@ -2688,38 +2705,15 @@ impl LowerCtx<'_> {
                     // `a`'s index in `p`, then `b`'s index in `p.a`.
                     // Element indices evaluate here, innermost first too —
                     // after the RHS (which the caller lowered), a fixed,
-                    // deterministic order.
-                    let mut projection = Vec::with_capacity(chain.len());
-                    for &link in chain.iter().rev() {
-                        match &self.body.exprs[link] {
-                            ExprData::Field { receiver, name, .. } => {
-                                match self.field_index(*receiver, name) {
-                                    Some(index) => projection.push(crate::ProjElem::Field(index)),
-                                    // No index and no diagnosed trap above:
-                                    // the receiver's type is `{error}`
-                                    // (infectious and silent), so the value
-                                    // the root would hold is already trapped
-                                    // upstream — skip the write, like the
-                                    // read path's never-observed
-                                    // placeholder, and keep lowering total.
-                                    None => return,
-                                }
-                            }
-                            ExprData::Index { base, index } => {
-                                // A non-array base was diagnosed (a pending
-                                // value trap on the link, handled above);
-                                // `{error}` bases skip the write silently,
-                                // like a missing field index.
-                                if !matches!(self.ty(*base), Ty::Array { .. }) {
-                                    return;
-                                }
-                                let index_op = self.lower_expr(b, *index);
-                                projection.push(crate::ProjElem::Index(index_op));
-                            }
-                            _ => unreachable!("chain holds only projection expressions"),
-                        }
-                    }
-                    b.push_assign(Place { local, projection }, ValueExpr::Use(value_op), value);
+                    // deterministic order. An `{error}`-typed link (no
+                    // diagnosed trap above, so the value the root would
+                    // hold is already trapped upstream) skips the write,
+                    // like the read path's never-observed placeholder.
+                    let root = PlaceBase::Place(local.into());
+                    let Some(place) = self.lower_place_projection(b, &chain, root, true) else {
+                        return;
+                    };
+                    b.push_assign(place.into_place(), ValueExpr::Use(value_op), value);
                 }
                 // A local of an enclosing function: the same unsupported
                 // capture the read path (`lower_name_ref`) reports.
@@ -2865,11 +2859,16 @@ impl LowerCtx<'_> {
         }
         let lead = matches!(&self.body.exprs[root], ExprData::Deref { .. })
             .then_some(crate::ProjElem::Deref);
+        let root = PlaceBase::Place(Place {
+            local,
+            projection: lead.into_iter().collect(),
+        });
         // `{error}`-typed links read as the never-observed placeholder,
         // like the general path's missing-field-index case.
-        let Some(projection) = self.lower_place_projection(b, &chain, lead) else {
+        let Some(place) = self.lower_place_projection(b, &chain, root, false) else {
             return Some(Operand::Const(Const::Unit));
         };
+        let place = place.into_place();
         if self.value_traps.contains_key(&expr) {
             return Some(Operand::Const(Const::Unit));
         }
@@ -2880,8 +2879,7 @@ impl LowerCtx<'_> {
         // A whole local of a type with no `forget` capability cannot be
         // duplicated, so its read is the last one: a MOVE (see
         // `Operand::Move`).
-        let moved = projection.is_empty() && !hir::capability::has_forget(self.db, &ty);
-        let place = Place { local, projection };
+        let moved = place.projection.is_empty() && !hir::capability::has_forget(self.db, &ty);
         let dest = b.temp(ty);
         let read = if moved {
             Operand::Move(place)
@@ -2909,15 +2907,15 @@ impl LowerCtx<'_> {
     ///   pointer — the ORIGINAL allocation's identity — with the extended
     ///   path: no intermediate materialization, no new allocation. Nothing
     ///   is promoted (the root local's *value* is read, not its slot
-    ///   addressed), and nothing is bounds-checked at minting — validity
-    ///   is a deref-time judgement, so an out-of-range address mints
-    ///   silently and every later deref of it is detected UB.
+    ///   addressed). An element step goes through the prelude's `index`
+    ///   like any other, so it is bounds-checked there; past that, validity
+    ///   is a deref-time judgement.
     ///
     /// This is the ONE walk both `.&raw` and `.&` share. `flavor` decides
-    /// only which value expression is planted at the end; every place rule, every
-    /// trap and the `addressable` marking are identical, which is the
-    /// point: the two flavors differ in what they PROMISE, never in what
-    /// they compute.
+    /// only which value expression is planted at the end; every place
+    /// rule, every element step (the prelude's checked `index`, for a raw
+    /// pointer too), every trap and the `addressable` marking are
+    /// identical.
     fn lower_addr_of_flavored(
         &mut self,
         b: &mut BodyBuilder,
@@ -2945,17 +2943,15 @@ impl LowerCtx<'_> {
             if let Some((link, messages)) = self.first_link_trap(chain.iter().rev().copied()) {
                 return self.trap(b, link, messages);
             }
-            let Some(projection) =
-                self.lower_place_projection(b, &chain, Some(crate::ProjElem::Deref))
-            else {
+            let root = PlaceBase::Place(Place {
+                local,
+                projection: vec![crate::ProjElem::Deref],
+            });
+            let Some(place) = self.lower_place_projection(b, &chain, root, mutable) else {
                 return Operand::Const(Const::Unit);
             };
             let dest = b.temp(self.ty(expr));
-            b.push_assign(
-                dest,
-                flavor.address_of(mutable, Place { local, projection }),
-                expr,
-            );
+            b.push_assign(dest, flavor.address_of(mutable, place.into_place()), expr);
             return Operand::Copy(dest.into());
         }
         // A broken link in the chain (unknown field, non-record receiver,
@@ -3017,18 +3013,25 @@ impl LowerCtx<'_> {
                     .unwrap_or(hir::Constness::Static);
                 match constness {
                     hir::Constness::Static => {
-                        let Some(projection) = self.lower_place_projection(b, &chain, None) else {
+                        let root = PlaceBase::Static {
+                            item: loc,
+                            projection: Vec::new(),
+                        };
+                        let Some(place) = self.lower_place_projection(b, &chain, root, mutable)
+                        else {
                             return Operand::Const(Const::Unit);
                         };
+                        let value = match place {
+                            PlaceBase::Static { item, projection } => {
+                                ValueExpr::AddrOfStatic { item, projection }
+                            }
+                            // An element step went through `index`: the
+                            // address is the element's, behind the borrow
+                            // it returned.
+                            PlaceBase::Place(place) => flavor.address_of(mutable, place),
+                        };
                         let dest = b.temp(self.ty(expr));
-                        b.push_assign(
-                            dest,
-                            ValueExpr::AddrOfStatic {
-                                item: loc,
-                                projection,
-                            },
-                            expr,
-                        );
+                        b.push_assign(dest, value, expr);
                         Operand::Copy(dest.into())
                     }
                     hir::Constness::Const => {
@@ -3070,15 +3073,12 @@ impl LowerCtx<'_> {
         expr: ExprId,
     ) -> Operand {
         b.locals[local].addressable = true;
-        let Some(projection) = self.lower_place_projection(b, chain, None) else {
+        let root = PlaceBase::Place(local.into());
+        let Some(place) = self.lower_place_projection(b, chain, root, mutable) else {
             return Operand::Const(Const::Unit);
         };
         let dest = b.temp(self.ty(expr));
-        b.push_assign(
-            dest,
-            flavor.address_of(mutable, Place { local, projection }),
-            expr,
-        );
+        b.push_assign(dest, flavor.address_of(mutable, place.into_place()), expr);
         Operand::Copy(dest.into())
     }
 
@@ -3234,37 +3234,132 @@ impl LowerCtx<'_> {
     }
 
     /// Resolve a place chain's links (outermost first, as the target/place
-    /// walks collect them) into projection elements, innermost first —
-    /// field names to canonical indices, index expressions to operands
-    /// (evaluated here, innermost first). `lead` prepends a
-    /// [`crate::ProjElem::Deref`] for pointer-rooted places. `None` when a
-    /// link is `{error}`-typed (silently broken upstream): the caller
-    /// skips the operation and keeps lowering total.
+    /// walks collect them) onto `base`, innermost first: field names to
+    /// canonical indices, element steps to the prelude's checked call
+    /// ([`Self::index_call`]), with each index operand evaluated where its
+    /// step is. `mutable` says the access writes the place or takes it
+    /// `.&mut` or `.&raw mut`, which is what `index_mut` is for. `None`
+    /// when a link is `{error}`-typed (silently broken upstream): the
+    /// caller skips the operation and keeps lowering total.
     fn lower_place_projection(
         &mut self,
         b: &mut BodyBuilder,
         chain: &[ExprId],
-        lead: Option<crate::ProjElem>,
-    ) -> Option<Vec<crate::ProjElem>> {
-        let mut projection = Vec::with_capacity(chain.len() + lead.is_some() as usize);
-        projection.extend(lead);
+        mut base: PlaceBase,
+        mutable: bool,
+    ) -> Option<PlaceBase> {
         for &link in chain.iter().rev() {
             match &self.body.exprs[link] {
                 ExprData::Field { receiver, name, .. } => {
                     let index = self.field_index(*receiver, name)?;
-                    projection.push(crate::ProjElem::Field(index));
+                    base.projection_mut().push(crate::ProjElem::Field(index));
                 }
-                ExprData::Index { base, index } => {
-                    if !matches!(self.ty(*base), Ty::Array { .. }) {
+                ExprData::Index { base: array, index } => {
+                    let (array, index) = (*array, *index);
+                    let array_ty = self.ty(array);
+                    if !matches!(array_ty, Ty::Array { .. }) {
                         return None;
                     }
-                    let index_op = self.lower_expr(b, *index);
-                    projection.push(crate::ProjElem::Index(index_op));
+                    let index_op = self.lower_expr(b, index);
+                    // A diagnosed step (a compile-time out-of-bounds index):
+                    // its trap fires instead of the access, so the call
+                    // must not run.
+                    if self.value_traps.contains_key(&link) {
+                        return None;
+                    }
+                    if !hir::index_is_a_call(self.db, self.loc.file) {
+                        base.projection_mut().push(crate::ProjElem::Index(index_op));
+                        continue;
+                    }
+                    let referent = self.index_call(b, link, array_ty, base, index_op, mutable)?;
+                    base = PlaceBase::Place(referent);
                 }
                 _ => unreachable!("chain holds only projection expressions"),
             }
         }
-        Some(projection)
+        Some(base)
+    }
+
+    /// `a[i]` outside the prelude: `index(a.&, i).*`, or
+    /// `index_mut(a.&mut, i).*` when `mutable`. The bounds check is the
+    /// prelude's, so an index out of range panics with its message
+    /// whatever the element is reached for, a borrow or a `.&raw`
+    /// included. Returns the element's place, through the returned
+    /// borrow; `None` for a length this body cannot name (broken
+    /// upstream).
+    ///
+    /// The checks over MIR see through the call to `a`'s element step
+    /// ([`crate::cfg::index_steps`]): what the user wrote is an access of the
+    /// element, and that is the access they judge.
+    fn index_call(
+        &mut self,
+        b: &mut BodyBuilder,
+        link: ExprId,
+        array: Ty,
+        base: PlaceBase,
+        index: Operand,
+        mutable: bool,
+    ) -> Option<Place> {
+        let Ty::Array { elem, len } = &array else {
+            return None;
+        };
+        let len = match len {
+            hir::ConstArgValue::Int(len) => Const::Int(
+                i128::try_from(*len)
+                    .ok()
+                    .and_then(|len| hir::IntValue::new(hir::IntKind::Usize, len))?,
+            ),
+            hir::ConstArgValue::Param { item, index, .. } if *item == self.loc => {
+                Const::ConstParam(self.const_param_index(*index))
+            }
+            _ => return None,
+        };
+        let (borrow, mutable) = match base {
+            PlaceBase::Place(place) => {
+                // A deref-led place reads its root's pointer; anything
+                // else borrows the root's own storage.
+                if place.projection.first() != Some(&crate::ProjElem::Deref) {
+                    b.locals[place.local].addressable = true;
+                }
+                (ValueExpr::Borrow { mutable, place }, mutable)
+            }
+            // A static is read-only, so its elements are only ever read.
+            PlaceBase::Static { item, projection } => {
+                (ValueExpr::AddrOfStatic { item, projection }, false)
+            }
+        };
+        let borrowed_ty = Ty::borrow(mutable, hir::ty::Region::Erased, array.clone());
+        let referent_ty = Ty::borrow(mutable, hir::ty::Region::Erased, (**elem).clone());
+        let borrowed = b.temp(borrowed_ty.clone());
+        b.push_assign(borrowed, borrow, link);
+        let callee = b.temp(Ty::fn_type(
+            vec![borrowed_ty, Ty::Int(hir::IntKind::Usize)],
+            referent_ty.clone(),
+        ));
+        b.push_assign(
+            callee,
+            ValueExpr::Instantiate {
+                item: hir::prelude_index_loc(self.db, mutable),
+                const_args: vec![Operand::Const(len)],
+            },
+            link,
+        );
+        let dest = b.temp(referent_ty);
+        let next = b.new_block();
+        b.terminate(
+            TerminatorKind::Call {
+                callee: Operand::Copy(callee.into()),
+                args: vec![Operand::Copy(borrowed.into()), index],
+                dest,
+                target: Some(next),
+            },
+            link,
+        );
+        b.current = next;
+        Some(Place {
+            local: dest,
+            projection: vec![crate::ProjElem::Deref],
+        })
     }
 
     /// A resolved variant mention's value, whichever spelling reached it:
@@ -3680,6 +3775,34 @@ impl LowerCtx<'_> {
             expr,
         );
         Operand::Copy(dest.into())
+    }
+}
+
+/// Where a place walk stands ([`LowerCtx::lower_place_projection`]): a
+/// MIR place, or a path inside a `static`'s one allocation, which only
+/// [`ValueExpr::AddrOfStatic`] names.
+enum PlaceBase {
+    Place(Place),
+    Static {
+        item: ItemLoc,
+        projection: Vec<crate::ProjElem>,
+    },
+}
+
+impl PlaceBase {
+    fn projection_mut(&mut self) -> &mut Vec<crate::ProjElem> {
+        match self {
+            PlaceBase::Place(place) => &mut place.projection,
+            PlaceBase::Static { projection, .. } => projection,
+        }
+    }
+
+    /// The MIR place, for a walk that started at one.
+    fn into_place(self) -> Place {
+        match self {
+            PlaceBase::Place(place) => place,
+            PlaceBase::Static { .. } => unreachable!("a static-rooted walk ends as a static"),
+        }
     }
 }
 

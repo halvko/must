@@ -255,6 +255,59 @@ static f = fn (i: usize) -> usize {
     );
 }
 
+#[test]
+fn a_nested_element_write_nothing_reads_afterwards_is_never_read() {
+    // `m[i][j] = 7` borrows `m` for two `index_mut` calls; the borrows
+    // only serve the write, so they read nothing.
+    check(
+        r#"
+static f = fn (i: usize, j: usize) -> usize {
+    let mut m = [[1, 2], [3, 4]];
+    let first = m[0][0];
+    m[i][j] = 7;
+    first
+};
+"#,
+        expect![[r#"
+            `7`: value written to `m` is never read
+        "#]],
+    );
+}
+
+#[test]
+fn an_element_field_write_nothing_reads_afterwards_is_never_read() {
+    check(
+        r#"
+static f = fn (i: usize) -> usize {
+    let mut a: [struct { x: usize }; 2] = [struct { x = 1 }, struct { x = 2 }];
+    let first = a[0].x;
+    a[i].x = 7;
+    first
+};
+"#,
+        expect![[r#"
+            `7`: value written to `a` is never read
+        "#]],
+    );
+}
+
+#[test]
+fn an_element_borrowed_out_is_not_judged() {
+    // The borrow may be written through later, so the array is not
+    // judged, as for any borrowed local.
+    check(
+        r#"
+static f = fn (i: usize) -> usize {
+    let mut a = [1, 2];
+    let r = a[i].&mut;
+    r.* = 5;
+    0
+};
+"#,
+        expect![[r#""#]],
+    );
+}
+
 /// A binding only ever written into is unused, not read by its writes.
 #[test]
 fn a_binding_only_written_field_by_field_is_unused() {

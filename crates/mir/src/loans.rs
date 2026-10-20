@@ -527,6 +527,15 @@ struct BodyCheck<'a> {
     /// Per local: the place it stands for, when it is a compiler temp
     /// holding one copy of a place (see the module doc, "Places").
     aliases: Vec<Option<Place>>,
+    /// The temps holding the element borrow an `a[i]` returns
+    /// ([`cfg::IndexStep`]): their alias is the element, so a path through
+    /// them drops its leading deref.
+    index_temps: BitSet,
+    /// The temps holding the array borrow handed to an `a[i]`'s call. The
+    /// borrow is an access of the whole array, as the call's argument is,
+    /// but no loan: the element borrow the call returns stands for `a[i]`,
+    /// and a loan minted through it is rooted there.
+    index_borrows: BitSet,
     /// The locals that have an alias, in arena order.
     place_temps: Vec<LocalId>,
     /// Per local: the region graph nodes its value's type mentions, sorted.
@@ -568,6 +577,8 @@ impl<'a> BodyCheck<'a> {
             infer,
             cover,
             aliases: Vec::new(),
+            index_temps: BitSet::new(body.locals.len()),
+            index_borrows: BitSet::new(body.locals.len()),
             place_temps: Vec::new(),
             local_regions: Vec::new(),
             local_copyable: Vec::new(),
@@ -578,7 +589,12 @@ impl<'a> BodyCheck<'a> {
             live_regions: Vec::new(),
             live_loans: Vec::new(),
         };
-        check.aliases = check.compute_aliases();
+        let steps = cfg::index_steps(db, body);
+        for step in &steps {
+            check.index_temps.insert(cfg::local_index(step.dest));
+            check.index_borrows.insert(cfg::local_index(step.borrow));
+        }
+        check.aliases = check.compute_aliases(steps);
         check.place_temps = check
             .body
             .locals
@@ -642,12 +658,13 @@ impl<'a> BodyCheck<'a> {
         }
     }
 
-    /// The temps standing for a place: a copy of a place that is projected
-    /// through, itself or as the whole source of a temp that is. A temp
-    /// only ever read whole holds a value, and no loan is rooted in it.
+    /// The temps standing for a place: an `a[i]`'s element borrow, and a
+    /// copy of a place that is projected through, itself or as the whole
+    /// source of a temp that is. A temp only ever read whole holds a
+    /// value, and no loan is rooted in it.
     /// The copy that defines a place temp is no access; every access
     /// through the temp resolves to its place.
-    fn compute_aliases(&self) -> Vec<Option<Place>> {
+    fn compute_aliases(&self, steps: Vec<cfg::IndexStep>) -> Vec<Option<Place>> {
         let mut seen = BitSet::new(self.body.locals.len());
         let mut projected_through = Vec::new();
         self.for_each_place(&mut |place| {
@@ -656,7 +673,19 @@ impl<'a> BodyCheck<'a> {
             }
         });
         let mut aliases: Vec<Option<Place>> = vec![None; self.body.locals.len()];
+        // `a[i]`'s element borrow stands for `a[i]` itself.
+        for step in steps {
+            let mut place = step.place;
+            place.projection.push(ProjElem::Index(step.index));
+            if seen.insert(cfg::local_index(place.local)) {
+                projected_through.push(place.local);
+            }
+            aliases[cfg::local_index(step.dest)] = Some(place);
+        }
         while let Some(local) = projected_through.pop() {
+            if aliases[cfg::local_index(local)].is_some() {
+                continue;
+            }
             let Some(place) = self.copied_place(local) else {
                 continue;
             };
@@ -677,12 +706,7 @@ impl<'a> BodyCheck<'a> {
                     break;
                 }
                 steps += 1;
-                let mut projection = base.projection.clone();
-                projection.extend(place.projection);
-                place = Place {
-                    local: base.local,
-                    projection,
-                };
+                place = self.rebase(base, &place);
             }
             aliases[index] = Some(place);
         }
@@ -693,15 +717,24 @@ impl<'a> BodyCheck<'a> {
     /// at.
     fn resolve(&self, place: &Place) -> Place {
         match &self.aliases[cfg::local_index(place.local)] {
-            Some(base) => {
-                let mut projection = base.projection.clone();
-                projection.extend(place.projection.iter().cloned());
-                Place {
-                    local: base.local,
-                    projection,
-                }
-            }
+            Some(base) => self.rebase(base, place),
             None => place.clone(),
+        }
+    }
+
+    /// `place`, rooted at a temp standing for `base`, as a path from
+    /// `base`'s root. An element borrow's deref is the element step its
+    /// alias already ends in.
+    fn rebase(&self, base: &Place, place: &Place) -> Place {
+        let mut rest = place.projection.as_slice();
+        if self.index_temps.contains(cfg::local_index(place.local)) {
+            rest = rest.strip_prefix(&[ProjElem::Deref]).unwrap_or(rest);
+        }
+        let mut projection = base.projection.clone();
+        projection.extend(rest.iter().cloned());
+        Place {
+            local: base.local,
+            projection,
         }
     }
 
@@ -843,12 +876,17 @@ impl<'a> BodyCheck<'a> {
         for (block, data) in self.body.blocks.iter() {
             for (index, stmt) in data.statements.iter().enumerate() {
                 let StatementKind::Assign {
+                    dest,
                     value: ValueExpr::Borrow { mutable, place },
-                    ..
                 } = &stmt.kind
                 else {
                     continue;
                 };
+                // An `a[i]`'s array borrow lives only for its call; the
+                // element borrow it returns is the alias of `a[i]`.
+                if self.index_borrows.contains(cfg::local_index(dest.local)) {
+                    continue;
+                }
                 // A loan whose region nothing recorded cannot be judged
                 // live anywhere; inference records one for every borrow
                 // the language produces, so this is the broken-program

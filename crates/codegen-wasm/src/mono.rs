@@ -157,6 +157,7 @@ pub enum CallTarget {
     Instance(InstanceKey),
     Print,
     Panic,
+    IndexOutOfBounds,
     /// A call of an `extern` item, resolved to the name the module imports
     /// under and the wasm signature it imports with. The signature is
     /// computed HERE, where the instance's concrete types are in hand, so
@@ -613,6 +614,7 @@ impl<'db> Mono<'db> {
                 match builtin {
                     Builtin::Print => return CallTarget::Print,
                     Builtin::Panic => return CallTarget::Panic,
+                    Builtin::IndexOutOfBounds => return CallTarget::IndexOutOfBounds,
                     Builtin::AllocArray
                     | Builtin::DeallocArray
                     | Builtin::Add
@@ -906,7 +908,10 @@ impl<'db> Mono<'db> {
                 CallTarget::Refused(refusal) => return Err(refusal.clone()),
                 // An `extern` item declares no instance to register — the module
                 // grows an import entry for it in `compile` instead.
-                CallTarget::Print | CallTarget::Panic | CallTarget::Extern { .. } => {}
+                CallTarget::Print
+                | CallTarget::Panic
+                | CallTarget::IndexOutOfBounds
+                | CallTarget::Extern { .. } => {}
             }
         }
         self.register_path.push(item);

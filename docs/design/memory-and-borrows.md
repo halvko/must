@@ -163,6 +163,17 @@
   to the access, assigning the pointer's place or a prefix of it, or moving its root, is
   refused at that write. This is what lets the loan pass judge the access at the place the
   user wrote. The same pin as Rust's shallow borrow of an index or a match guard.
+- **M23** Indexing is a call. Outside the prelude, `a[i]` is `index(a.&, i).*`, and an element
+  written or borrowed `.&mut` is `index_mut(a.&mut, i).*`: `const fn`s written in Must in the
+  prelude, which panic when `i >= N`. So every element a program reaches is bounds-checked
+  where it is reached (issue #184), a const context can index, and an index out of range there
+  is a compile error. The call borrows the whole array, which is why any two element steps
+  overlap (Rust's `IndexMut` rule), why reading `a[0].x` conflicts with a live `a[0].y.&mut`,
+  and why an element that cannot be copied cannot be read out. The checks over MIR see through
+  the call to the element the user named. `a[i].&raw` goes through the same call, so a raw
+  element pointer is derived from a borrow of its array; there is no built-in unchecked
+  element step. An address the index check would refuse is an unsafe cast's job. Inside the
+  prelude `[i]` is the element step itself, which `index` is written with.
 
 ### Ruled, not built
 

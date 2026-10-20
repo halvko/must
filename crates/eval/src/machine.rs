@@ -767,6 +767,45 @@ impl<'db, M: Mode> Machine<'db, M> {
     /// Execute exactly one statement or terminator of the topmost frame.
     /// On `Err`, the frame stack is left intact for inspection.
     pub fn step(&mut self) -> Result<StepEvent, EvalError> {
+        self.step_frame()
+            .map_err(|err| self.blame_caller_of_prelude(err))
+    }
+
+    /// An error raised inside a prelude item is reported at the call in
+    /// the innermost frame outside the prelude: the program's `a[i]`, not
+    /// the line of `index` that panicked.
+    fn blame_caller_of_prelude(&self, mut err: EvalError) -> EvalError {
+        if let Some((loc, origin)) = &err.origin {
+            err.origin = Some(self.user_site(loc, *origin));
+        }
+        err
+    }
+
+    /// The site to report for `origin` in `loc`: itself, or, inside a
+    /// prelude item, the call in the innermost frame outside the prelude.
+    /// Borrows minted and accesses made while a prelude body runs are
+    /// recorded this way too, so their notes name the program's `a[i]`.
+    fn user_site(&self, loc: &ItemLoc, origin: ExprId) -> (ItemLoc, ExprId) {
+        let prelude = base_db::prelude_file(self.db);
+        if loc.file != prelude {
+            return (loc.clone(), origin);
+        }
+        let caller = self
+            .frames
+            .iter()
+            .rev()
+            .find(|frame| frame.loc.file != prelude);
+        match caller {
+            Some(frame) => {
+                let body = &self.lowered(&frame.loc).bodies[frame.body];
+                let origin = body.blocks[frame.block].terminator.origin;
+                (frame.loc.clone(), origin)
+            }
+            None => (loc.clone(), origin),
+        }
+    }
+
+    fn step_frame(&mut self) -> Result<StepEvent, EvalError> {
         let Some(frame) = self.frames.last() else {
             return Err(self.internal_error("step with no live frames".to_owned(), None));
         };
@@ -1002,7 +1041,7 @@ impl<'db, M: Mode> Machine<'db, M> {
                     });
                 }
                 self.jump(*target);
-                return self.step();
+                return self.step_frame();
             }
             TerminatorKind::Unreachable => {
                 return Err(self.internal_error(
@@ -2501,6 +2540,22 @@ impl<'db, M: Mode> Machine<'db, M> {
             }
         }
         match builtin {
+            Builtin::IndexOutOfBounds => {
+                expect_args(self, 2)?;
+                let usize_arg = |value: &Value| match value {
+                    Value::Int(iv) => iv.usize_payload(),
+                    _ => None,
+                };
+                let (Some(len), Some(index)) = (usize_arg(&args[0]), usize_arg(&args[1])) else {
+                    return Err(self.ill_typed("two `usize` arguments", &args[0], loc, origin));
+                };
+                Err(EvalError {
+                    kind: EvalErrorKind::Panic,
+                    message: hir::diag::index_out_of_bounds(len, index),
+                    origin: Some((loc.clone(), origin)),
+                    notes: Vec::new(),
+                })
+            }
             Builtin::Panic => {
                 expect_args(self, 1)?;
                 let Value::Str(text) = &args[0] else {
@@ -3829,7 +3884,7 @@ enum Access {
     Write,
 }
 
-impl<M> Machine<'_, M> {
+impl<M: Mode> Machine<'_, M> {
     /// The root node of `alloc`, created on first use.
     fn borrow_root(&mut self, alloc: AllocId) -> BorrowTag {
         if let Some(&tag) = self.borrow_roots.get(&alloc) {
@@ -3984,6 +4039,7 @@ impl<M> Machine<'_, M> {
                 Access::Write => list.unique.iter().chain(&list.settled).copied().collect(),
             },
         };
+        let site = self.user_site(loc, origin);
         let mut touched = false;
         for other in scan {
             if other == tag {
@@ -4004,14 +4060,14 @@ impl<M> Machine<'_, M> {
             match access {
                 Access::Write => {
                     if victim.state != NodeState::Disabled {
-                        victim.invalidated = Some((loc.clone(), origin));
+                        victim.invalidated = Some(site.clone());
                     }
                     victim.state = NodeState::Disabled;
                 }
                 Access::Read => {
                     if victim.state == NodeState::Unique {
                         victim.state = NodeState::Frozen;
-                        victim.invalidated = Some((loc.clone(), origin));
+                        victim.invalidated = Some(site.clone());
                     }
                 }
             }
@@ -4119,7 +4175,7 @@ impl<M> Machine<'_, M> {
             } else {
                 NodeState::Frozen
             },
-            born: Some((loc.clone(), origin)),
+            born: Some(self.user_site(loc, origin)),
             invalidated: None,
         });
         let list = self.borrow_nodes_of.entry(alloc).or_default();

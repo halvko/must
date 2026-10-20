@@ -4929,7 +4929,21 @@ impl<'a, 'db> InferCtx<'a, 'db> {
                         Ty::Error
                     }
                 };
-                self.carry_borrow_projection(expr, base, &element);
+                // Outside the prelude `a[i]` is `index(a.&, i).*`, so it
+                // starts a borrow-rooted chain the way a `.*` does: a read
+                // that would copy the element out is judged by
+                // [`Self::finish_deref_reads`], and a place position
+                // passes the question on.
+                if crate::scopes::index_is_a_call(self.db, self.file)
+                    && matches!(self.resolve_shallow(&base_ty), Ty::Array { .. })
+                {
+                    self.deref_reads.push((expr, element.clone()));
+                    if self.place_positions.contains(&expr) {
+                        self.borrow_projections.insert(expr);
+                    }
+                } else {
+                    self.carry_borrow_projection(expr, base, &element);
+                }
                 element
             }
             // `place.&raw` / `place.&raw mut`: the operand reads like any
@@ -10619,6 +10633,10 @@ fn builtin_type_unpriced(db: &dyn Db, builtin: Builtin) -> Ty {
     match builtin {
         Builtin::Print => Ty::fn_type(vec![Ty::Str], Ty::Unit),
         Builtin::Panic => Ty::fn_type(vec![Ty::Str], Ty::Never),
+        Builtin::IndexOutOfBounds => Ty::fn_type(
+            vec![Ty::Int(IntKind::Usize), Ty::Int(IntKind::Usize)],
+            Ty::Never,
+        ),
         Builtin::ReadLine => Ty::fn_type(
             Vec::new(),
             Ty::Named(NamedTy::plain(crate::read_line_result_loc(db))),
@@ -10688,6 +10706,7 @@ fn builtin_generics(builtin: Builtin) -> Option<&'static [GenericParamData]> {
         }
         Builtin::Print
         | Builtin::Panic
+        | Builtin::IndexOutOfBounds
         | Builtin::Add
         | Builtin::Offset
         | Builtin::Copy
@@ -10730,6 +10749,7 @@ fn builtin_scheme(db: &dyn Db, builtin: Builtin) -> (ItemLoc, Ty) {
         Builtin::Dangling => Ty::fn_type(Vec::new(), Ty::raw_ptr(true, t)),
         Builtin::Print
         | Builtin::Panic
+        | Builtin::IndexOutOfBounds
         | Builtin::Add
         | Builtin::Offset
         | Builtin::Copy

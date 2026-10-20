@@ -1264,6 +1264,9 @@ fn file_value_and_type_items(
                 let provenance = match scrutinee_layer(db, &ty, scrutinee_slot) {
                     Some(ScrutineeLayer::Value) => SCRUTINEE_ITEM_TIER,
                     Some(ScrutineeLayer::Producer) => SCRUTINEE_PRODUCER_TIER,
+                    // The prelude's items rank with the builtins beside
+                    // them, below what the user wrote.
+                    None if loc.file == base_db::prelude_file(db) => Provenance::Builtin as u8,
                     None => Provenance::Item as u8,
                 };
                 let mut candidate = completion_item_at_tier(

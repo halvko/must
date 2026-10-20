@@ -2504,6 +2504,9 @@ static main = fn() {
               _7: struct { buf: [usize; 2], x: usize }.&raw mut
               _8: struct { buf: [usize; 2], x: usize }.&raw mut
               _9: usize
+              _10: [usize; 2].&mut
+              _11: fn([usize; 2].&mut, usize) -> usize.&mut
+              _12: usize.&mut
               bb0:
                 _1 = [1, 2]
                 _2 = { buf: _1, x: 1 }
@@ -2515,7 +2518,11 @@ static main = fn() {
                 _7.*.1 = 2
                 _8 = _5
                 _9 = _6
-                _8.*.0[_9] = 3
+                _10 = _8.*.0.&mut
+                _11 = instantiate index_mut(2)
+                _12 = call _11(_10, _9) -> bb1
+              bb1:
+                _12.* = 3
                 _0 = ()
                 return
             }
@@ -2562,15 +2569,21 @@ static main = fn() {
               _5: struct { buf: [usize; 2], x: usize }.&raw mut  // p
               _6: usize  // i
               _7: usize
-              _8: usize
-              _9: usize  // a
-              _10: struct { buf: [usize; 2], x: usize }.&raw mut
+              _8: [usize; 2].&
+              _9: fn([usize; 2].&, usize) -> usize.&
+              _10: usize.&
               _11: usize
-              _12: usize  // b
+              _12: usize  // a
               _13: struct { buf: [usize; 2], x: usize }.&raw mut
               _14: usize
-              _15: usize
-              _16: usize  // c
+              _15: usize  // b
+              _16: struct { buf: [usize; 2], x: usize }.&raw mut
+              _17: usize
+              _18: [usize; 2].&
+              _19: fn([usize; 2].&, usize) -> usize.&
+              _20: usize.&
+              _21: usize
+              _22: usize  // c
               bb0:
                 _1 = [1, 2]
                 _2 = { buf: _1, x: 1 }
@@ -2579,17 +2592,25 @@ static main = fn() {
                 _5 = _4
                 _6 = 1
                 _7 = _6
-                _8 = _3.0[_7]
-                _9 = _8
-                _10 = _5
-                _11 = _10.*.1
+                _8 = _3.0.&
+                _9 = instantiate index(2)
+                _10 = call _9(_8, _7) -> bb1
+              bb1:
+                _11 = _10.*
                 _12 = _11
                 _13 = _5
-                _14 = _6
-                _15 = _13.*.0[_14]
-                _16 = _15
-                storage_dead _16
-                storage_dead _12
+                _14 = _13.*.1
+                _15 = _14
+                _16 = _5
+                _17 = _6
+                _18 = _16.*.0.&
+                _19 = instantiate index(2)
+                _20 = call _19(_18, _17) -> bb2
+              bb2:
+                _21 = _20.*
+                _22 = _21
+                storage_dead _22
+                storage_dead _15
                 _0 = ()
                 return
             }
@@ -2668,33 +2689,40 @@ static main = fn() -> usize {
               _0: usize  // return
               _1: [usize; 2]
               _2: [usize; 2]  // a
-              _3: usize.&raw mut
-              _4: usize.&raw mut  // e
-              _5: struct { x: usize }
-              _6: struct { x: usize }  // r
-              _7: struct { x: usize }.&raw mut
-              _8: struct { x: usize }.&raw mut  // p
-              _9: struct { x: usize }.&raw mut
-              _10: usize.&raw mut
-              _11: usize.&raw mut  // q
-              _12: usize.&raw mut
-              _13: usize
+              _3: [usize; 2].&mut
+              _4: fn([usize; 2].&mut, usize) -> usize.&mut
+              _5: usize.&mut
+              _6: usize.&raw mut
+              _7: usize.&raw mut  // e
+              _8: struct { x: usize }
+              _9: struct { x: usize }  // r
+              _10: struct { x: usize }.&raw mut
+              _11: struct { x: usize }.&raw mut  // p
+              _12: struct { x: usize }.&raw mut
+              _13: usize.&raw mut
+              _14: usize.&raw mut  // q
+              _15: usize.&raw mut
+              _16: usize
               bb0:
                 _1 = [1, 2]
                 _2 = _1
-                _3 = _2[0].&raw mut
-                _4 = _3
-                _5 = { x: 1 }
-                _6 = _5
-                _7 = _6.&raw mut
-                _8 = _7
+                _3 = _2.&mut
+                _4 = instantiate index_mut(2)
+                _5 = call _4(_3, 0) -> bb1
+              bb1:
+                _6 = _5.*.&raw mut
+                _7 = _6
+                _8 = { x: 1 }
                 _9 = _8
-                _10 = _9.*.0.&raw mut
+                _10 = _9.&raw mut
                 _11 = _10
                 _12 = _11
-                _13 = _12.*
-                storage_dead _11
-                _0 = _13
+                _13 = _12.*.0.&raw mut
+                _14 = _13
+                _15 = _14
+                _16 = _15.*
+                storage_dead _14
+                _0 = _16
                 return
             }
             fn b1() -> fn() -> usize {
@@ -2725,16 +2753,30 @@ static f = fn {
               _0: ()  // return
               _1: [usize; 3]
               _2: [usize; 3]  // a
-              _3: usize
-              _4: usize  // x
-              _5: usize
+              _3: [usize; 3].&
+              _4: fn([usize; 3].&, usize) -> usize.&
+              _5: usize.&
+              _6: usize
+              _7: usize  // x
+              _8: usize
+              _9: [usize; 3].&mut
+              _10: fn([usize; 3].&mut, usize) -> usize.&mut
+              _11: usize.&mut
               bb0:
                 _1 = [1, 2, 3]
                 _2 = _1
-                _3 = _2[1]
-                _4 = _3
-                _5 = _4
-                _2[2] = _5
+                _3 = _2.&
+                _4 = instantiate index(3)
+                _5 = call _4(_3, 1) -> bb1
+              bb1:
+                _6 = _5.*
+                _7 = _6
+                _8 = _7
+                _9 = _2.&mut
+                _10 = instantiate index_mut(3)
+                _11 = call _10(_9, 2) -> bb2
+              bb2:
+                _11.* = _8
                 _0 = ()
                 return
             }
@@ -2764,11 +2806,25 @@ static f = fn {
               _1: [usize; 2]
               _2: [[usize; 2]; 2]
               _3: [[usize; 2]; 2]  // m
+              _4: [[usize; 2]; 2].&mut
+              _5: fn([[usize; 2]; 2].&mut, usize) -> [usize; 2].&mut
+              _6: [usize; 2].&mut
+              _7: [usize; 2].&mut
+              _8: fn([usize; 2].&mut, usize) -> usize.&mut
+              _9: usize.&mut
               bb0:
                 _1 = [0; 2]
                 _2 = [_1; 2]
                 _3 = _2
-                _3[0][1] = 5
+                _4 = _3.&mut
+                _5 = instantiate index_mut(2)
+                _6 = call _5(_4, 0) -> bb1
+              bb1:
+                _7 = _6.*.&mut
+                _8 = instantiate index_mut(2)
+                _9 = call _8(_7, 1) -> bb2
+              bb2:
+                _9.* = 5
                 _0 = ()
                 return
             }
@@ -6045,9 +6101,9 @@ static double = fn() -> usize {
             194..195: writing to `p` here replaces a pointer the place around it has already been read through: the access that place makes afterwards would go through the old pointer
               note at 184..201: the place is accessed here, through the old pointer
             411..412: writing to `p` here replaces a pointer the place around it has already been read through: the access that place makes afterwards would go through the old pointer
-              note at 421..422: the place is accessed here, through the old pointer
+              note at 401..418: the place is accessed here, through the old pointer
             644..645: writing to `p` here replaces a pointer the place around it has already been read through: the access that place makes afterwards would go through the old pointer
-              note at 634..656: the place is accessed here, through the old pointer
+              note at 634..651: the place is accessed here, through the old pointer
             901..907: writing to `bb.*` here replaces a pointer the place around it has already been read through: the access that place makes afterwards would go through the old pointer
               note at 885..913: the place is accessed here, through the old pointer
         "#]],

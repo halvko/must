@@ -1,0 +1,22 @@
+// The Must half of the prelude: items every file sees without a `use`.
+//
+// `a[i]` outside this file is a call of `index` or `index_mut`. Here, `[i]`
+// is the compiler's own element step.
+
+// `a[i]` read or borrowed `.&`: element `i` of `s`, or a panic.
+static index = const fn::<@a, T, const N: usize>(s: [T; N].&::<@a>, i: usize) -> T.&::<@a> {
+    if i >= N {
+        index_out_of_bounds(N, i)
+    } else {
+        s.*[i].&
+    }
+};
+
+// `a[i]` written or borrowed `.&mut`: element `i` of `s`, or a panic.
+static index_mut = const fn::<@a, T, const N: usize>(s: [T; N].&mut::<@a>, i: usize) -> T.&mut::<@a> {
+    if i >= N {
+        index_out_of_bounds(N, i)
+    } else {
+        s.*[i].&mut
+    }
+};
