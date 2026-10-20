@@ -528,23 +528,22 @@ static main = fn () -> usize { apply(twice, 21) };
     assert_eq!(priced.instances, plain.instances);
 }
 
-/// TODO: references in wasm (halvko/must#16). Until then a borrow of a
-/// temporary is refused like a borrow of a named local.
+/// A borrowing function nothing calls costs the module nothing: no frame,
+/// no stack pointer, the same bytes as the program without it.
 #[test]
-fn borrowing_a_temporary_is_refused_like_any_other_safe_borrow() {
-    let db = RootDatabase::default();
-    let source = r#"
-static get = fn::<@a>(r: i64.&::<@a>) -> i64 { r.* };
-static mk = fn () -> i64 { 7 };
-static main = fn () -> i64 { get(mk().&) };
+fn an_unreached_borrow_costs_the_module_nothing() {
+    const PROGRAM: &str = r#"
+static add = fn (a: usize, b: usize) -> usize { a + b };
+static main = fn () -> usize { add(2, 3) };
 "#;
-    let loc = harness::prepare(&db, source, "main()");
-    let Err(codegen_wasm::CompileError::Unsupported(refusal)) = codegen_wasm::compile(&db, &loc)
-    else {
-        panic!("the backend must refuse a borrow it cannot lay out");
-    };
+    const NEVER: &str = r#"
+static never = fn (n: usize) -> usize { let r = n.&; r.* };
+"#;
+    let with_borrow = format!("{PROGRAM}{NEVER}");
+    let plain = compile(PROGRAM, "main()");
+    let borrowing = compile(&with_borrow, "main()");
     assert_eq!(
-        refusal.message(),
-        "a safe borrow (`.&` / `.&mut`) is not supported by the wasm backend yet"
+        plain.wasm, borrowing.wasm,
+        "a borrow nothing reaches must not change the module"
     );
 }

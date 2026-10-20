@@ -1,20 +1,24 @@
 //! Value layout: how a Must type occupies WebAssembly storage.
 //!
 //! **The slot model.** Every value is a flat sequence of `i64` *slots*.
-//! No linear memory, no shadow stack, no pointers: a record is its fields'
-//! slots end to end, an array is its elements' slots end to end, an enum
-//! is one tag slot followed by its payload columns. Function values occupy
-//! ZERO slots — monomorphization resolves every callee statically, so a fn
-//! value has nothing left to carry at runtime (that is what "dictionaries
-//! die into direct calls" means concretely).
+//! A record is its fields' slots end to end, an array is its elements'
+//! slots end to end, an enum is one tag slot followed by its payload
+//! columns. Function values occupy ZERO slots — monomorphization resolves
+//! every callee statically, so a fn value has nothing left to carry at
+//! runtime (that is what "dictionaries die into direct calls" means
+//! concretely). A safe borrow is ONE slot: the byte address of its
+//! referent in linear memory. A value lives in wasm locals unless its
+//! place is borrowed; then it lives in its function's shadow-stack frame
+//! (see `emit.rs`), laid out in exactly the same slots, 8 bytes apiece.
 //!
 //! **Uniform `i64` is deliberate, and unobservable.** Storage width is not
 //! semantics: what the language pins is the *operations* (`u8 + u8` traps
 //! outside `0..=255`, `i32 / i32` traps on `MIN / -1`), and those are
 //! right-sized in `emit.rs` regardless of how wide the slot holding them
 //! is. A `u8` lives zero-extended in an `i64` slot, an `i8`
-//! sign-extended. Nothing can observe the difference: no pointers, no
-//! `size_of`, no FFI in the supported subset.
+//! sign-extended. Nothing can observe the difference: safe code cannot
+//! turn a borrow into an integer, and there is no `size_of`, no raw
+//! pointer and no FFI in the supported subset.
 //!
 //! **Field order is MIR's canonical order — which for records means
 //! NAME-SORTED, not definition order (X14).** The definition-ordering
@@ -91,11 +95,10 @@ fn slots_at(db: &dyn Db, ty: &Ty, depth: u32) -> Layout<u32> {
         Ty::RawPtr { .. } => Err(Unsupported::new(
             "a raw pointer (heap and pointer primitives are out of scope for this backend)",
         )),
-        // Refused BY NAME rather than laid out like a raw pointer. The
-        // machine word is the same, but a borrow carries an aliasing
-        // contract this backend has no way to honor and no way to check —
-        // and the only thing worse than refusing is compiling it wrong.
-        Ty::Borrow { .. } => Err(Unsupported::new("a safe borrow (`.&` / `.&mut`)")),
+        // The referent's byte address. The aliasing contract is not this
+        // backend's to check: the static loan check is the fence (M14),
+        // and `mir::mir_checked` plants a trap wherever it refused.
+        Ty::Borrow { .. } => Ok(1),
         Ty::Param(param) => Err(Unsupported::new(format!(
             "a value of the unresolved type parameter `{}`",
             param.name
@@ -114,6 +117,23 @@ fn array_len(len: &ConstArgValue) -> Layout<u32> {
         }),
         other => Err(Unsupported::new(format!(
             "an array whose length `{}` is not a known number",
+            other.display()
+        ))),
+    }
+}
+
+/// What a `ProjElem::Deref` step lands on: a safe borrow's referent. A
+/// raw pointer stays refused — its validity is the interpreter's runtime
+/// check, which compiled code has no way to repeat.
+pub fn referent(ty: &Ty) -> Layout<Ty> {
+    match ty {
+        Ty::Borrow { referent, .. } => Ok((**referent).clone()),
+        Ty::RawPtr { .. } => Err(Unsupported::new(
+            "a raw-pointer dereference (heap and pointer primitives are out of scope \
+             for this backend)",
+        )),
+        other => Err(Unsupported::new(format!(
+            "dereferencing `{}`, which is not a borrow",
             other.display()
         ))),
     }

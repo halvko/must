@@ -44,8 +44,8 @@ const SUPPORTED: &[(&str, &str)] = &[
     // `option.must`'s three owned-receiver `Run:` lines: a tagged-enum
     // payload out through a consuming member (both the `::Some` and the
     // `::None`-traps-on-`panic` path), and a `fn`-value argument threaded
-    // through a generic member. Its borrowing member (`is_some`) is not
-    // here — see `UNSUPPORTED` below.
+    // through a generic member. Its borrowing member (`is_some`) is with
+    // the borrow cluster below.
     (
         "option.must",
         "{ let o: Option::<usize> = Option::Some(1); o.unwrap() }",
@@ -58,6 +58,18 @@ const SUPPORTED: &[(&str, &str)] = &[
         "option.must",
         "Option::Some(1).flat_map(fn(x: usize) -> Option::<usize> { Option::Some(x + 1) }).unwrap()",
     ),
+    // The borrow cluster: borrows of locals, fields and temporaries,
+    // reborrows, `Self.&mut` members, and matching through a borrow —
+    // all of it frame slots and address arithmetic.
+    ("borrows.must", "main()"),
+    ("reborrow.must", "main()"),
+    ("reborrow.must", "total_count()"),
+    ("match_projection.must", "main()"),
+    ("match_projection.must", "project_in_demo()"),
+    (
+        "option.must",
+        "{ let o: Option::<usize> = Option::Some(1); o.&.is_some() }",
+    ),
     ("records.must", "sum_pair"),
     ("records.must", "moved"),
     ("records.must", "same_point"),
@@ -69,58 +81,6 @@ const SUPPORTED: &[(&str, &str)] = &[
 /// The heap and raw pointers are out of scope for this backend; refusing
 /// them honestly is the requirement, and this is where that is checked.
 const UNSUPPORTED: &[(&str, &str, &str)] = &[
-    // Safe borrows: refused BY NAME, not folded into the raw-pointer
-    // refusal. A borrow lowers to the same machine word a raw pointer
-    // does, so this backend COULD emit something that runs — and would
-    // drop the exclusivity contract while doing it. The named refusal is
-    // what keeps that from being a silent miscompile.
-    (
-        "borrows.must",
-        "main()",
-        "a safe borrow (`.&` / `.&mut`) is not supported by the wasm backend yet",
-    ),
-    // The borrow-ergonomics fixture is borrow-shaped end to end (its
-    // members take `Self.&mut`), so it lands on the same named refusal
-    // `borrows.must` does — for the same reason: the backend could emit
-    // something that runs and would drop the exclusivity contract doing it.
-    (
-        "reborrow.must",
-        "main()",
-        "a safe borrow (`.&` / `.&mut`) is not supported by the wasm backend yet",
-    ),
-    (
-        "reborrow.must",
-        "total_count()",
-        "a safe borrow (`.&` / `.&mut`) is not supported by the wasm backend yet",
-    ),
-    // Match-through-a-borrow is borrow code like any other, and it must
-    // refuse by the SAME name rather than inventing a match-shaped
-    // excuse: a borrowed match lowers to a deref-rooted `switch` and
-    // `ValueExpr::Borrow` payload bindings, both of which this backend could
-    // emit as plain address arithmetic that runs and silently drops
-    // exclusivity. The refusal fires twice over — the scrutinee local's
-    // type has no layout, and `ValueExpr::Borrow` is refused by name — and
-    // this pins that neither route was quietly opened.
-    (
-        "match_projection.must",
-        "main()",
-        "a safe borrow (`.&` / `.&mut`) is not supported by the wasm backend yet",
-    ),
-    (
-        "match_projection.must",
-        "project_in_demo()",
-        "a safe borrow (`.&` / `.&mut`) is not supported by the wasm backend yet",
-    ),
-    // `option.must`'s own borrowing member: `is_some` takes
-    // `Self.&::<@local>`, and a dot-call never inserts a borrow for an
-    // owned receiver (G14, `docs/design/grammar-and-syntax.md`), so
-    // reaching it means writing the postfix `.&` itself — the same borrow
-    // refused everywhere else in this cluster.
-    (
-        "option.must",
-        "{ let o: Option::<usize> = Option::Some(1); o.&.is_some() }",
-        "a safe borrow (`.&` / `.&mut`) is not supported by the wasm backend yet",
-    ),
     (
         "heap.must",
         "main()",
@@ -161,19 +121,11 @@ const UNSUPPORTED: &[(&str, &str, &str)] = &[
         "main()",
         "the `alloc_array` builtin is not supported by the wasm backend yet",
     ),
-    // This program also has a safe borrow (`let m = r.&mut;`) and, inside
-    // `reader_new`/`to_owned`, a heap allocation — each refused by name on
-    // its own program elsewhere (`borrows.must`/`reborrow.must`/
-    // `match_projection.must`; `heap.must`/`stdin_lib.must`), so neither
-    // can quietly start compiling behind this one. Neither is what fires
-    // here: `register` reports the first refused CALL SITE it finds in a
-    // function's own body before computing any local's layout (where the
-    // borrow would separately refuse) or descending into a callee (where
-    // `alloc_array` sits), and `s.len()` is a call site directly in
-    // `main`'s own body. Linearity itself costs this backend nothing (see
-    // `structure.rs`'s `a_linear_type_changes_nothing_about_the_emitted_module`):
-    // the refusal that fires here is about a builtin, and none of the
-    // three is the capability.
+    // Its heap allocations (`heap.must`, `stdin_lib.must`) are not what
+    // fires here: `register` reports the first refused call site in a
+    // function's own body before descending into a callee, and `s.len()` is
+    // one in `main`. The refusal is about a builtin, not linearity (see
+    // `structure.rs`'s `a_linear_type_changes_nothing_about_the_emitted_module`).
     (
         "string_lib.must",
         "main()",

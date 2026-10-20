@@ -146,6 +146,13 @@ impl Module {
         (self.globals.len() - 1) as u32
     }
 
+    /// Fix a global's initial value after it was declared — for a value
+    /// only known once every body is emitted (the shadow stack's base sits
+    /// right after the read-only data).
+    pub fn set_global_init(&mut self, index: u32, init: i64) {
+        self.globals[index as usize].2 = init;
+    }
+
     pub fn data_segment(&mut self, offset: u32, bytes: Vec<u8>) {
         self.data.push((offset, bytes));
     }
@@ -487,6 +494,35 @@ impl FuncBody {
         self.op(0x2D);
         uleb(&mut self.code, 0); // align
         uleb(&mut self.code, 0); // offset
+    }
+
+    /// `i64.load` of an 8-aligned slot, `offset` bytes past the `i32`
+    /// address on the stack.
+    pub fn i64_load(&mut self, offset: u32) {
+        self.op(0x29);
+        uleb(&mut self.code, 3); // align: 2^3
+        uleb(&mut self.code, u64::from(offset));
+    }
+
+    /// `i64.store` of an 8-aligned slot, `offset` bytes past the `i32`
+    /// address below the value on the stack.
+    pub fn i64_store(&mut self, offset: u32) {
+        self.op(0x37);
+        uleb(&mut self.code, 3); // align: 2^3
+        uleb(&mut self.code, u64::from(offset));
+    }
+
+    /// `memory.size`: the memory's current size in 64KiB pages, as `i32`.
+    pub fn memory_size(&mut self) {
+        self.op(0x3F);
+        self.code.push(0x00);
+    }
+
+    /// `memory.grow`: grow by the `i32` page count on the stack, leaving
+    /// the old size, or -1 when the engine refuses.
+    pub fn memory_grow(&mut self) {
+        self.op(0x40);
+        self.code.push(0x00);
     }
 
     // --- constants ---------------------------------------------------
