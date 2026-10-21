@@ -192,7 +192,9 @@ jobs:
             || git fetch -q origin "$last" 2>/dev/null; then
             old=$(git merge-base "$BASE" "$last")
             new=$(git merge-base "$BASE" "$HEAD")
-            if [ "$old" = "$new" ]; then
+            if [ "$last" = "$HEAD" ]; then
+              since="That is this head, so nothing has changed since."
+            elif [ "$old" = "$new" ]; then
               since="\`git diff $last $HEAD\` shows what changed since."
             else
               since="The PR was rebased since, so \`git range-diff $old..$last $new..$HEAD\` shows what changed, commit by commit."
@@ -206,6 +208,9 @@ jobs:
             echo "what changed since then for new problems, including ones the fixes brought."
             echo "Judge a fix by the head's code: a commit named in a reply may since have"
             echo "been squashed into another, so its absence from \`git log\` says nothing."
+            echo "A reply saying a fix is not pushed may predate the push, and a fix pushed"
+            echo "before your last round is not in the diff since: before saying a fix is"
+            echo "missing, quote the line at HEAD that still has the problem."
             echo "Where a fix falls short, reply in that thread rather than opening a new"
             echo "one. Where someone declined a finding with a reason, that settles it;"
             echo "reply only if the reason is wrong about the code, and do not mark it"
