@@ -1982,6 +1982,7 @@ fn completions_top_level_offers_exactly_the_item_keywords() {
             type Keyword
             type Name = struct { … }; Snippet (a record type)
             type Name = enum { … }; Snippet (an enum type)
+            type Name = struct { … } with { … }; Snippet (a record type with members)
             type Name = struct::<T> { … }; Snippet (a generic record type)
             use Keyword
             use file::name; Snippet (an import)
@@ -2636,6 +2637,7 @@ fn completions_after_a_braced_type_lead_with_its_clauses_on_the_same_line() {
         "type Point = struct { x: usize } $0",
         expect_test::expect![[r#"
             with Keyword
+            with { impl … { … } } Snippet (an impl block)
             only move Keyword
             const Keyword
             const NAME: Type = value; Snippet (an annotated constant)
@@ -2652,6 +2654,7 @@ fn completions_after_a_braced_type_lead_with_its_clauses_on_the_same_line() {
             type Keyword
             type Name = struct { … }; Snippet (a record type)
             type Name = enum { … }; Snippet (an enum type)
+            type Name = struct { … } with { … }; Snippet (a record type with members)
             type Name = struct::<T> { … }; Snippet (a generic record type)
             use Keyword
             use file::name; Snippet (an import)
@@ -2694,11 +2697,13 @@ $0"#,
             type Keyword
             type Name = struct { … }; Snippet (a record type)
             type Name = enum { … }; Snippet (an enum type)
+            type Name = struct { … } with { … }; Snippet (a record type with members)
             type Name = struct::<T> { … }; Snippet (a generic record type)
             use Keyword
             use file::name; Snippet (an import)
             use file::{a, b}; Snippet (several imports)
             with Keyword
+            with { impl … { … } } Snippet (an impl block)
         "#]],
     );
 }
@@ -2709,6 +2714,7 @@ fn completions_after_a_with_group_offer_another() {
         "type Point = struct { x: usize } with { impl Self { } } $0",
         expect_test::expect![[r#"
             with Keyword
+            with { impl … { … } } Snippet (an impl block)
             only move Keyword
             const Keyword
             const NAME: Type = value; Snippet (an annotated constant)
@@ -2725,6 +2731,7 @@ fn completions_after_a_with_group_offer_another() {
             type Keyword
             type Name = struct { … }; Snippet (a record type)
             type Name = enum { … }; Snippet (an enum type)
+            type Name = struct { … } with { … }; Snippet (a record type with members)
             type Name = struct::<T> { … }; Snippet (a generic record type)
             use Keyword
             use file::name; Snippet (an import)
@@ -2739,6 +2746,7 @@ fn completions_after_a_braced_trait_offer_with_but_not_only() {
         "trait Shape = requires { area: fn(Self) -> usize } $0",
         expect_test::expect![[r#"
             with Keyword
+            with { impl … { … } } Snippet (an impl block)
             const Keyword
             const NAME: Type = value; Snippet (an annotated constant)
             const NAME = value; Snippet (a constant)
@@ -2754,6 +2762,7 @@ fn completions_after_a_braced_trait_offer_with_but_not_only() {
             type Keyword
             type Name = struct { … }; Snippet (a record type)
             type Name = enum { … }; Snippet (an enum type)
+            type Name = struct { … } with { … }; Snippet (a record type with members)
             type Name = struct::<T> { … }; Snippet (a generic record type)
             use Keyword
             use file::name; Snippet (an import)
@@ -2784,15 +2793,173 @@ fn completions_in_a_with_group_offer_impl() {
     check_completions(
         "type Point = struct { x: usize } with { $0 }",
         expect_test::expect![[r#"
+            impl Self { … } Snippet
             impl Keyword
         "#]],
     );
     check_completions(
         "type Point = struct { x: usize } with { impl Self { } i$0 }",
         expect_test::expect![[r#"
+            impl Self { … } Snippet
             impl Keyword
         "#]],
     );
+}
+
+#[test]
+fn completions_in_a_with_group_offer_an_impl_block_per_head() {
+    // On a type: `impl Self` and each implementable trait, as whole blocks.
+    check_completions(
+        r#"
+trait Shape = requires { }
+type Point = struct { x: usize } with { $0 }
+"#,
+        expect_test::expect![[r#"
+            impl Self { … } Snippet
+            impl Shape { … } Snippet
+            impl Keyword
+        "#]],
+    );
+}
+
+#[test]
+fn completions_in_a_trait_with_group_offer_a_block_per_implementing_type() {
+    // The blocks are exactly the heads `impl ` would offer, each wrapped.
+    let blocks = |text: &str| -> Vec<String> {
+        let (analysis, _file, pos) = fixture(text);
+        analysis
+            .completions(pos)
+            .into_iter()
+            .filter(|c| c.kind == crate::CompletionItemKind::Snippet)
+            .map(|c| c.label)
+            .collect()
+    };
+    let heads = |text: &str| -> Vec<String> {
+        let (analysis, _file, pos) = fixture(text);
+        analysis
+            .completions(pos)
+            .into_iter()
+            .map(|c| format!("impl {} {{ … }}", c.label))
+            .collect()
+    };
+    let in_group = r#"
+type Point = struct { x: usize };
+trait Shape = requires { } with { $0 }
+"#;
+    let after_impl = r#"
+type Point = struct { x: usize };
+trait Shape = requires { } with { impl $0 }
+"#;
+    let blocks = blocks(in_group);
+    assert!(
+        blocks.contains(&"impl Point { … }".to_owned()),
+        "{blocks:?}"
+    );
+    assert_eq!(blocks, heads(after_impl));
+}
+
+#[test]
+fn completions_in_a_reserved_with_group_offer_nothing() {
+    // A generic trait's chain is reserved: every impl in it is refused.
+    check_completions(
+        "trait Shape = requires::<T> { } with { $0 }",
+        expect_test::expect![""],
+    );
+}
+
+#[test]
+fn completions_in_a_binder_group_offer_nothing() {
+    // `with::<U> { … }` is itself refused, so no `impl` goes in it either.
+    check_completions(
+        "type Point = struct { x: usize } with::<U> { $0 };",
+        expect_test::expect![""],
+    );
+}
+
+#[test]
+fn completions_impl_block_indents_from_the_slots_line() {
+    let insert = item_shape_insert(
+        r#"
+trait Shape = requires { }
+type Point = struct { x: usize } with {
+    $0
+}
+"#,
+        "impl Shape { … }",
+    );
+    let crate::InsertText::Snippet { snippet, .. } = insert else {
+        panic!("an impl block is a snippet");
+    };
+    assert_eq!(
+        snippet,
+        r#"impl Shape {
+        $0
+    }"#
+    );
+}
+
+/// The `with` shape completed at the fixture's cursor; its plain spelling,
+/// followed by `;`, must complete the item into one that parses.
+fn with_shape(fixture: &str) -> String {
+    let crate::InsertText::Snippet { snippet, plain } =
+        item_shape_insert(fixture, "with { impl … { … } }")
+    else {
+        panic!("the with shape is a snippet");
+    };
+    let item = fixture.replace("$0", &plain) + ";";
+    let errors: Vec<_> = syntax::parse(&item)
+        .errors()
+        .iter()
+        .map(|e| e.message.clone())
+        .collect();
+    assert!(errors.is_empty(), "`{item}`: {errors:?}");
+    snippet
+}
+
+#[test]
+fn completions_with_shape_on_a_type_writes_one_impl_self_member() {
+    assert_eq!(
+        with_shape("type Point = struct { x: usize } $0"),
+        r#"with {
+    impl Self {
+        ${1:member} = fn(${2:s}: Self) -> ${3:()} {
+            $0
+        };
+    }
+}"#
+    );
+    // Indented: every continuation line carries the item line's indentation.
+    assert_eq!(
+        with_shape("  type Point = struct { x: usize } $0"),
+        r#"with {
+      impl Self {
+          ${1:member} = fn(${2:s}: Self) -> ${3:()} {
+              $0
+          };
+      }
+  }"#
+    );
+}
+
+#[test]
+fn completions_with_shape_on_a_trait_writes_an_empty_impl() {
+    // The trait names the members, so none is made up.
+    assert_eq!(
+        with_shape("trait Shape = requires { area: fn(Self) -> usize; } $0"),
+        r#"with {
+    impl ${1:Type} {
+        $0
+    }
+}"#
+    );
+}
+
+#[test]
+fn completions_after_a_generic_trait_offer_no_with() {
+    // Its `with` chain is reserved: a group there could only stay empty.
+    check_no_completion("trait Conv = requires::<T> { } $0", "with { impl … { … } }");
+    check_no_completion("trait Conv = requires::<T> { } $0", "with");
+    check_has_completion("trait Conv = requires::<T> { } $0", "static");
 }
 
 #[test]
@@ -3010,6 +3177,7 @@ fn completions_after_a_ceiling_offer_with_but_no_second_ceiling() {
         "type Res = struct { n: usize } only move $0",
         expect_test::expect![[r#"
             with Keyword
+            with { impl … { … } } Snippet (an impl block)
             const Keyword
             const NAME: Type = value; Snippet (an annotated constant)
             const NAME = value; Snippet (a constant)
@@ -3025,6 +3193,7 @@ fn completions_after_a_ceiling_offer_with_but_no_second_ceiling() {
             type Keyword
             type Name = struct { … }; Snippet (a record type)
             type Name = enum { … }; Snippet (an enum type)
+            type Name = struct { … } with { … }; Snippet (a record type with members)
             type Name = struct::<T> { … }; Snippet (a generic record type)
             use Keyword
             use file::name; Snippet (an import)
