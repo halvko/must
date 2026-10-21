@@ -1260,6 +1260,33 @@ fn names_capability(bound: &ast::Type) -> bool {
             .is_some_and(|name| capability_named(&name.text()).is_some())
 }
 
+/// Where a generic type parameter's bounds sit, which decides whether
+/// they are live.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BoundHome {
+    /// A fn binder (item fns, impl members, requirement signatures).
+    Live,
+    /// A reserved `with::<...>` or `requires::<...>` binder.
+    ReservedBinder,
+    /// A `type` declaration's `struct`/`enum` binder: bounded type
+    /// declarations are reserved.
+    TypeDeclaration,
+}
+
+/// The [`BoundHome`] of `type_param`'s bounds.
+pub fn type_param_bound_home(type_param: &ast::TypeParam) -> BoundHome {
+    let Some(owner) = type_param.syntax().parent().and_then(|list| list.parent()) else {
+        return BoundHome::Live;
+    };
+    if ast::WithGroup::can_cast(owner.kind()) || ast::RequiresDef::can_cast(owner.kind()) {
+        BoundHome::ReservedBinder
+    } else if ast::RecordExpr::can_cast(owner.kind()) || ast::EnumExpr::can_cast(owner.kind()) {
+        BoundHome::TypeDeclaration
+    } else {
+        BoundHome::Live
+    }
+}
+
 /// Bound-position rules on one generic type parameter (`T: Display`).
 /// Bounds are LIVE on fn binders (item fns, impl members, requirement
 /// signatures); a bound on a `type` declaration's `struct`/`enum` binder
@@ -1271,16 +1298,14 @@ fn validate_type_param_bounds(type_param: &ast::TypeParam, errors: &mut Vec<Synt
     if type_param.colon_token().is_none() {
         return;
     }
-    let owner = type_param.syntax().parent().and_then(|list| list.parent());
-    if let Some(owner) = &owner {
+    match type_param_bound_home(type_param) {
         // Reserved binder homes carry group-level reservations of their
         // own (`with::<...>`, `requires::<...>`); a bound inside one adds
-        // no extra noise. A `type` declaration's binder is live grammar
-        // with reserved bounds — say so precisely.
-        if ast::WithGroup::can_cast(owner.kind()) || ast::RequiresDef::can_cast(owner.kind()) {
-            return;
-        }
-        if ast::RecordExpr::can_cast(owner.kind()) || ast::EnumExpr::can_cast(owner.kind()) {
+        // no extra noise.
+        BoundHome::ReservedBinder => return,
+        // A `type` declaration's binder is live grammar with reserved
+        // bounds — say so precisely.
+        BoundHome::TypeDeclaration => {
             // A CAPABILITY bound on the data side is not "not yet": it is
             // the thing T22 deleted. A container's capabilities are read
             // off what it CONTAINS — `Option::<T>` is linear exactly when
@@ -1299,6 +1324,7 @@ fn validate_type_param_bounds(type_param: &ast::TypeParam, errors: &mut Vec<Synt
             });
             return;
         }
+        BoundHome::Live => {}
     }
     for bound in type_param.bounds() {
         match &bound {

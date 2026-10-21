@@ -475,6 +475,11 @@ enum Context {
     WithElement,
     /// The first segment of a `PathType`.
     TypePosition,
+    /// A bound on a generic type parameter (`T: ⟨caret⟩`, `T: A + ⟨caret⟩`),
+    /// with the bounds already written on the same parameter. `None` in
+    /// reserved territory (a `type` declaration's binder, a supertrait or
+    /// `with` clause), where no bound is valid.
+    Bound(Option<Vec<String>>),
     /// The head of an `impl` element in a `with` group, with its home;
     /// `None` in reserved territory, where no head is valid.
     ImplHead(Option<syntax::ImplHome>),
@@ -630,6 +635,9 @@ pub(crate) fn completions(
         }
         Some(Context::ImplHead(home)) => home
             .map(|home| impl_head_items(db, file, home, edit_range))
+            .unwrap_or_default(),
+        Some(Context::Bound(written)) => written
+            .map(|written| bound_items(db, file, &written, edit_range))
             .unwrap_or_default(),
         Some(Context::Expression {
             statement_start,
@@ -954,6 +962,9 @@ fn classify(parent: &SyntaxNode) -> Option<Context> {
         if let Some(element) = path_type.syntax().parent().and_then(ast::ImplElement::cast) {
             return Some(Context::ImplHead(syntax::impl_element_home(&element)));
         }
+        if let Some(bound) = bound_context(&path_type) {
+            return Some(bound);
+        }
         return Some(Context::TypePosition);
     }
 
@@ -1033,6 +1044,33 @@ fn classify(parent: &SyntaxNode) -> Option<Context> {
         statement_start,
         in_loop: in_loop(path_expr.syntax()),
     })
+}
+
+/// The bound slot `path_type` fills, when it is one: a generic type
+/// parameter's bound, or the right of a supertrait or `with` clause's `:`
+/// (both reserved).
+fn bound_context(path_type: &ast::PathType) -> Option<Context> {
+    let slot = path_type.syntax().parent()?;
+    match slot.kind() {
+        SyntaxKind::REQUIRES_CLAUSE | SyntaxKind::WITH_CLAUSE => {
+            return Some(Context::Bound(None));
+        }
+        SyntaxKind::TYPE_PARAM => {}
+        _ => return None,
+    }
+    let param = ast::TypeParam::cast(slot)?;
+    if syntax::type_param_bound_home(&param) != syntax::BoundHome::Live {
+        return Some(Context::Bound(None));
+    }
+    let written = param
+        .bounds()
+        .filter(|bound| bound.syntax() != path_type.syntax())
+        .filter_map(|bound| match bound {
+            ast::Type::PathType(path) => path.name_ref().map(|name| name.text()),
+            _ => None,
+        })
+        .collect();
+    Some(Context::Bound(Some(written)))
 }
 
 /// The trailing-clause slot after the `type` or `trait` item before
@@ -1123,25 +1161,72 @@ fn impl_head_items(
         edit_range,
     )];
     if !generic {
-        items.extend(
-            hir::file_scope(db, file)
-                .iter()
-                .filter(|(_, resolution)| {
-                    matches!(resolution, hir::Resolution::TraitItem(loc)
-                        if hir::trait_can_be_implemented(db, loc))
-                })
-                .map(|(name, _)| {
-                    completion_item(
-                        name,
-                        CompletionItemKind::Trait,
-                        Provenance::Item,
-                        TYPE_TIER_NONE,
-                        None,
-                        edit_range,
-                    )
-                }),
-        );
+        items.extend(trait_scope_items(
+            db,
+            file,
+            |_, loc| hir::trait_can_be_implemented(db, loc),
+            edit_range,
+        ));
     }
+    items
+}
+
+/// The file's traits, those `keep` accepts by name and declaration.
+fn trait_scope_items(
+    db: &RootDatabase,
+    file: SourceFile,
+    keep: impl Fn(&str, &hir::ItemLoc) -> bool,
+    edit_range: TextRange,
+) -> Vec<CompletionItem> {
+    hir::file_scope(db, file)
+        .iter()
+        .filter(|(name, resolution)| {
+            matches!(resolution, hir::Resolution::TraitItem(loc) if keep(name, loc))
+        })
+        .map(|(name, _)| {
+            completion_item(
+                name,
+                CompletionItemKind::Trait,
+                Provenance::Item,
+                TYPE_TIER_NONE,
+                None,
+                edit_range,
+            )
+        })
+        .collect()
+}
+
+/// What a live bound may name, minus the bounds already `written` on the
+/// parameter: the file's non-generic traits (a generic trait is reserved),
+/// then the capabilities a bound can ask for (`forget`).
+fn bound_items(
+    db: &RootDatabase,
+    file: SourceFile,
+    written: &[String],
+    edit_range: TextRange,
+) -> Vec<CompletionItem> {
+    let fresh = |name: &str| !written.iter().any(|w| w == name);
+    let mut items = trait_scope_items(
+        db,
+        file,
+        |name, loc| fresh(name) && hir::trait_can_be_bound(db, loc),
+        edit_range,
+    );
+    items.extend(
+        syntax::CAPABILITIES
+            .iter()
+            .filter(|capability| capability.live && capability.bound && fresh(capability.name))
+            .map(|capability| {
+                completion_item(
+                    capability.name,
+                    CompletionItemKind::Keyword,
+                    Provenance::Keyword,
+                    TYPE_TIER_NONE,
+                    None,
+                    edit_range,
+                )
+            }),
+    );
     items
 }
 
