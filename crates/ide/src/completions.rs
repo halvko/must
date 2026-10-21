@@ -76,7 +76,8 @@
 //! - a missing record-literal field: `x = $1`;
 //! - the block-taking keywords: `loop {$0}`, and `if $0` / `match $0`,
 //!   which write no braces;
-//! - the `match` arm-list template.
+//! - the `match` arm-list template;
+//! - one template per form an item keyword opens ([`ITEM_SHAPES`]).
 //!
 //! Every snippet carries its own plain fallback for a client without
 //! `snippetSupport` — `must-lsp::to_proto` picks between the two per client
@@ -335,7 +336,7 @@ fn completion_item_at_tier(
 ) -> CompletionItem {
     let label = label.into();
     CompletionItem {
-        sort_text: format!("{type_tier}_{tier:02}_{label}"),
+        sort_text: sort_text(type_tier, tier, &label),
         filter_text: label.clone(),
         text_edit: CompletionTextEdit {
             range: edit_range,
@@ -346,6 +347,11 @@ fn completion_item_at_tier(
         detail,
         whole_expr: false,
     }
+}
+
+/// The sort key: `key` (a label, usually) ranked by its type tier, then its provenance tier.
+fn sort_text(type_tier: u8, tier: u8, key: &str) -> String {
+    format!("{type_tier}_{tier:02}_{key}")
 }
 
 /// A fn-shaped dot completion — an inherent member, a bound requirement, or
@@ -453,8 +459,8 @@ enum Context {
     /// The nearest classifiable ancestor is a broken item directly under
     /// `SOURCE_FILE` — a bare identifier at the top level.
     ItemKeyword,
-    /// `extern ⟨caret⟩`: only `static` may follow.
-    ItemKeywordAfterExtern,
+    /// `extern ⟨caret⟩`: only `static` may follow. `misordered` when an `unsafe` comes after it.
+    ItemKeywordAfterExtern { misordered: bool },
     /// `unsafe ⟨caret⟩`: only `extern` may follow.
     ExternAfterUnsafe,
     /// File scope right after a `type`/`trait` item whose braced value is
@@ -608,16 +614,32 @@ pub(crate) fn completions(
         .parent()
         .is_some_and(|completed| is_brace_less_head(&completed));
     let mut items = match context {
-        Some(Context::ItemKeyword) => keyword_items(ITEM_KEYWORDS, edit_range),
-        Some(Context::ItemKeywordAfterExtern) => {
-            keyword_items(&[SyntaxKind::STATIC_KW], edit_range)
+        Some(Context::ItemKeyword) => {
+            let mut items = keyword_items(ITEM_KEYWORDS, edit_range);
+            items.extend(item_shape_items(real_text, "", "", edit_range));
+            items
         }
-        Some(Context::ExternAfterUnsafe) => keyword_items(&[SyntaxKind::EXTERN_KW], edit_range),
+        Some(Context::ItemKeywordAfterExtern { misordered }) => {
+            let mut items = keyword_items(&[SyntaxKind::STATIC_KW], edit_range);
+            // A misordered head is an error the shape's rest cannot mend.
+            if !misordered {
+                items.extend(item_shape_items(
+                    real_text, "extern ", "extern ", edit_range,
+                ));
+            }
+            items
+        }
+        Some(Context::ExternAfterUnsafe) => {
+            let mut items = keyword_items(&[SyntaxKind::EXTERN_KW], edit_range);
+            items.extend(item_shape_items(real_text, "extern ", "", edit_range));
+            items
+        }
         Some(Context::AfterBracedItem {
             ceiling_open,
             same_line,
         }) => {
             let mut items = keyword_items(ITEM_KEYWORDS, edit_range);
+            items.extend(item_shape_items(real_text, "", "", edit_range));
             items.extend(trailing_clause_items(ceiling_open, same_line, edit_range));
             items
         }
@@ -897,10 +919,12 @@ fn classify(parent: &SyntaxNode) -> Option<Context> {
         if grandparent.kind() == SyntaxKind::WITH_GROUP {
             return Some(Context::WithElement);
         }
-        // `unsafe ⟨caret⟩` offers `extern`; `extern ⟨caret⟩` offers `static`.
+        // `unsafe ⟨caret⟩` offers `extern` and the extern shape; `extern ⟨caret⟩` offers
+        // `static` and the shape's rest.
         let item = ast::StaticItem::cast(grandparent).filter(|item| item.kind().is_none())?;
         if item.extern_token().is_some() {
-            return Some(Context::ItemKeywordAfterExtern);
+            let misordered = item.head()?.vouch_misordered();
+            return Some(Context::ItemKeywordAfterExtern { misordered });
         }
         return item.unsafe_token().map(|_| Context::ExternAfterUnsafe);
     }
@@ -1244,26 +1268,25 @@ fn bound_items(
 /// `tests::item_keywords_match_the_grammar` checks it in both directions.
 /// The type- and expression-position lists below have no equivalent single
 /// grammar rule to check against and stay a judgement call.
+///
+/// No keyword list here or below offers `unsafe`: completion never writes it.
+/// The extern shape is written as `extern static …`, whose error tells the
+/// user to add `unsafe` themselves.
 const ITEM_KEYWORDS: &[SyntaxKind] = &[
     SyntaxKind::STATIC_KW,
     SyntaxKind::CONST_KW,
     SyntaxKind::TYPE_KW,
     SyntaxKind::TRAIT_KW,
     SyntaxKind::EXTERN_KW,
-    SyntaxKind::UNSAFE_KW,
     SyntaxKind::USE_KW,
 ];
 
-/// The keywords that spell a TYPE where a type is expected: an `fn` type,
-/// its `unsafe fn` head, and a structural record. `enum` is deliberately
+/// The keywords that spell a TYPE where a type is expected: an `fn` type and
+/// a structural record (no `unsafe`, see [`ITEM_KEYWORDS`]). `enum` is deliberately
 /// absent — an enum literal declares a type, so it is spellable only on a
 /// `type` item's right-hand side ([`type_item_rhs_items`]), never in an
 /// annotation.
-const TYPE_KEYWORDS: &[SyntaxKind] = &[
-    SyntaxKind::FN_KW,
-    SyntaxKind::STRUCT_KW,
-    SyntaxKind::UNSAFE_KW,
-];
+const TYPE_KEYWORDS: &[SyntaxKind] = &[SyntaxKind::FN_KW, SyntaxKind::STRUCT_KW];
 
 fn keyword_items(words: &[SyntaxKind], edit_range: TextRange) -> Vec<CompletionItem> {
     words
@@ -1299,6 +1322,170 @@ fn keyword_snippet_item(
     );
     item.text_edit.insert = InsertText::Snippet { snippet, plain };
     item
+}
+
+/// Each form an item can take, `(filter, label, detail, snippet)`, most likely first. `filter` is
+/// the words that reach it: its keywords (the shape sorts after the first), then words one may type
+/// instead (`fn` for a function, `struct`/`enum` for a type). A `snippet` is written from column 0
+/// with one [`syntax::INDENT_UNIT`] per level; its later lines move to the item's indentation. The
+/// last stop (`$0`) sits above a body's `};`, or past the `;` of an inline `{ … }`, so no `}` is
+/// left to type.
+const ITEM_SHAPES: &[(&str, &str, &str, &str)] = &[
+    (
+        "static fn",
+        "static name = fn(…) -> … { … };",
+        "a function",
+        r"static ${1:name} = fn(${2:param}: ${3:Type}) -> ${4:()} {
+    $0
+};",
+    ),
+    (
+        "static",
+        "static name = value;",
+        "a value",
+        "static ${1:name} = ${2:value};$0",
+    ),
+    (
+        "static",
+        "static name: Type = value;",
+        "an annotated value",
+        "static ${1:name}: ${2:Type} = ${3:value};$0",
+    ),
+    (
+        "static fn",
+        "static name = fn { … };",
+        "a function without parameters",
+        r"static ${1:name} = fn {
+    $0
+};",
+    ),
+    (
+        "const",
+        "const NAME: Type = value;",
+        "an annotated constant",
+        "const ${1:NAME}: ${2:Type} = ${3:value};$0",
+    ),
+    (
+        "const",
+        "const NAME = value;",
+        "a constant",
+        "const ${1:NAME} = ${2:value};$0",
+    ),
+    (
+        "type struct",
+        "type Name = struct { … };",
+        "a record type",
+        "type ${1:Name} = struct { ${2:field}: ${3:Type} };$0",
+    ),
+    (
+        "type enum",
+        "type Name = enum { … };",
+        "an enum type",
+        "type ${1:Name} = enum { ${2:Variant} };$0",
+    ),
+    (
+        "type struct",
+        "type Name = struct::<T> { … };",
+        "a generic record type",
+        "type ${1:Name} = struct::<${2:T}> { ${3:field}: ${4:T} };$0",
+    ),
+    (
+        "trait",
+        "trait Name = requires { … };",
+        "a trait",
+        r"trait ${1:Name} = requires {
+    ${2:member}: fn(${3:Self}) -> ${4:()};
+};$0",
+    ),
+    (
+        "extern static",
+        "extern static name: fn(…) -> …;",
+        "an extern function",
+        "extern static ${1:name}: fn(${2:Type}) -> ${3:()};$0",
+    ),
+    (
+        "use",
+        "use file::name;",
+        "an import",
+        "use ${1:file}::${2:name};$0",
+    ),
+    (
+        "use",
+        "use file::{a, b};",
+        "several imports",
+        "use ${1:file}::{${2:a}, ${3:b}};$0",
+    ),
+];
+
+/// The [`ITEM_SHAPES`] that start with the `leading` words, with the `written` ones (the start of
+/// `leading` already in the file) taken off, indented for the line at `edit_range`.
+fn item_shape_items(
+    real_text: &str,
+    leading: &str,
+    written: &str,
+    edit_range: TextRange,
+) -> Vec<CompletionItem> {
+    debug_assert!(
+        leading.starts_with(written),
+        "`{written}` is not a start of `{leading}`"
+    );
+    let indent = syntax::line_indent(real_text, edit_range.start());
+    ITEM_SHAPES
+        .iter()
+        .enumerate()
+        .filter_map(|(rank, (filter, label, detail, snippet))| {
+            // Both are whole leading keywords, which every column spells
+            // alike (`tests::item_shapes_parse`).
+            let filter = filter
+                .starts_with(leading)
+                .then(|| &filter[written.len()..])?;
+            let rest = written.len()..;
+            let keyword = filter
+                .split_once(' ')
+                .map_or(filter, |(keyword, _)| keyword);
+            let snippet = snippet[rest.clone()].replace('\n', &format!("\n{indent}"));
+            let mut item = completion_item(
+                &label[rest],
+                CompletionItemKind::Snippet,
+                Provenance::Keyword,
+                TYPE_TIER_NONE,
+                Some((*detail).to_owned()),
+                edit_range,
+            );
+            item.sort_text = sort_text(
+                TYPE_TIER_NONE,
+                Provenance::Keyword as u8,
+                &format!("{keyword}~{rank:02}"),
+            );
+            item.filter_text = filter.to_owned();
+            item.text_edit.insert = InsertText::Snippet {
+                plain: snippet_plain(&snippet),
+                snippet,
+            };
+            Some(item)
+        })
+        .collect()
+}
+
+/// `snippet` with its tab stops taken out: a placeholder `${1:name}` leaves
+/// its text, a bare `$1` leaves nothing. For a snippet-incapable client.
+fn snippet_plain(snippet: &str) -> String {
+    let mut out = String::new();
+    let mut rest = snippet;
+    while let Some(dollar) = rest.find('$') {
+        out.push_str(&rest[..dollar]);
+        rest = &rest[dollar + 1..];
+        if let Some(body) = rest.strip_prefix('{') {
+            let close = body.find('}').expect("a placeholder closes");
+            let placeholder = &body[..close];
+            out.push_str(placeholder.split_once(':').map_or("", |(_, text)| text));
+            rest = &body[close + 1..];
+        } else {
+            rest = rest.trim_start_matches(|c: char| c.is_ascii_digit());
+        }
+    }
+    out.push_str(rest);
+    out
 }
 
 /// `word $0`, or the bare word for a snippet-incapable client. For a
@@ -1717,7 +1904,6 @@ fn expression_position_items(
         SyntaxKind::FN_KW,
         SyntaxKind::STRUCT_KW,
         SyntaxKind::CONST_KW,
-        SyntaxKind::UNSAFE_KW,
     ];
     if statement_start {
         words.push(SyntaxKind::LET_KW);
@@ -2854,7 +3040,49 @@ fn locals_in_block(
 
 #[cfg(test)]
 mod tests {
-    use super::ITEM_KEYWORDS;
+    use super::{ITEM_KEYWORDS, ITEM_SHAPES, snippet_plain};
+
+    /// Each shape's plain spelling parses with no error, its label, snippet and
+    /// filter share their leading keywords, and its snippet has exactly one `$0`.
+    #[test]
+    fn item_shapes_parse() {
+        for (filter, label, _, snippet) in ITEM_SHAPES {
+            let plain = snippet_plain(snippet);
+            let parse = syntax::parse(&plain);
+            let errors: Vec<_> = parse.errors().iter().map(|e| &e.message).collect();
+            // The extern shape leaves the vouch to the user, whose error says why it is needed.
+            let expected: &[&str] = if filter.starts_with("extern ") {
+                &["declaring an `extern` item is a VOUCH: write `unsafe extern static`"]
+            } else {
+                &[]
+            };
+            assert_eq!(errors, expected, "`{label}` writes `{plain}`");
+            let keywords = |text: &'static str| -> Vec<&'static str> {
+                text.split(' ')
+                    .take_while(|word| syntax::SyntaxKind::from_keyword(word).is_some())
+                    .collect()
+            };
+            let leading = keywords(label);
+            assert!(!leading.is_empty(), "`{label}` starts with a keyword");
+            assert_eq!(keywords(snippet), leading, "`{label}`: snippet");
+            assert!(
+                filter.split(' ').collect::<Vec<_>>().starts_with(&leading),
+                "`{label}` is filtered on `{filter}`"
+            );
+            assert_eq!(snippet.matches("$0").count(), 1, "`{label}`: one `$0`");
+        }
+    }
+
+    /// The snippets are written with four-space levels, so they must be what a level is.
+    #[test]
+    fn snippets_indent_by_indent_unit() {
+        assert_eq!(syntax::INDENT_UNIT, "    ");
+    }
+
+    #[test]
+    fn snippet_plain_keeps_placeholder_text_and_drops_bare_stops() {
+        assert_eq!(snippet_plain("f(${1:x}, $2) {$0}"), "f(x, ) {}");
+    }
 
     /// Ask the PARSER whether `keyword` can open an item, instead of
     /// restating the grammar's item-head set here: at file scope, anything
@@ -2877,7 +3105,13 @@ mod tests {
         // empty grammar and an empty list.
         assert!(opens_an_item("trait"), "`trait` opens an item");
         assert!(!opens_an_item("break"), "`break` does not open an item");
+        // `unsafe` opens an item but is never offered (see `ITEM_KEYWORDS`).
+        assert!(opens_an_item("unsafe"), "`unsafe` opens an item");
         for (text, kind) in syntax::KEYWORDS {
+            if *kind == syntax::SyntaxKind::UNSAFE_KW {
+                assert!(!ITEM_KEYWORDS.contains(kind), "`unsafe` is never offered");
+                continue;
+            }
             assert_eq!(
                 opens_an_item(text),
                 ITEM_KEYWORDS.contains(kind),
