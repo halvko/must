@@ -1832,7 +1832,7 @@ fn validate_extern_static(item: &ast::StaticItem, errors: &mut Vec<SyntaxError>)
             }),
         });
     }
-    reject_misordered_head(&head, &marker, vouch.as_ref(), errors);
+    reject_misordered_head(&head, &marker, errors);
     if let Some(eq) = item.eq_token() {
         let end = item
             .body()
@@ -2042,19 +2042,16 @@ fn validate_item_head(head: &ast::ItemHead, errors: &mut Vec<SyntaxError>) {
 fn reject_misordered_head(
     head: &ast::ItemHead,
     marker: &SyntaxToken,
-    vouch: Option<&SyntaxToken>,
     errors: &mut Vec<SyntaxError>,
 ) {
     let Some(keyword) = head.kind() else {
         return;
     };
     let start = |token: &SyntaxToken| token.text_range().start();
-    let in_order =
-        start(marker) < start(&keyword) && vouch.is_none_or(|vouch| start(vouch) < start(marker));
-    if in_order {
+    if start(marker) < start(&keyword) && !head.vouch_misordered() {
         return;
     }
-    let ordered = match vouch {
+    let ordered = match head.unsafe_token() {
         Some(_) => format!("unsafe extern {}", keyword.text()),
         None => format!("extern {}", keyword.text()),
     };
