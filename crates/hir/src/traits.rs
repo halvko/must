@@ -252,9 +252,15 @@ pub(crate) fn bound_trait(db: &dyn Db, file: SourceFile, bound: &TypeRef) -> Opt
         return None;
     };
     match file_scope(db, file).resolve(name) {
-        Some(Resolution::TraitItem(loc)) if !item_is_generic(db, &loc) => Some(loc),
+        Some(Resolution::TraitItem(loc)) if trait_can_be_bound(db, &loc) => Some(loc),
         _ => None,
     }
+}
+
+/// Whether the trait at `loc` can be named as a bound: generic traits are
+/// reserved.
+pub fn trait_can_be_bound(db: &dyn Db, loc: &ItemLoc) -> bool {
+    !item_is_generic(db, loc)
 }
 
 /// The canonical dictionary-slot enumeration of a generic binder: one slot

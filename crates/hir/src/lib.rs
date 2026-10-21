@@ -51,7 +51,7 @@ pub use scopes::{
 };
 pub use traits::{
     BoundDotOffer, BoundSlot, bound_dot_offers, bound_slots, builtin_can_implement,
-    dict_param_count, trait_can_be_implemented, type_item_can_implement,
+    dict_param_count, trait_can_be_bound, trait_can_be_implemented, type_item_can_implement,
 };
 pub use trap_sites::{
     BodyError, ErrorOwners, TrapSite, error_owners, range_traps, trap_sites_for_pats,

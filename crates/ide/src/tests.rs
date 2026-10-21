@@ -2682,6 +2682,139 @@ fn completions_impl_head_in_reserved_territory_offers_nothing() {
 }
 
 #[test]
+fn completions_bound_offers_traits_then_forget() {
+    // A bound is a bare trait name or the `forget` capability: no types,
+    // no builtins, no type keywords. A generic trait is reserved, so
+    // `Conv` is not offered.
+    check_completions(
+        r#"
+trait Show = requires { }
+trait Conv = requires::<T> { }
+type Point = struct { x: usize }
+static f = fn::<T: $0>(x: T) -> usize { 1 };
+"#,
+        expect_test::expect![[r#"
+            Show Trait
+            forget Keyword
+        "#]],
+    );
+}
+
+#[test]
+fn completions_bound_with_a_prefix_offers_traits() {
+    check_completions(
+        r#"
+trait Show = requires { }
+static f = fn::<T: Sh$0>(x: T) -> usize { 1 };
+"#,
+        expect_test::expect![[r#"
+            Show Trait
+            forget Keyword
+        "#]],
+    );
+}
+
+#[test]
+fn completions_bound_after_plus_skips_bounds_already_written() {
+    check_completions(
+        r#"
+trait Show = requires { }
+trait Eq = requires { }
+static f = fn::<T: Show + forget + $0>(x: T) -> usize { 1 };
+"#,
+        expect_test::expect![[r#"
+            Eq Trait
+        "#]],
+    );
+}
+
+#[test]
+fn completions_bound_in_a_second_param_offers_traits() {
+    check_completions(
+        r#"
+trait Show = requires { }
+static f = fn::<T: Show, U: $0>(x: T, y: U) -> usize { 1 };
+"#,
+        expect_test::expect![[r#"
+            Show Trait
+            forget Keyword
+        "#]],
+    );
+}
+
+#[test]
+fn completions_bound_in_a_struct_binder_offers_nothing() {
+    // A `type` declaration's binder: bounded type declarations are reserved.
+    check_completions(
+        r#"
+trait Show = requires { }
+type Wrap = struct::<T: $0> { x: T }
+"#,
+        expect_test::expect![""],
+    );
+}
+
+#[test]
+fn completions_bound_in_an_enum_binder_offers_nothing() {
+    // A `type` declaration's binder: bounded type declarations are reserved.
+    check_completions(
+        r#"
+trait Show = requires { }
+type Opt = enum::<T: $0> { Some(T), None }
+"#,
+        expect_test::expect![""],
+    );
+}
+
+#[test]
+fn completions_bound_in_a_supertrait_clause_offers_nothing() {
+    // Supertrait clauses are reserved.
+    check_completions(
+        r#"
+trait Show = requires { }
+trait Ord = requires Self: $0 { }
+"#,
+        expect_test::expect![""],
+    );
+}
+
+#[test]
+fn completions_bound_in_a_requires_binder_offers_nothing() {
+    // Generic traits are reserved.
+    check_completions(
+        r#"
+trait Show = requires { }
+trait Ord = requires::<T: $0> { }
+"#,
+        expect_test::expect![""],
+    );
+}
+
+#[test]
+fn completions_bound_in_a_with_binder_offers_nothing() {
+    // `with::<…>` binders are reserved.
+    check_completions(
+        r#"
+trait Show = requires { }
+type Point = struct { x: usize } with::<T: $0> { }
+"#,
+        expect_test::expect![""],
+    );
+}
+
+#[test]
+fn completions_bound_in_a_with_clause_offers_nothing() {
+    // `with` clauses are reserved.
+    check_completions(
+        r#"
+trait Show = requires { }
+type Point = struct { x: usize } with T: $0 { }
+"#,
+        expect_test::expect![""],
+    );
+}
+
+#[test]
 fn completions_after_a_ceiling_offer_with_but_no_second_ceiling() {
     check_completions(
         "type Res = struct { n: usize } only move $0",
