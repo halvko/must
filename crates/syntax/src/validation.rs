@@ -248,12 +248,24 @@ pub enum ImplHome {
 /// Where `impl_element` sits, or `None` when its group has binders or
 /// clauses, or its owner is a generic trait or not a `type`/`trait`.
 pub fn impl_element_home(impl_element: &ast::ImplElement) -> Option<ImplHome> {
-    let group = impl_element
-        .syntax()
-        .parent()
-        .and_then(ast::WithGroup::cast)
-        .filter(ast::WithGroup::is_plain)?;
-    match ast::Item::cast(group.syntax().parent()?)? {
+    with_group_home(
+        &impl_element
+            .syntax()
+            .parent()
+            .and_then(ast::WithGroup::cast)?,
+    )
+}
+
+/// Where an `impl` element of `group` would sit; `None` as for [`impl_element_home`].
+pub fn with_group_home(group: &ast::WithGroup) -> Option<ImplHome> {
+    let group = Some(group).filter(|group| group.is_plain())?;
+    item_impl_home(&ast::Item::cast(group.syntax().parent()?)?)
+}
+
+/// Where an `impl` element of a plain `with` group on `item` would sit; `None` for a generic
+/// trait or an item that is neither a `type` nor a `trait`.
+pub fn item_impl_home(item: &ast::Item) -> Option<ImplHome> {
+    match item {
         ast::Item::TypeItem(item) => Some(ImplHome::Type {
             generic: item.body().is_some_and(|body| match body {
                 ast::Expr::RecordExpr(record) => record.generic_param_list().is_some(),

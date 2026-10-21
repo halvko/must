@@ -77,7 +77,9 @@
 //! - the block-taking keywords: `loop {$0}`, and `if $0` / `match $0`,
 //!   which write no braces;
 //! - the `match` arm-list template;
-//! - one template per form an item keyword opens ([`ITEM_SHAPES`]).
+//! - one template per form an item keyword opens ([`ITEM_SHAPES`]);
+//! - a whole `with` group after a braced item ([`with_shape_item`]), and an
+//!   `impl X { … }` block per admitted head in a group ([`impl_block_items`]).
 //!
 //! Every snippet carries its own plain fallback for a client without
 //! `snippetSupport` — `must-lsp::to_proto` picks between the two per client
@@ -467,8 +469,10 @@ enum Context {
     /// not yet closed by `;`: a new item may start, or the item goes on with a
     /// trailing clause (`with { … }`, and `only move` on a `type`).
     AfterBracedItem {
-        /// The item is a `type` declaration (the one home of `only`) with
-        /// no ceiling written yet.
+        /// Where an `impl` of a `with` group here would sit; `None` where nothing may go in
+        /// one (a generic trait's reserved chain), so no `with` is offered.
+        with_home: Option<syntax::ImplHome>,
+        /// No ceiling written yet (only a `type`, the one home of `only`, has one).
         ceiling_open: bool,
         /// The cursor is on the line of the item's closing `}`, where the
         /// clause is the likelier thing to be typing.
@@ -477,8 +481,10 @@ enum Context {
     /// A `trait X = ⟨caret⟩` right-hand side: `requires { … }` is the one
     /// supported form (an alias composition parses but is reserved).
     TraitRhs,
-    /// A fresh element slot in a `with { … }` group: `impl`.
-    WithElement,
+    /// A fresh element slot in a `with { … }` group that may hold an impl: `impl`, and an
+    /// `impl` block per head the group's home admits. A group with no home (a generic trait's,
+    /// one with binders or clauses, one on a `static`) is reserved and gets no context.
+    WithElement(syntax::ImplHome),
     /// The first segment of a `PathType`.
     TypePosition,
     /// A bound on a generic type parameter (`T: ⟨caret⟩`, `T: A + ⟨caret⟩`),
@@ -635,12 +641,19 @@ pub(crate) fn completions(
             items
         }
         Some(Context::AfterBracedItem {
+            with_home,
             ceiling_open,
             same_line,
         }) => {
             let mut items = keyword_items(ITEM_KEYWORDS, edit_range);
             items.extend(item_shape_items(real_text, "", "", edit_range));
-            items.extend(trailing_clause_items(ceiling_open, same_line, edit_range));
+            items.extend(trailing_clause_items(
+                with_home,
+                ceiling_open,
+                same_line,
+                real_text,
+                edit_range,
+            ));
             items
         }
         Some(Context::TraitRhs) => vec![open_keyword_item(
@@ -648,7 +661,11 @@ pub(crate) fn completions(
             Provenance::Keyword as u8,
             edit_range,
         )],
-        Some(Context::WithElement) => keyword_items(&[SyntaxKind::IMPL_KW], edit_range),
+        Some(Context::WithElement(home)) => {
+            let mut items = keyword_items(&[SyntaxKind::IMPL_KW], edit_range);
+            items.extend(impl_block_items(db, file, home, real_text, edit_range));
+            items
+        }
         Some(Context::TypePosition) => {
             let mut items = type_scope_items(db, file, |_| true, edit_range);
             items.extend(builtin_type_items(|_| true, edit_range));
@@ -916,8 +933,8 @@ fn classify(parent: &SyntaxNode) -> Option<Context> {
             return Some(after_braced_item(parent).unwrap_or(Context::ItemKeyword));
         }
         // `with { ⟨caret⟩ }`: the element loop bumps a stray word as `ERROR`.
-        if grandparent.kind() == SyntaxKind::WITH_GROUP {
-            return Some(Context::WithElement);
+        if let Some(group) = ast::WithGroup::cast(grandparent.clone()) {
+            return syntax::with_group_home(&group).map(Context::WithElement);
         }
         // `unsafe ⟨caret⟩` offers `extern` and the extern shape; `extern ⟨caret⟩` offers
         // `static` and the shape's rest.
@@ -1120,6 +1137,7 @@ fn after_braced_item(error: &SyntaxNode) -> Option<Context> {
             .map_while(|t| t.into_token())
             .all(|t| !t.text().contains('\n'));
     Some(Context::AfterBracedItem {
+        with_home: ast::Item::cast(item.clone()).and_then(|item| syntax::item_impl_home(&item)),
         ceiling_open,
         same_line,
     })
@@ -1332,10 +1350,9 @@ fn keyword_snippet_item(
 
 /// Each form an item can take, `(filter, label, detail, snippet)`, most likely first. `filter` is
 /// the words that reach it: its keywords (the shape sorts after the first), then words one may type
-/// instead (`fn` for a function, `struct`/`enum` for a type). A `snippet` is written from column 0
-/// with one [`syntax::INDENT_UNIT`] per level; its later lines move to the item's indentation. The
-/// last stop (`$0`) sits above a body's `};`, or past the `;` of an inline `{ … }`, so no `}` is
-/// left to type.
+/// instead (`fn` for a function, `struct`/`enum` for a type). A `snippet` is laid out as
+/// [`lay_out`] reads it. The last stop (`$0`) sits above a body's `};`, or past the `;` of an
+/// inline `{ … }`, so no `}` is left to type.
 const ITEM_SHAPES: &[(&str, &str, &str, &str)] = &[
     (
         "static fn",
@@ -1388,6 +1405,18 @@ const ITEM_SHAPES: &[(&str, &str, &str, &str)] = &[
         "type Name = enum { … };",
         "an enum type",
         "type ${1:Name} = enum { ${2:Variant} };$0",
+    ),
+    (
+        "type struct with",
+        "type Name = struct { … } with { … };",
+        "a record type with members",
+        r"type ${1:Name} = struct { ${2:field}: ${3:Type} } with {
+    impl Self {
+        ${4:member} = fn(${5:s}: Self) -> ${6:()} {
+            $0
+        };
+    }
+};",
     ),
     (
         "type struct",
@@ -1449,7 +1478,7 @@ fn item_shape_items(
             let keyword = filter
                 .split_once(' ')
                 .map_or(filter, |(keyword, _)| keyword);
-            let snippet = snippet[rest.clone()].replace('\n', &format!("\n{indent}"));
+            let snippet = lay_out(&snippet[rest.clone()], &indent);
             let mut item = completion_item(
                 &label[rest],
                 CompletionItemKind::Snippet,
@@ -1471,6 +1500,12 @@ fn item_shape_items(
             Some(item)
         })
         .collect()
+}
+
+/// `snippet`, written from column 0 with one [`syntax::INDENT_UNIT`] per level, with each of its
+/// lines after the first moved to `indent`.
+fn lay_out(snippet: &str, indent: &str) -> String {
+    snippet.replace('\n', &format!("\n{indent}"))
 }
 
 /// `snippet` with its tab stops taken out: a placeholder `${1:name}` leaves
@@ -1520,11 +1555,14 @@ fn type_item_rhs_items(edit_range: TextRange) -> Vec<CompletionItem> {
     keyword_items(&[SyntaxKind::STRUCT_KW, SyntaxKind::ENUM_KW], edit_range)
 }
 
-/// `with $0`, and `only move` while `ceiling_open`. On the line of the
-/// item's end they lead the list, `with` first.
+/// `with $0` and its [`with_shape_item`] where a group may hold an impl (`with_home` is
+/// `Some`); `only move` while `ceiling_open`. On the line of the item's
+/// end they lead the list, `with` first.
 fn trailing_clause_items(
+    with_home: Option<syntax::ImplHome>,
     ceiling_open: bool,
     same_line: bool,
+    real_text: &str,
     edit_range: TextRange,
 ) -> Vec<CompletionItem> {
     let keyword = Provenance::Keyword as u8;
@@ -1533,7 +1571,14 @@ fn trailing_clause_items(
     } else {
         (keyword, keyword)
     };
-    let mut items = vec![open_keyword_item("with", with_tier, edit_range)];
+    let mut items = with_home
+        .map(|home| {
+            vec![
+                open_keyword_item("with", with_tier, edit_range),
+                with_shape_item(home, with_tier, real_text, edit_range),
+            ]
+        })
+        .unwrap_or_default();
     if ceiling_open {
         items.push(completion_item_at_tier(
             "only move",
@@ -1545,6 +1590,85 @@ fn trailing_clause_items(
         ));
     }
     items
+}
+
+/// The `with` group a `type`'s shapes write: one `impl Self` and one member, the cursor in the
+/// member's body.
+const TYPE_WITH_GROUP: &str = r"with {
+    impl Self {
+        ${1:member} = fn(${2:s}: Self) -> ${3:()} {
+            $0
+        };
+    }
+}";
+
+/// A `with` group of one impl, laid out for the line at `edit_range`: [`TYPE_WITH_GROUP`] after a
+/// `type`; after a `trait`, an empty `impl Type`, whose members the trait names.
+fn with_shape_item(
+    home: syntax::ImplHome,
+    tier: u8,
+    real_text: &str,
+    edit_range: TextRange,
+) -> CompletionItem {
+    let group = match home {
+        syntax::ImplHome::Type { .. } => TYPE_WITH_GROUP,
+        syntax::ImplHome::Trait => {
+            r"with {
+    impl ${1:Type} {
+        $0
+    }
+}"
+        }
+    };
+    let snippet = lay_out(group, &syntax::line_indent(real_text, edit_range.start()));
+    let mut item = completion_item_at_tier(
+        "with { impl … { … } }",
+        CompletionItemKind::Snippet,
+        tier,
+        TYPE_TIER_NONE,
+        Some("an impl block".to_owned()),
+        edit_range,
+    );
+    item.filter_text = "with".to_owned();
+    item.text_edit.insert = InsertText::Snippet {
+        plain: snippet_plain(&snippet),
+        snippet,
+    };
+    item
+}
+
+/// `impl X { … }` for each head [`impl_head_items`] offers, ranked like the head, the cursor on
+/// an indented blank line inside the braces.
+fn impl_block_items(
+    db: &RootDatabase,
+    file: SourceFile,
+    home: syntax::ImplHome,
+    real_text: &str,
+    edit_range: TextRange,
+) -> Vec<CompletionItem> {
+    let indent = syntax::line_indent(real_text, edit_range.start());
+    impl_head_items(db, file, home, edit_range)
+        .into_iter()
+        .map(|mut item| {
+            let head = item.label;
+            let snippet = lay_out(
+                &format!(
+                    r"impl {head} {{
+    $0
+}}"
+                ),
+                &indent,
+            );
+            item.label = format!("impl {head} {{ … }}");
+            item.filter_text = format!("impl {head}");
+            item.kind = CompletionItemKind::Snippet;
+            item.text_edit.insert = InsertText::Snippet {
+                plain: snippet_plain(&snippet),
+                snippet,
+            };
+            item
+        })
+        .collect()
 }
 
 /// The expression keywords whose grammar always goes on to a block:
@@ -3046,7 +3170,7 @@ fn locals_in_block(
 
 #[cfg(test)]
 mod tests {
-    use super::{ITEM_KEYWORDS, ITEM_SHAPES, snippet_plain};
+    use super::{ITEM_KEYWORDS, ITEM_SHAPES, TYPE_WITH_GROUP, snippet_plain};
 
     /// Each shape's plain spelling parses with no error, its label, snippet and
     /// filter share their leading keywords, and its snippet has exactly one `$0`.
@@ -3083,6 +3207,26 @@ mod tests {
     #[test]
     fn snippets_indent_by_indent_unit() {
         assert_eq!(syntax::INDENT_UNIT, "    ");
+    }
+
+    /// The `type … with` shape writes the same group the `with` completion does.
+    #[test]
+    fn the_type_with_shape_writes_the_type_with_group() {
+        let (_, _, _, snippet) = ITEM_SHAPES
+            .iter()
+            .find(|(filter, ..)| *filter == "type struct with")
+            .expect("the `type … with` shape");
+        // The group's stops follow the shape's own three, so shift them by 3 (highest first,
+        // so `${1:` never becomes a `${4:` that a later step shifts again).
+        let group = (1..=3)
+            .rev()
+            .fold(TYPE_WITH_GROUP.to_owned(), |group, stop| {
+                group.replace(&format!("${{{stop}:"), &format!("${{{}:", stop + 3))
+            });
+        assert_eq!(
+            *snippet,
+            format!("type ${{1:Name}} = struct {{ ${{2:field}}: ${{3:Type}} }} {group};")
+        );
     }
 
     #[test]
