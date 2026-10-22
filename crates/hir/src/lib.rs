@@ -1638,18 +1638,20 @@ pub fn range_diagnostics(db: &dyn Db, file: SourceFile) -> Vec<Diagnostic> {
         // `@_` says "there is a region here, infer it" — an answer a BODY
         // can give and a SIGNATURE cannot, because a signature's regions
         // are parameters, and a parameter needs the binder name that its
-        // outlives clauses and its other mentions refer to. The two
-        // positions are told apart syntactically: a signature type sits
-        // under a `PARAM` or a `RET_TYPE`.
-        if !in_signature_position(borrow.syntax()) {
-            continue;
-        }
+        // outlives clauses and its other mentions refer to. The positions
+        // are told apart syntactically (`region_position`).
+        let message = match region_position(borrow.syntax()) {
+            RegionPosition::Body => continue,
+            RegionPosition::Signature => diag::WILDCARD_REGION_IN_SIGNATURE,
+            RegionPosition::ItemType => diag::WILDCARD_REGION_IN_ITEM_TYPE,
+            RegionPosition::TypeDeclaration => diag::WILDCARD_REGION_IN_TYPE_DECL,
+        };
         for token in region.regions() {
             if token.text() == "@_" {
                 diagnostics.push(Diagnostic {
                     range: token.text_range(),
                     severity: Severity::Error,
-                    message: diag::WILDCARD_REGION_IN_SIGNATURE.to_owned(),
+                    message: message.to_owned(),
                     fix: None,
                     related: Vec::new(),
                 });
@@ -3076,6 +3078,27 @@ fn enum_comparison_note(db: &dyn Db, enum_ty: &Ty, other: &Ty) -> Option<String>
     })
 }
 
+/// What a borrow type at `node` may name as its region.
+pub struct BorrowRegions {
+    /// The regions in scope, sigil included, in binder order: the names the
+    /// unknown-region check accepts (`@_` aside).
+    pub declared: Vec<String>,
+    /// The fn literal or member fn type whose binder can declare a region
+    /// for the borrow, and whether the borrow is in its return type.
+    pub signature: Option<(syntax::SyntaxNode, bool)>,
+    /// `@_` is accepted: the region is inferred (see [`region_position`]).
+    pub inferred: bool,
+}
+
+/// The [`BorrowRegions`] of the borrow type at `node`.
+pub fn borrow_regions(node: &syntax::SyntaxNode) -> BorrowRegions {
+    BorrowRegions {
+        declared: enclosing_binder_info(node).regions,
+        inferred: region_position(node) == RegionPosition::Body,
+        signature: region_owner(node),
+    }
+}
+
 /// The enclosing generic binder's params, read syntactically — the mirror
 /// of the [`crate::ty`] `ParamScope` annotation lowering runs under.
 #[derive(Default)]
@@ -3780,41 +3803,84 @@ fn capability_bound(name: &str) -> CapabilityBound {
     ))
 }
 
-/// Whether a type node sits in a SIGNATURE — a parameter's annotation or a
-/// return type of an ITEM — as opposed to a body-local annotation.
-///
-/// The distinction is what makes `@_` legal in one place and not the other,
-/// and it is genuinely syntactic: an item's regions are its parameters, so
-/// they need the binder names their outlives clauses and other mentions
-/// refer to; a body's are inference variables, so declining to name one is
-/// the whole point.
-///
-/// A fn literal NESTED in a body is on the body's side of that line. Three
-/// intentional rules compose into what would otherwise be a cliff: a
-/// nested literal may not declare its own binder (generic literals are
-/// item-initializers only), `@_` was refused in every parameter position,
-/// and a signature elides nothing — so no function literal in a body could
-/// take a borrow parameter BY ANY ROUTE. The smallest honest opening is to
-/// notice that a nested literal's regions genuinely ARE body-local
-/// existentials: it has no callers outside the body, nothing can
-/// instantiate it independently, and `@_` says exactly the true thing
-/// about them. The alternative was to reserve the whole shape by name,
-/// which buys a worse message for the same expressiveness.
-fn in_signature_position(node: &syntax::SyntaxNode) -> bool {
+/// Where a region is written, which decides whether `@_` may stand for it.
+/// An item's signature regions are binder parameters; a body's, and a
+/// nested literal's (nothing outside the body can call it), are inferred.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum RegionPosition {
+    /// A body, or a nested literal's signature.
+    Body,
+    /// A fn signature: an item's, or a fn type's parameters and return.
+    Signature,
+    /// A `static`/`const` item's `: Type` annotation.
+    ItemType,
+    /// A `type` item's declared value, such as a field type.
+    TypeDeclaration,
+}
+
+/// Where the region written at `node` sits.
+fn region_position(node: &syntax::SyntaxNode) -> RegionPosition {
+    use syntax::SyntaxKind::*;
     let mut in_param_or_ret = false;
+    let mut below: Option<syntax::SyntaxNode> = None;
     for ancestor in node.ancestors() {
         match ancestor.kind() {
-            syntax::SyntaxKind::PARAM | syntax::SyntaxKind::RET_TYPE => in_param_or_ret = true,
-            syntax::SyntaxKind::FN_LITERAL => {
-                return in_param_or_ret && is_item_initializer(&ancestor);
+            PARAM | RET_TYPE => in_param_or_ret = true,
+            FN_LITERAL if in_param_or_ret && is_item_initializer(&ancestor) => {
+                return RegionPosition::Signature;
             }
-            // A colon-declared member/requirement signature is a contract
-            // like any item's: its regions are parameters.
-            syntax::SyntaxKind::FN_TYPE => return in_param_or_ret,
+            FN_LITERAL | BLOCK_EXPR => return RegionPosition::Body,
+            // Stop at a fn type or a `with`/`requires` member: a `type`
+            // item above does not declare their types. A fn type's parameters
+            // and return are a signature, though only a member's has a
+            // binder.
+            FN_TYPE | WITH_GROUP | REQUIRES_DEF => break,
+            STATIC_ITEM
+                if ast::StaticItem::cast(ancestor.clone())
+                    .and_then(|item| item.ty())
+                    .is_some_and(|ty| below.as_ref() == Some(ty.syntax())) =>
+            {
+                // TODO: halvko/must#207: no region can be written here.
+                return RegionPosition::ItemType;
+            }
+            TYPE_ITEM => return RegionPosition::TypeDeclaration,
             _ => {}
         }
+        below = Some(ancestor);
     }
-    in_param_or_ret
+    if in_param_or_ret {
+        RegionPosition::Signature
+    } else {
+        RegionPosition::Body
+    }
+}
+
+/// The binder a region named in the signature at `node` can be declared
+/// in: an item's fn literal, or a colon-declared member's fn type (no other
+/// fn type has a binder). `None` in a body or a type declaration. The
+/// `bool` says the type is in that signature's return type.
+fn region_owner(node: &syntax::SyntaxNode) -> Option<(syntax::SyntaxNode, bool)> {
+    use syntax::SyntaxKind::*;
+    let mut in_return = None;
+    let mut below = None;
+    for ancestor in node.ancestors() {
+        match ancestor.kind() {
+            PARAM | RET_TYPE => in_return = Some(ancestor.kind() == RET_TYPE),
+            FN_TYPE if ancestor.parent().is_some_and(|p| p.kind() == MEMBER) => {
+                return in_return.map(|in_return| (ancestor, in_return));
+            }
+            FN_LITERAL => {
+                let via_signature = matches!(below, Some(PARAM_LIST | RET_TYPE));
+                return in_return
+                    .filter(|_| via_signature && is_item_initializer(&ancestor))
+                    .map(|in_return| (ancestor, in_return));
+            }
+            BLOCK_EXPR | WITH_GROUP | REQUIRES_DEF | RECORD_EXPR | ENUM_EXPR => return None,
+            _ => {}
+        }
+        below = Some(ancestor.kind());
+    }
+    None
 }
 
 /// The expression shapes `grammar::expr_bp`'s loop builds by CONTINUING an

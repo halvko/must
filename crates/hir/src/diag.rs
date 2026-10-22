@@ -248,6 +248,16 @@ pub const BORROW_NEEDS_REGION: &str =
 pub const WILDCARD_REGION_IN_SIGNATURE: &str = "`@_` cannot be used in a signature — declare the region in the binder \
      (`fn::<@a>`) and name it here";
 
+/// `@_` written in a type declaration's field type. Nothing infers a
+/// field's region, and a declaration cannot bind one ([`REGION_ON_TYPE_DECL`]).
+pub const WILDCARD_REGION_IN_TYPE_DECL: &str = "`@_` cannot be used in a type declaration: nothing infers a field's region, \
+     and region parameters on type declarations are not supported";
+
+/// `@_` written in a `static`/`const` item's `: Type` annotation, where no
+/// region can be written.
+pub const WILDCARD_REGION_IN_ITEM_TYPE: &str = "`@_` cannot be used in an item's type annotation: the item has no binder \
+     to declare a region in, so no region can be written there";
+
 /// `@_` written in a BINDER (`fn::<@_>`). The wildcard is the elision
 /// sigil, not a name: it asks for a region to be inferred, and a binder is
 /// where regions are declared, so there is nothing for it to denote — and
