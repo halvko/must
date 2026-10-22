@@ -17,8 +17,8 @@ use rustc_hash::FxHashMap;
 use crate::ItemLoc;
 use crate::item_tree::{self, GenericParamData, GenericParamKind, TypeRef};
 use crate::library::{LibraryId, library_item_ids, library_of};
-use crate::scopes::{Resolution, file_scope, type_scope};
-use crate::ty::{ParamTy, Ty, builtin_type_by_name};
+use crate::scopes::{Builtin, Resolution, file_scope, type_scope};
+use crate::ty::{ParamTy, ReceiverShape, Ty, builtin_type_by_name};
 
 /// The self-type half of a coherence bucket key: a `type` declaration, or
 /// one of the nameable builtin types (which are legal implementers but
@@ -384,6 +384,49 @@ pub fn dict_param_count(db: &dyn Db, file: SourceFile, generics: &[GenericParamD
         .sum()
 }
 
+/// One requirement of a trait implemented for a concrete type, with what
+/// the impl holds for it.
+pub(crate) struct ImplRequirement {
+    pub(crate) trait_: ItemLoc,
+    pub(crate) name: String,
+    pub(crate) member: ImplMember,
+}
+
+/// Every requirement of every trait implemented for `self_key` (only those
+/// named `name`, when given), in library order: what impl-directed
+/// resolution picks a dot-call or a `Type::member` path from. A trait
+/// repeating a requirement name lists it once.
+pub(crate) fn impl_requirements(
+    db: &dyn Db,
+    file: SourceFile,
+    self_key: &SelfKey,
+    name: Option<&str>,
+) -> Vec<ImplRequirement> {
+    let impls = trait_impls(db, file);
+    let mut out = Vec::new();
+    for trait_loc in &impls.traits {
+        let Some(site) = impls.impl_for(trait_loc, self_key) else {
+            continue;
+        };
+        let requirements = item_tree::trait_requirements(db, trait_loc.to_id(db));
+        for (index, req) in requirements.iter().enumerate() {
+            if name.is_some_and(|name| req.name != name)
+                || requirements[..index]
+                    .iter()
+                    .any(|earlier| earlier.name == req.name)
+            {
+                continue;
+            }
+            out.push(ImplRequirement {
+                trait_: trait_loc.clone(),
+                name: req.name.clone(),
+                member: site_member(db, site, &req.name),
+            });
+        }
+    }
+    out
+}
+
 /// The traits that can answer a dot-call `recv.name(...)` on a concrete
 /// receiver keyed `self_key`: every trait with a requirement named `name`
 /// AND an impl for the receiver, with what that impl holds for `name`.
@@ -395,18 +438,159 @@ pub(crate) fn traits_providing_member(
     self_key: &SelfKey,
     name: &str,
 ) -> Vec<(ItemLoc, ImplMember)> {
-    let impls = trait_impls(db, file);
-    let mut out = Vec::new();
-    for trait_loc in &impls.traits {
-        let requirements = item_tree::trait_requirements(db, trait_loc.to_id(db));
-        if !requirements.iter().any(|req| req.name == name) {
-            continue;
-        }
-        if let Some(site) = impls.impl_for(trait_loc, self_key) {
-            out.push((trait_loc.clone(), site_member(db, site, name)));
-        }
+    impl_requirements(db, file, self_key, Some(name))
+        .into_iter()
+        .map(|req| (req.trait_, req.member))
+        .collect()
+}
+
+/// The inherent member of `decl` named `name` (the first, when duplicates
+/// carry their own diagnostic).
+pub(crate) fn inherent_member(db: &dyn Db, decl: &ItemLoc, name: &str) -> Option<ItemLoc> {
+    if decl.member.is_some() {
+        return None;
     }
-    out
+    item_tree::type_members(db, decl.to_id(db))
+        .iter()
+        .find(|m| m.name == name)
+        .map(|m| ItemLoc {
+            file: decl.file,
+            name: decl.name.clone(),
+            disambiguator: decl.disambiguator,
+            member: Some((std::sync::Arc::from(m.name.as_str()), m.disambiguator)),
+        })
+}
+
+/// One trait that could carry a concrete-receiver dot-call.
+pub(crate) struct TraitCallCandidate {
+    pub(crate) trait_: ItemLoc,
+    /// What the impl holds for the requirement (a missing member is
+    /// diagnosed at the impl).
+    pub(crate) member: ImplMember,
+    /// Whether the impl member's signature is broken (its definition site
+    /// carries the diagnostic; the call refuses silently).
+    pub(crate) broken: bool,
+}
+
+/// Everything a dot-call `recv.name(...)` on a CONCRETE receiver counts: the
+/// inherent member, the impl-directed trait candidates (TR01 extended), and
+/// a field of the name. Which of them carry the call depends on the
+/// receiver's shape, so the methods take it. Resolution acts on it, and
+/// completion asks it of every row it might offer.
+pub(crate) struct ConcreteDotCandidates {
+    pub(crate) inherent: Option<ItemLoc>,
+    pub(crate) traits: Vec<TraitCallCandidate>,
+    field: Option<Ty>,
+}
+
+impl ConcreteDotCandidates {
+    /// A broken candidate: the call is an error naming it.
+    pub(crate) fn broken(&self, db: &dyn Db) -> Option<&ItemLoc> {
+        self.inherent
+            .as_ref()
+            .filter(|loc| crate::ty::signature(db, loc.to_id(db)).contains_error())
+            .or_else(|| {
+                self.traits
+                    .iter()
+                    .find(|candidate| candidate.broken)
+                    .and_then(|candidate| candidate.member.found())
+            })
+    }
+
+    /// The field of the name, never reached through a borrow (that would be
+    /// auto-deref).
+    pub(crate) fn field(&self, shape: ReceiverShape) -> Option<&Ty> {
+        self.field.as_ref().filter(|_| !shape.is_borrow())
+    }
+
+    /// The inherent member, when it takes the call from `shape`.
+    pub(crate) fn inherent_carrier(&self, db: &dyn Db, shape: ReceiverShape) -> Option<&ItemLoc> {
+        self.inherent
+            .as_ref()
+            .filter(|loc| crate::ty::member_takes(db, loc.to_id(db), shape))
+    }
+
+    /// The trait candidates whose impl member takes the call from `shape`.
+    pub(crate) fn trait_carriers(
+        &self,
+        db: &dyn Db,
+        shape: ReceiverShape,
+    ) -> Vec<&TraitCallCandidate> {
+        self.traits
+            .iter()
+            .filter(|candidate| {
+                !candidate.broken
+                    && candidate
+                        .member
+                        .found()
+                        .is_some_and(|loc| crate::ty::member_takes(db, loc.to_id(db), shape))
+            })
+            .collect()
+    }
+
+    /// An fn-typed field carries the call beside the members.
+    pub(crate) fn fn_field(&self, shape: ReceiverShape) -> bool {
+        matches!(self.field(shape), Some(Ty::Fn(_)))
+    }
+
+    /// Whether the call from `shape` falls through to a builtin member of
+    /// the name: nothing is broken and no user candidate, member or fn-typed
+    /// field, takes it (user declarations shadow builtins).
+    pub(crate) fn leaves_builtin(&self, db: &dyn Db, shape: ReceiverShape) -> bool {
+        self.broken(db).is_none() && self.carriers(db, shape) == 0
+    }
+
+    /// How many candidates take the call from `shape`; more than one is
+    /// ambiguous.
+    pub(crate) fn carriers(&self, db: &dyn Db, shape: ReceiverShape) -> usize {
+        usize::from(self.inherent_carrier(db, shape).is_some())
+            + self.trait_carriers(db, shape).len()
+            + usize::from(self.fn_field(shape))
+    }
+}
+
+/// The [`ConcreteDotCandidates`] of `recv.name(...)`, where `member_recv` is
+/// the receiver members are looked up on (the referent, under a borrow).
+/// `None` when the receiver can't carry members (a structural type, or a
+/// declaration that is neither a struct nor an enum, whose own diagnostic
+/// stands).
+pub(crate) fn concrete_dot_candidates(
+    db: &dyn Db,
+    file: SourceFile,
+    member_recv: &Ty,
+    name: &str,
+) -> Option<ConcreteDotCandidates> {
+    let self_key = SelfKey::for_ty(member_recv)?;
+    let named = match member_recv {
+        Ty::Named(named) => Some(named),
+        _ => None,
+    };
+    let underlying = named.and_then(|named| crate::ty::type_underlying_for(db, named));
+    if let Some(named) = named
+        && underlying.is_none()
+        && crate::ty::enum_variants(db, named.decl.to_id(db)).is_none()
+    {
+        return None;
+    }
+    let field = match &underlying {
+        Some(Ty::Record(rec)) => rec.field_ty(name).cloned(),
+        _ => None,
+    };
+    let traits = traits_providing_member(db, file, &self_key, name)
+        .into_iter()
+        .map(|(trait_, member)| TraitCallCandidate {
+            broken: member
+                .found()
+                .is_some_and(|loc| crate::ty::signature(db, loc.to_id(db)).contains_error()),
+            trait_,
+            member,
+        })
+        .collect();
+    Some(ConcreteDotCandidates {
+        inherent: named.and_then(|named| inherent_member(db, &named.decl, name)),
+        traits,
+        field,
+    })
 }
 
 /// The syntax of an impl site — ranges enter here and only here (the
@@ -721,16 +905,14 @@ pub(crate) fn narrow_by_name(
     out
 }
 
-/// One requirement a rigid receiver's dot can actually take: its name, and
-/// its signature lowered at the receiver's own param.
+/// One member a receiver's dot can take: its name and signature.
 #[derive(Debug)]
-pub struct BoundDotOffer {
-    /// The requirement's name — what the user types after the dot.
+pub struct MemberDotOffer {
+    /// The member's name — what the user types after the dot.
     pub name: String,
-    /// The requirement's signature with `Self` standing for the receiver's
-    /// rigid param and the requirement's own binder as written — the same
-    /// lowering the trait's hover renders, so the shape offered and the
-    /// shape shown are one text.
+    /// The member's signature. For a rigid receiver's requirement, `Self`
+    /// stands for the receiver's param and the requirement's own binder is
+    /// as written — the same lowering the trait's hover renders.
     pub sig: Ty,
     /// How the dot reaches the member: as written, or through a written borrow.
     pub reach: crate::ty::DotReach,
@@ -774,7 +956,7 @@ pub fn bound_dot_offers<'db>(
     owner: crate::ItemId<'db>,
     receiver_ty: &Ty,
     exclusive: bool,
-) -> Vec<BoundDotOffer> {
+) -> Vec<MemberDotOffer> {
     let member_recv = match receiver_ty {
         Ty::Borrow { referent, .. } => &**referent,
         _ => receiver_ty,
@@ -789,7 +971,7 @@ pub fn bound_dot_offers<'db>(
         .unwrap_or(&[]);
     let candidates = param_bound_candidates(db, Some(&owner_loc), owner_generics, param);
     let self_ty = Ty::Param(param.clone());
-    let mut out: Vec<BoundDotOffer> = Vec::new();
+    let mut out: Vec<MemberDotOffer> = Vec::new();
     for candidate in &candidates {
         // Resolution's narrowing, asked of this name: anything but a lone
         // winner is unofferable — and the lone winner is the candidate
@@ -817,12 +999,99 @@ pub fn bound_dot_offers<'db>(
         else {
             continue;
         };
-        out.push(BoundDotOffer {
+        out.push(MemberDotOffer {
             name: candidate.name.to_owned(),
             sig,
             reach: offer.reach,
             refused: offer.refused,
         });
+    }
+    out
+}
+
+/// The builtin members a dot on `receiver_ty` can call: those no user member
+/// or field of the same name shadows at that receiver shape.
+pub fn builtin_dot_members(db: &dyn Db, file: SourceFile, receiver_ty: &Ty) -> Vec<Builtin> {
+    let shape = ReceiverShape::of(receiver_ty);
+    Builtin::members_of(receiver_ty)
+        .iter()
+        .copied()
+        .filter(|builtin| {
+            concrete_dot_candidates(db, file, receiver_ty, builtin.name())
+                .is_none_or(|candidates| candidates.leaves_builtin(db, shape))
+        })
+        .collect()
+}
+
+/// The members a dot on a CONCRETE `receiver_ty` (owned, or the innermost
+/// borrow of [`crate::deref_receiver`]) can call: inherent and trait-impl.
+/// A row is left out when the call it writes would be refused: some member
+/// of that name doesn't lower, or another member (or an fn-typed field)
+/// also takes the receiver shape that row's spelling leaves.
+pub fn concrete_dot_offers(
+    db: &dyn Db,
+    file: SourceFile,
+    receiver_ty: &Ty,
+    exclusive: bool,
+) -> Vec<MemberDotOffer> {
+    let self_ty = match receiver_ty {
+        Ty::Borrow { referent, .. } => &**referent,
+        _ => receiver_ty,
+    };
+    let Some(self_key) = SelfKey::for_ty(self_ty) else {
+        return Vec::new();
+    };
+    let mut names: Vec<String> = Vec::new();
+    if let Ty::Named(named) = self_ty {
+        for id in crate::inherent_member_ids(db, named.decl.to_id(db)) {
+            names.push(crate::item_loc(db, id).display_name().to_owned());
+        }
+    }
+    names.extend(
+        impl_requirements(db, file, &self_key, None)
+            .into_iter()
+            .map(|req| req.name),
+    );
+    let mut seen = rustc_hash::FxHashSet::default();
+    names.retain(|name| seen.insert(name.clone()));
+    let shape = ReceiverShape::of(receiver_ty);
+    let mut out = Vec::new();
+    for name in &names {
+        let Some(candidates) = concrete_dot_candidates(db, file, self_ty, name) else {
+            continue;
+        };
+        // A broken member makes every call by its name an error.
+        if candidates.broken(db).is_some() {
+            continue;
+        }
+        let members = candidates
+            .inherent
+            .iter()
+            .chain(candidates.traits.iter().filter_map(|c| c.member.found()));
+        for member in members {
+            let id = member.to_id(db);
+            let Some(offer) = crate::ty::member_self_position(db, id)
+                .and_then(|position| crate::ty::dot_offer(receiver_ty, exclusive, position))
+            else {
+                continue;
+            };
+            // The call the accepted row writes, judged as resolution judges
+            // it: from the receiver shape that row's spelling leaves.
+            let written = match offer.reach {
+                crate::ty::DotReach::Direct => shape,
+                crate::ty::DotReach::WrittenBorrow { mutable } => ReceiverShape::Borrow { mutable },
+            };
+            let own = usize::from(crate::ty::member_takes(db, id, written));
+            if candidates.carriers(db, written) > own {
+                continue;
+            }
+            out.push(MemberDotOffer {
+                name: name.clone(),
+                sig: crate::ty::signature(db, id),
+                reach: offer.reach,
+                refused: offer.refused,
+            });
+        }
     }
     out
 }

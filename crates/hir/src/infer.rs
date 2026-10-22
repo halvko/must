@@ -32,8 +32,8 @@ use crate::ty::{
     ConstArgValue, GenericArg, IntKind, IntValue, NamedTy, ParamScope, ReceiverShape, Region,
     ResolvedVariant, Safety, SelfPosition, Ty, TyVar, TyVarValue, builtin_type_by_name,
     dot_callable, enum_variants, generic_param_scope, lower_type_ref_in, member_self_position,
-    member_self_ty, receiver_takes, self_position_of, signature, signature_needs_annotation,
-    substitute_args, type_underlying_for,
+    member_self_ty, self_position_of, signature, signature_needs_annotation, substitute_args,
+    type_underlying_for,
 };
 use crate::{ItemId, ItemLoc, Severity, TypeRef, item_loc};
 
@@ -2638,19 +2638,6 @@ pub(crate) struct InferCtx<'db> {
     /// inferred, so the copy question lands on the step that actually
     /// materializes a value. See [`InferCtx::carry_borrow_projection`].
     borrow_projections: rustc_hash::FxHashSet<ExprId>,
-}
-
-/// One trait that could carry a concrete-receiver dot-call — see
-/// [`InferCtx::trait_call_candidates`].
-struct TraitCallCandidate {
-    trait_: ItemLoc,
-    /// The impl's member for the requirement, or that the impl lacks it.
-    member: crate::traits::ImplMember,
-    /// Whether the impl member can take the call (TR01's structural shape).
-    dot_callable: bool,
-    /// Whether the impl member's signature is broken (its definition site
-    /// carries the diagnostic; the call refuses silently).
-    broken: bool,
 }
 
 /// One `T: Trait` obligation at an instantiation edge, awaiting its
@@ -5561,18 +5548,7 @@ impl<'db> InferCtx<'db> {
     /// [`ItemLoc`] — first occurrence wins (duplicates carry their own
     /// diagnostic at the definition).
     fn member_of(&self, decl: &ItemLoc, name: &str) -> Option<ItemLoc> {
-        if decl.member.is_some() {
-            return None;
-        }
-        crate::item_tree::type_members(self.db, decl.to_id(self.db))
-            .iter()
-            .find(|m| m.name == name)
-            .map(|m| ItemLoc {
-                file: decl.file,
-                name: decl.name.clone(),
-                disambiguator: decl.disambiguator,
-                member: Some((std::sync::Arc::from(m.name.as_str()), m.disambiguator)),
-            })
+        crate::traits::inherent_member(self.db, decl, name)
     }
 
     /// Complete a call whose callee is an ordinary VALUE of type
@@ -5848,26 +5824,16 @@ impl<'db> InferCtx<'db> {
                 Some(crate::traits::SelfKey::Builtin(_))
             );
         if named_recv.is_some() || builtin_recv {
-            let underlying = named_recv
-                .as_ref()
-                .and_then(|named| type_underlying_for(self.db, named));
-            let field_ty = match &underlying {
-                // A borrow receiver reaches no fields: that IS auto-deref.
-                _ if receiver_shape.is_borrow() => None,
-                Some(Ty::Record(rec)) => rec.field_ty(name).cloned(),
-                _ => None,
-            };
-            named_has_field = field_ty.is_some();
-            let fn_field = matches!(&field_ty, Some(Ty::Fn(_)));
-            // A BROKEN declaration (neither a struct shape nor an enum):
-            // its own diagnostic sits at the declaration site — fall
+            // `None` for a BROKEN declaration (neither a struct shape nor an
+            // enum): its own diagnostic sits at the declaration site — fall
             // through to the field path, whose broken arm stays silent
             // (errors are infectious and silent).
-            let decl_broken = underlying.is_none()
-                && named_recv.as_ref().is_some_and(|named| {
-                    enum_variants(self.db, named.decl.to_id(self.db)).is_none()
-                });
-            if !decl_broken {
+            let dot =
+                crate::traits::concrete_dot_candidates(self.db, self.file, &member_recv, name);
+            named_has_field = dot
+                .as_ref()
+                .is_some_and(|dot| dot.field(receiver_shape).is_some());
+            if let Some(dot) = dot {
                 // The receiver's type as the escapes spell it. Under a
                 // BORROW receiver this is the REFERENT's type, not
                 // the borrow: impls live on the referent, and every escape
@@ -5876,43 +5842,22 @@ impl<'db> InferCtx<'db> {
                     Some(named) => Ty::Named(named.clone()),
                     None => member_recv.clone(),
                 };
-                let inherent = named_recv
-                    .as_ref()
-                    .and_then(|named| self.member_of(&named.decl, name));
-                if let Some(loc) = inherent
-                    .as_ref()
-                    .filter(|loc| signature(self.db, loc.to_id(self.db)).contains_error())
-                {
-                    // A broken member definition (not fully annotated): the
-                    // definition site carries the diagnostic, and the call
-                    // names the member, whose value traps with it.
-                    self.result.member_of_expr.insert(expr, loc.clone());
+                // A broken member definition (not fully annotated), inherent
+                // or impl: the definition site carries the diagnostic — it
+                // makes nothing ambiguous — and the call names the member,
+                // whose value traps with it.
+                if let Some(broken) = dot.broken(self.db) {
+                    self.result.member_of_expr.insert(expr, broken.clone());
                     self.result.type_of_expr.insert(callee, Ty::Error);
                     self.infer_args_broken(args);
                     return self.finish_dot_call(expr, Ty::Error, expected, cause);
                 }
-                let inherent_carrier = inherent
-                    .as_ref()
-                    .filter(|loc| self.member_takes_receiver(loc, receiver_shape))
-                    .cloned();
-                let traits = self.trait_call_candidates(&recv_ty, name, receiver_shape);
-                // A broken IMPL member is the definition site's problem
-                // too — it makes nothing ambiguous, and the call names it.
-                if let Some(broken) = traits.iter().find(|candidate| candidate.broken) {
-                    if let Some(member) = broken.member.found() {
-                        self.result.member_of_expr.insert(expr, member.clone());
-                    }
-                    self.result.type_of_expr.insert(callee, Ty::Error);
-                    self.infer_args_broken(args);
-                    return self.finish_dot_call(expr, Ty::Error, expected, cause);
-                }
-                let trait_carriers: Vec<&TraitCallCandidate> = traits
-                    .iter()
-                    .filter(|candidate| candidate.dot_callable)
-                    .collect();
-                let carriers = usize::from(inherent_carrier.is_some())
-                    + trait_carriers.len()
-                    + usize::from(fn_field);
+                let fn_field = dot.fn_field(receiver_shape);
+                let inherent = dot.inherent.clone();
+                let inherent_carrier = dot.inherent_carrier(self.db, receiver_shape).cloned();
+                let trait_carriers = dot.trait_carriers(self.db, receiver_shape);
+                let carriers = dot.carriers(self.db, receiver_shape);
+                let traits = &dot.traits;
                 // MORE THAN ONE candidate: refuse, naming every escape.
                 if carriers > 1 {
                     let mut candidates: Vec<MemberCandidate> = Vec::new();
@@ -5996,7 +5941,9 @@ impl<'db> InferCtx<'db> {
                 // nothing: a `next_char` written in an `impl ... for str`
                 // shadows this one, which is the `print` rule (user
                 // declarations shadow builtins) applied to a member.
-                if let Some(builtin) = Builtin::member_by_name(&member_recv, name) {
+                if dot.leaves_builtin(self.db, receiver_shape)
+                    && let Some(builtin) = Builtin::member_by_name(&member_recv, name)
+                {
                     // A builtin member takes its receiver BY VALUE, so a
                     // borrow receiver does not reach it — that would be
                     // auto-deref, sealed. It gets the same refusal a
@@ -6738,7 +6685,7 @@ impl<'db> InferCtx<'db> {
     }
 
     /// The precise refusal when a member EXISTS but this receiver cannot
-    /// reach it — [`receiver_takes`]'s table read backwards, and the one
+    /// reach it — [`crate::ty::receiver_takes`]'s table read backwards, and the one
     /// place that reading lives. Shared by the concrete-receiver path and
     /// the bound-directed one so a rigid receiver never gets different
     /// advice from a nominal one; `member` is what the diagnostic points at
@@ -6796,10 +6743,9 @@ impl<'db> InferCtx<'db> {
 
     /// Whether a member takes a dot-call from a receiver of this shape —
     /// the structural test of [`crate::ty::member_self_position`], narrowed
-    /// by [`receiver_takes`].
+    /// by [`crate::ty::receiver_takes`].
     fn member_takes_receiver(&self, member: &ItemLoc, receiver: ReceiverShape) -> bool {
-        self.self_position(member)
-            .is_some_and(|position| receiver_takes(receiver, position))
+        crate::ty::member_takes(self.db, member.to_id(self.db), receiver)
     }
 
     /// Every requirement the enclosing binder's bounds put on a rigid
@@ -6844,37 +6790,6 @@ impl<'db> InferCtx<'db> {
                 None
             }
         }
-    }
-
-    /// Every trait that could answer `recv.name(...)` on a CONCRETE
-    /// receiver (impl-directed, TR01 extended): the trait declares `name`
-    /// AND is implemented for the receiver. In library order; whether each
-    /// one can actually take the call is on the candidate.
-    fn trait_call_candidates(
-        &self,
-        resolved: &Ty,
-        name: &str,
-        receiver: ReceiverShape,
-    ) -> Vec<TraitCallCandidate> {
-        let Some(self_key) = crate::traits::SelfKey::for_ty(resolved) else {
-            return Vec::new();
-        };
-        crate::traits::traits_providing_member(self.db, self.file, &self_key, name)
-            .into_iter()
-            .map(|(trait_loc, member)| {
-                let found = member.found();
-                let broken = found
-                    .is_some_and(|loc| signature(self.db, loc.to_id(self.db)).contains_error());
-                let dot_callable =
-                    !broken && found.is_some_and(|loc| self.member_takes_receiver(loc, receiver));
-                TraitCallCandidate {
-                    trait_: trait_loc,
-                    member,
-                    dot_callable,
-                    broken,
-                }
-            })
-            .collect()
     }
 
     /// Call a TRAIT-IMPL member on a concrete receiver: like

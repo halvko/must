@@ -1707,6 +1707,12 @@ pub fn member_self_position(db: &dyn Db, item: ItemId<'_>) -> Option<SelfPositio
     self_position_of(&signature(db, item), &self_ty)
 }
 
+/// Whether a dot-call from a receiver of this shape can take `member`: the
+/// carrier test resolution counts candidates by.
+pub(crate) fn member_takes(db: &dyn Db, member: ItemId<'_>, receiver: ReceiverShape) -> bool {
+    member_self_position(db, member).is_some_and(|position| receiver_takes(receiver, position))
+}
+
 /// Whether a receiver of this shape can take a dot-call of a member with
 /// this `Self` position. The table is deliberately ASYMMETRIC, and the
 /// asymmetry is G14's bounded exception, both clauses:
