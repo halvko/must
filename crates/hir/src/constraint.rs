@@ -383,6 +383,12 @@ impl Constraints {
         std::mem::take(&mut self.reborrow_targets)
     }
 
+    /// The safety edges still waiting for a side to be decided, by
+    /// `(sub, sup)`.
+    pub(crate) fn safety_edges(&self) -> &[(TyVar, TyVar)] {
+        &self.safety_edges
+    }
+
     /// Open a speculative unification. Every snapshot goes through here so
     /// the region-obligation contract above has somewhere to live; taking
     /// `table.snapshot()` directly would bypass it.
@@ -977,20 +983,50 @@ impl Constraints {
         origin: ExprId,
         cause: Option<Cause>,
     ) -> Relation {
+        self.relate_value_by(
+            table,
+            actual,
+            expected,
+            cause,
+            |this, table, actual, expected| this.relate(table, actual, expected, origin, cause),
+        )
+    }
+
+    /// [`Self::relate_value`] for exported types, which have no regions: the
+    /// group solver's join of what bodies give a place.
+    pub(crate) fn relate_exported(
+        &mut self,
+        table: &mut InPlaceUnificationTable<TyVar>,
+        actual: &Ty,
+        expected: &Ty,
+    ) -> bool {
+        let relation = self.relate_value_by(table, actual, expected, None, |this, table, a, b| {
+            this.unify(table, a, b, None)
+        });
+        relation != Relation::Mismatch
+    }
+
+    /// [`Self::relate_value`], relating the types themselves by `relate`.
+    fn relate_value_by(
+        &mut self,
+        table: &mut InPlaceUnificationTable<TyVar>,
+        actual: &Ty,
+        expected: &Ty,
+        cause: Option<Cause>,
+        mut relate: impl FnMut(&mut Self, &mut InPlaceUnificationTable<TyVar>, &Ty, &Ty) -> bool,
+    ) -> Relation {
         let related = match (
             resolve_shallow(table, actual),
             resolve_shallow(table, expected),
         ) {
             (Ty::Fn(a), Ty::Fn(b)) => {
                 let target = b.with_safety(a.safety);
-                self.relate(table, actual, &target, origin, cause)
-                    .then_some((a.safety, b.safety))
+                relate(self, table, actual, &target).then_some((a.safety, b.safety))
             }
             (free, Ty::Fn(b)) if is_free(table, &free) => {
                 let own = Safety::Infer(table.new_key(TyVarValue::Unknown));
                 let target = b.with_safety(own);
-                self.relate(table, actual, &target, origin, cause)
-                    .then_some((own, b.safety))
+                relate(self, table, actual, &target).then_some((own, b.safety))
             }
             // In a group an erroneous value leaves the position unbound
             // ([`Self::unify`]), which a fresh safety would hide.
@@ -1004,7 +1040,7 @@ impl Constraints {
                     .then_some((a.safety, own))
             }
             _ => {
-                return if self.relate(table, actual, expected, origin, cause) {
+                return if relate(self, table, actual, expected) {
                     Relation::Equal
                 } else {
                     Relation::Mismatch

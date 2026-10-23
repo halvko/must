@@ -766,27 +766,46 @@ impl Ty {
     /// Applied to every type on its way out of hir into `mir`, so nothing
     /// below can accidentally observe a region.
     pub fn erase_regions(&self) -> Ty {
+        self.erased(false)
+    }
+
+    /// [`Self::erase_regions`], and every function's safety `Safe` too, at
+    /// any depth: the type's shape alone.
+    pub fn erase_regions_and_safety(&self) -> Ty {
+        self.erased(true)
+    }
+
+    fn erased(&self, safety: bool) -> Ty {
         match self {
             Ty::Borrow {
                 mutable,
                 referent,
                 region: _,
-            } => Ty::borrow(*mutable, Region::Erased, referent.erase_regions()),
-            Ty::RawPtr { pointee } => Ty::raw_ptr(pointee.erase_regions()),
-            Ty::Array { elem, len } => Ty::array(elem.erase_regions(), len.clone()),
-            Ty::Fn(f) => f.rebuilt(
-                f.params.iter().map(Ty::erase_regions).collect(),
-                f.ret.erase_regions(),
+            } => Ty::borrow(*mutable, Region::Erased, referent.erased(safety)),
+            Ty::RawPtr { pointee } => Ty::raw_ptr(pointee.erased(safety)),
+            Ty::Array { elem, len } => Ty::array(elem.erased(safety), len.clone()),
+            Ty::Fn(f) => Ty::fn_type_safety(
+                if safety { Safety::Safe } else { f.safety },
+                f.params.iter().map(|p| p.erased(safety)).collect(),
+                f.ret.erased(safety),
             ),
             Ty::Record(rec) => Ty::record(
                 rec.fields
                     .iter()
-                    .map(|(name, ty)| (name.clone(), ty.erase_regions()))
+                    .map(|(name, ty)| (name.clone(), ty.erased(safety)))
                     .collect(),
             ),
             Ty::Named(named) => Ty::Named(NamedTy {
                 decl: named.decl.clone(),
-                args: named.args.iter().map(erase_regions_arg).collect(),
+                args: named
+                    .args
+                    .iter()
+                    .map(|arg| match arg {
+                        GenericArg::Ty(ty) => GenericArg::Ty(ty.erased(safety)),
+                        GenericArg::Region(_) => GenericArg::Region(Region::Erased),
+                        GenericArg::Const(value) => GenericArg::Const(value.clone()),
+                    })
+                    .collect(),
             }),
             other => other.clone(),
         }
@@ -856,41 +875,52 @@ impl Ty {
     /// Collect the inference variables [`Self::contains_infer`] finds; after
     /// `resolve_fully` each is an unbound root.
     pub(crate) fn open_vars(&self, out: &mut rustc_hash::FxHashSet<TyVar>) {
-        self.collect_vars(true, out);
+        self.collect_vars(true, false, out);
+    }
+
+    /// The [`Self::open_vars`] and every function's open safety.
+    pub(crate) fn table_vars(&self, out: &mut rustc_hash::FxHashSet<TyVar>) {
+        self.collect_vars(true, true, out);
     }
 
     /// The [`Self::open_vars`] in what a value of this type produces: every
     /// one except those in a function's parameters, at any depth.
     pub(crate) fn produced_vars(&self, out: &mut rustc_hash::FxHashSet<TyVar>) {
-        self.collect_vars(false, out);
+        self.collect_vars(false, false, out);
     }
 
-    /// The one walk behind [`Self::open_vars`] and [`Self::produced_vars`];
-    /// `params` says whether a function's parameters are visited.
-    fn collect_vars(&self, params: bool, out: &mut rustc_hash::FxHashSet<TyVar>) {
+    /// The one walk behind [`Self::open_vars`], [`Self::table_vars`] and
+    /// [`Self::produced_vars`]; `params` says whether a function's
+    /// parameters are visited, `safety` whether its open safety is.
+    fn collect_vars(&self, params: bool, safety: bool, out: &mut rustc_hash::FxHashSet<TyVar>) {
         match self {
             Ty::Infer(var) => {
                 out.insert(*var);
             }
             Ty::Fn(f) => {
-                if params {
-                    f.params.iter().for_each(|p| p.collect_vars(params, out));
+                if let (true, Safety::Infer(var)) = (safety, f.safety) {
+                    out.insert(var);
                 }
-                f.ret.collect_vars(params, out);
+                if params {
+                    f.params
+                        .iter()
+                        .for_each(|p| p.collect_vars(params, safety, out));
+                }
+                f.ret.collect_vars(params, safety, out);
             }
             Ty::RawPtr { pointee: inner, .. }
             | Ty::Borrow {
                 referent: inner, ..
             }
-            | Ty::Array { elem: inner, .. } => inner.collect_vars(params, out),
+            | Ty::Array { elem: inner, .. } => inner.collect_vars(params, safety, out),
             Ty::Record(rec) => rec
                 .fields
                 .iter()
-                .for_each(|(_, ty)| ty.collect_vars(params, out)),
+                .for_each(|(_, ty)| ty.collect_vars(params, safety, out)),
             Ty::Named(NamedTy { args, .. }) => {
                 for arg in args {
                     if let GenericArg::Ty(ty) = arg {
-                        ty.collect_vars(params, out);
+                        ty.collect_vars(params, safety, out);
                     }
                 }
             }
@@ -2265,18 +2295,27 @@ pub fn signature<'db>(db: &'db dyn Db, item: ItemId<'db>) -> Ty {
 /// exists, exported items go back to requiring annotations; today every
 /// item counts as private.
 pub fn signature_needs_annotation<'db>(db: &'db dyn Db, item: ItemId<'db>) -> bool {
+    needs_annotation(db, item).is_some()
+}
+
+/// [`signature_needs_annotation`], with what the uses that left `item`'s
+/// type `{error}` disagree on, when they do: `Some` when it needs one.
+pub fn needs_annotation<'db>(
+    db: &'db dyn Db,
+    item: ItemId<'db>,
+) -> Option<Option<crate::groups::Disagreement>> {
     // Members follow the generic-item rule: the definition site carries
     // the unconditional fully-annotated diagnostic; repeating it at uses
     // would be noise.
     if item.member(db).is_some() {
-        return false;
+        return None;
     }
     // An `extern` ITEM is nothing BUT its annotation, so "add a type
     // annotation to its definition" is advice that cannot be taken. What is
     // wrong with the contract — a `_` left in it, a type that is not a
     // function — is refused where it is written.
     if crate::is_extern(db, item) {
-        return false;
+        return None;
     }
     if let Some(data) = crate::item_data(db, item).as_ref() {
         // A generic item is never "needs annotation": its scheme either is
@@ -2284,37 +2323,27 @@ pub fn signature_needs_annotation<'db>(db: &'db dyn Db, item: ItemId<'db>) -> bo
         // rule's unconditional diagnostic — repeating it at every mention
         // would be noise.
         if !data.generics.is_empty() {
-            return false;
+            return None;
         }
         if let Some(type_ref) = data.type_ref.as_ref()
             && type_ref.is_fully_typed()
         {
-            return false;
+            return None;
         }
     }
-    if crate::body::body(db, item).root.is_none() {
-        // No value at all: the parse errors cover it.
-        return false;
-    }
-    let Some((group, position)) = crate::groups::body_group(db, item) else {
-        return false;
-    };
-    crate::groups::infer_group(
+    // No value at all: the parse errors cover it.
+    crate::body::body(db, item).root?;
+    let (group, position) = crate::groups::body_group(db, item)?;
+    let group = crate::groups::infer_group(
         db,
         crate::groups::GroupId::new(db, crate::library::library_of(db, item.file(db)), group),
-    )
-    .needs_annotation
-    .get(position as usize)
-    .copied()
-    .unwrap_or(false)
-}
-
-fn erase_regions_arg(arg: &GenericArg) -> GenericArg {
-    match arg {
-        GenericArg::Ty(ty) => GenericArg::Ty(ty.erase_regions()),
-        GenericArg::Region(_) => GenericArg::Region(Region::Erased),
-        GenericArg::Const(value) => GenericArg::Const(value.clone()),
-    }
+    );
+    let position = position as usize;
+    group
+        .needs_annotation
+        .get(position)
+        .copied()?
+        .then(|| group.disagreements.get(&position).cloned())
 }
 
 /// Substitute a declaration's rigid region params by a mention's args — the
