@@ -792,9 +792,7 @@ impl<'a, 'db> Emitter<'a, 'db> {
             // A callee is a compile-time identity, not data: zero slots.
             // An `extern` item is one too — its name is resolved at link time, so
             // there is nothing to lay out here either.
-            Const::Unit | Const::Fn(_) | Const::ExternFn { .. } | Const::Builtin(_) => {
-                Ok(Vec::new())
-            }
+            Const::Unit | Const::Fn(_) | Const::ExternFn(_) | Const::Builtin(_) => Ok(Vec::new()),
             Const::Int(value) => Ok(vec![value.to_i128() as i64]),
             Const::Bool(value) => Ok(vec![i64::from(*value)]),
             // One slot holding the scalar value, exactly as an integer
@@ -853,9 +851,7 @@ impl<'a, 'db> Emitter<'a, 'db> {
             )
         };
         match value {
-            Value::Unit | Value::Fn(_) | Value::ExternFn { .. } | Value::Builtin(_) => {
-                Ok(Vec::new())
-            }
+            Value::Unit | Value::Fn(_) | Value::ExternFn(_) | Value::Builtin(_) => Ok(Vec::new()),
             Value::Int(int) => Ok(vec![int.to_i128() as i64]),
             Value::Bool(b) => Ok(vec![i64::from(*b)]),
             Value::Char(c) => Ok(vec![i64::from(u32::from(*c))]),

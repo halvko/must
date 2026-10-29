@@ -41,12 +41,7 @@ pub enum Value {
     /// like every other scalar's.
     Char(char),
     Fn(FnValue),
-    /// The value of an `extern` item: the declaring item, whose name is what the
-    /// host is asked for, and the declared signature, which the host checks.
-    ExternFn {
-        decl: ItemLoc,
-        sig: std::sync::Arc<hir::FnTy>,
-    },
+    ExternFn(mir::ExternFn),
     Builtin(Builtin),
     /// A record value: fields sorted by name, matching `Ty::Record` and
     /// `mir::AggregateKind::Record`'s canonical order. The derived
@@ -246,10 +241,7 @@ impl std::hash::Hash for Value {
             Value::Char(c) => c.hash(state),
             // Discriminant only — see the impl comment.
             Value::Fn(_) => {}
-            // The DECLARATION is the identity; a signature is a fact about
-            // the declaration it already picks out. Hashing it too would be
-            // lawful and pointless.
-            Value::ExternFn { decl, .. } => decl.hash(state),
+            Value::ExternFn(f) => f.hash(state),
             Value::Builtin(b) => b.hash(state),
             Value::Record { fields } => fields.hash(state),
             // Lawful but never an identity: array values are excluded from
@@ -295,7 +287,7 @@ impl Value {
             // everywhere a bare `a` would read as a name.
             Value::Char(c) => format!("{c:?}"),
             Value::Fn(_) => "fn".to_owned(),
-            Value::ExternFn { decl, .. } => format!("extern {}", decl.display_name()),
+            Value::ExternFn(f) => format!("extern {}", f.decl.display_name()),
             Value::Builtin(b) => format!("builtin {}", b.name()),
             Value::Record { fields } => {
                 if fields.is_empty() {
@@ -363,7 +355,7 @@ impl Value {
             | Value::Bool(_)
             | Value::Char(_)
             | Value::Fn(_)
-            | Value::ExternFn { .. }
+            | Value::ExternFn(_)
             | Value::Builtin(_)
             | Value::Uninit => false,
         }
@@ -386,7 +378,7 @@ impl Value {
             | Value::Bool(_)
             | Value::Char(_)
             | Value::Fn(_)
-            | Value::ExternFn { .. }
+            | Value::ExternFn(_)
             | Value::Builtin(_)
             | Value::Ptr { .. } => false,
         }

@@ -937,13 +937,13 @@ impl<'db, M: Mode> Machine<'db, M> {
                             Some((*dest, *target)),
                         )?;
                     }
-                    Value::Builtin(_) | Value::ExternFn { .. } => {
+                    Value::Builtin(_) | Value::ExternFn(_) => {
                         let result = match callee {
                             Value::Builtin(builtin) => {
                                 self.builtin_call(builtin, args, &loc, origin)?
                             }
-                            Value::ExternFn { decl, sig } => {
-                                self.extern_call(decl.display_name(), &sig, args, &loc, origin)?
+                            Value::ExternFn(f) => {
+                                self.extern_call(f.decl.display_name(), &f.sig, args, &loc, origin)?
                             }
                             _ => unreachable!("matched just above"),
                         };
@@ -2296,10 +2296,7 @@ impl<'db, M: Mode> Machine<'db, M> {
                 }),
                 // An `extern` item carries only its declaration — there is no
                 // body, and nothing to capture.
-                Const::ExternFn { decl, sig } => Value::ExternFn {
-                    decl: decl.clone(),
-                    sig: sig.clone(),
-                },
+                Const::ExternFn(f) => Value::ExternFn(f.clone()),
                 Const::ConstBlock(body) => {
                     let env = self.current_const_args();
                     self.force_const_block(loc, *body, env)?
@@ -3719,9 +3716,7 @@ fn value_ty(value: &Value) -> hir::Ty {
         // (and a pointer must not cross into a fresh console-eval machine
         // anyway — its allocation lives here): `{error}` demotes it from
         // console-eval parameters, the variables panel still shows it.
-        Value::Fn(_) | Value::ExternFn { .. } | Value::Builtin(_) | Value::Ptr { .. } => {
-            hir::Ty::Error
-        }
+        Value::Fn(_) | Value::ExternFn(_) | Value::Builtin(_) | Value::Ptr { .. } => hir::Ty::Error,
         // Machine-internal poison: no surface type exists for it.
         Value::Uninit => hir::Ty::Error,
     }
