@@ -55,6 +55,9 @@ here; they live in `docs/design/`.
   message: a program that reports an error runs until it reaches the
   broken code. A new check is not done until `mir`'s `every_error_traps`
   test passes with its program in the corpus.
+- A diagnostic whose message names the edit that fixes it ("write
+  `.*`", "add `..`") carries that edit as its quick fix, except where applying it
+  would only lead to the next error.
 
 ## Fast path
 
