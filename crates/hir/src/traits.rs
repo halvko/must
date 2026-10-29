@@ -330,15 +330,11 @@ fn site_member(db: &dyn Db, site: &ImplSite, name: &str) -> ImplMember {
             owner: site.owner.clone(),
         };
     };
-    ImplMember::Found(ItemLoc {
-        file: site.owner.file,
-        name: site.owner.name.clone(),
-        disambiguator: site.owner.disambiguator,
-        member: Some((
-            std::sync::Arc::from(member.name.as_str()),
-            member.disambiguator,
-        )),
-    })
+    ImplMember::Found(ItemLoc::member(
+        &site.owner,
+        &member.name,
+        member.disambiguator,
+    ))
 }
 
 /// What an impl holds for one requirement.
