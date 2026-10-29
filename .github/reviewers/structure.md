@@ -17,6 +17,12 @@ about, slower, or harder to abstract than it needs to be.
 - Logic in the wrong home: a pass or module doing work that belongs to
   another (and is likely done there too), or a value threaded through
   several layers only to be recomputed at the end.
+- A decision made without the information it needs: code that guesses,
+  by heuristics or by trying several readings, what a later step knows
+  for certain (e.g. a parser settling what only name resolution or type
+  checking can know). Name that step, and ask whether the code could keep
+  one form that covers every reading and let that step decide. A rule
+  that gains a special case each round is the sign.
 - Work the caller does not need: a callee that builds, collects or
   computes more than its callers use (a full structure when one field is
   read, a `Vec` collected for its length), or a loop that calls into
