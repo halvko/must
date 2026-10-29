@@ -12,9 +12,9 @@ use la_arena::{Arena, ArenaMap};
 use rustc_hash::{FxHashMap, FxHashSet};
 
 use crate::{
-    AggregateKind, BlockData, BlockId, BodyId, Const, LocalData, LocalId, MirBody, MirDiagnostic,
-    MirLowered, Operand, Place, Scope, Statement, StatementKind, Terminator, TerminatorKind,
-    ValueExpr,
+    AggregateKind, BlockData, BlockId, BodyId, Const, ExternFn, LocalData, LocalId, MirBody,
+    MirDiagnostic, MirLowered, Operand, Place, Scope, Statement, StatementKind, Terminator,
+    TerminatorKind, ValueExpr,
 };
 
 pub(crate) fn lower_item(db: &dyn Db, item: ItemId<'_>) -> MirLowered {
@@ -1556,10 +1556,10 @@ impl LowerCtx<'_> {
                         safety: hir::Safety::Unsafe,
                     }),
                 };
-                Operand::Const(Const::ExternFn {
+                Operand::Const(Const::ExternFn(ExternFn {
                     decl: self.loc.clone(),
                     sig,
-                })
+                }))
             }
             ExprData::FnLiteral {
                 params,

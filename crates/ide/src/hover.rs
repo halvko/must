@@ -378,8 +378,9 @@ fn loop_hover(
 /// does not have. Its signature is the whole of what is known about it.
 fn const_display(db: &RootDatabase, item: hir::ItemId<'_>) -> Option<String> {
     match eval::const_value(db, item) {
-        Ok(eval::Value::Fn(_) | eval::Value::Builtin(_) | eval::Value::ExternFn { .. })
-        | Err(_) => None,
+        Ok(eval::Value::Fn(_) | eval::Value::Builtin(_) | eval::Value::ExternFn(_)) | Err(_) => {
+            None
+        }
         Ok(value) => Some(value.display()),
     }
 }

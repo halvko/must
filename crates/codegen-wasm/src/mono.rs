@@ -124,10 +124,7 @@ pub enum StaticVal {
     Builtin(Builtin),
     /// The value of an `extern` item, with its declared signature; the wasm
     /// import is built from that, not from a call site.
-    ExternFn {
-        decl: ItemLoc,
-        sig: std::sync::Arc<hir::FnTy>,
-    },
+    ExternFn(mir::ExternFn),
 }
 
 impl StaticVal {
@@ -525,10 +522,7 @@ impl<'db> Mono<'db> {
             // it, so any call through it is refused (never miscompiled).
             Operand::Copy(_) | Operand::Move(_) => StaticVal::Unknown,
             Operand::Const(Const::Builtin(builtin)) => StaticVal::Builtin(*builtin),
-            Operand::Const(Const::ExternFn { decl, sig }) => StaticVal::ExternFn {
-                decl: decl.clone(),
-                sig: sig.clone(),
-            },
+            Operand::Const(Const::ExternFn(f)) => StaticVal::ExternFn(f.clone()),
             // A `fn` literal in THIS body: it inherits the enclosing
             // instance's arguments — the binder scopes the whole item, so
             // const params behave like auto-captured constants (the
@@ -547,7 +541,7 @@ impl<'db> Mono<'db> {
                     type_args: Vec::new(),
                 }),
                 Ok(Value::Builtin(builtin)) => StaticVal::Builtin(builtin),
-                Ok(Value::ExternFn { decl, sig }) => StaticVal::ExternFn { decl, sig },
+                Ok(Value::ExternFn(f)) => StaticVal::ExternFn(f),
                 _ => StaticVal::Unknown,
             },
             Operand::Const(Const::ConstBlock(body)) => match self.const_block(key, *body) {
@@ -641,7 +635,7 @@ impl<'db> Mono<'db> {
             // the refusal names the ITEM rather than the type: a reader
             // needs to know which boundary is unavailable, not which layout
             // rule said so.
-            StaticVal::ExternFn { decl, sig } => {
+            StaticVal::ExternFn(mir::ExternFn { decl, sig }) => {
                 let name = decl.display_name().to_owned();
                 let site = ExternSite {
                     decl,
@@ -755,7 +749,7 @@ impl<'db> Mono<'db> {
         op: &Operand,
     ) -> Result<Ty, Unsupported> {
         match op {
-            Operand::Const(Const::ExternFn { .. }) => Err(Unsupported::new(
+            Operand::Const(Const::ExternFn(_)) => Err(Unsupported::new(
                 "an `extern` item used as a value (they are callable, not data)",
             )),
             // A MOVE is a copy plus an ALIASING fact, and this backend has

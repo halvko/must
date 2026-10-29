@@ -404,6 +404,26 @@ pub enum Operand {
     Const(Const),
 }
 
+/// The value of an `extern` item: the declaring item, whose name is what the
+/// host is asked for, and the declared signature, which the host checks.
+///
+/// The declaration is the identity, so `Hash` covers `decl` alone: the
+/// signature is a fact about the declaration it already picks out. Equality
+/// stays structural, because salsa compares query results with it: an edit to
+/// the declared signature keeps `decl` and must still invalidate what was
+/// built from the old `sig`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExternFn {
+    pub decl: ItemLoc,
+    pub sig: std::sync::Arc<hir::FnTy>,
+}
+
+impl std::hash::Hash for ExternFn {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        self.decl.hash(state);
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Const {
     Unit,
@@ -423,12 +443,7 @@ pub enum Const {
     Builtin(Builtin),
     /// A `fn` literal; its code is in [`MirLowered::bodies`] of the same item.
     Fn(BodyId),
-    /// The value of an `extern` item: the declaring item, whose name is what the
-    /// host is asked for, and the declared signature, which the host checks.
-    ExternFn {
-        decl: ItemLoc,
-        sig: std::sync::Arc<hir::FnTy>,
-    },
+    ExternFn(ExternFn),
     /// A `const { … }` block — or a turbofish const argument, which is the
     /// same thing (a compile-time expression body; see
     /// [`MirLowered::const_args`]): the referenced body (in the same
