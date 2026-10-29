@@ -92,8 +92,16 @@ pub struct ItemId<'db> {
 /// unrelated item above doesn't change any `ItemLoc`, so query values that
 /// embed one — resolutions, MIR constants, eval origins — backdate across
 /// item reordering.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub struct ItemLoc {
+///
+/// One pointer wide: it is embedded in nearly every type (`Ty::Named`,
+/// `Ty::Param`, `Region::Param`), MIR constant and runtime value, so its
+/// fields live behind a shared [`ItemLocData`] and a clone is a count bump.
+#[derive(Clone, PartialEq, Eq, Hash)]
+pub struct ItemLoc(std::sync::Arc<ItemLocData>);
+
+/// The fields of an [`ItemLoc`], read through its `Deref`.
+#[derive(PartialEq, Eq, Hash)]
+pub struct ItemLocData {
     pub file: SourceFile,
     pub name: std::sync::Arc<str>,
     pub disambiguator: u32,
@@ -102,7 +110,47 @@ pub struct ItemLoc {
     pub member: Option<(std::sync::Arc<str>, u32)>,
 }
 
+impl std::ops::Deref for ItemLoc {
+    type Target = ItemLocData;
+
+    fn deref(&self) -> &ItemLocData {
+        &self.0
+    }
+}
+
+/// Prints the fields as the location's own, under the name `ItemLoc`.
+impl std::fmt::Debug for ItemLoc {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let ItemLocData {
+            file,
+            name,
+            disambiguator,
+            member,
+        } = &*self.0;
+        f.debug_struct("ItemLoc")
+            .field("file", file)
+            .field("name", name)
+            .field("disambiguator", disambiguator)
+            .field("member", member)
+            .finish()
+    }
+}
+
 impl ItemLoc {
+    fn new(
+        file: SourceFile,
+        name: std::sync::Arc<str>,
+        disambiguator: u32,
+        member: Option<(std::sync::Arc<str>, u32)>,
+    ) -> ItemLoc {
+        ItemLoc(std::sync::Arc::new(ItemLocData {
+            file,
+            name,
+            disambiguator,
+            member,
+        }))
+    }
+
     /// The item's name, or `this item` when it has none.
     pub fn name_or_this_item(&self) -> &str {
         if self.name.is_empty() {
@@ -114,24 +162,19 @@ impl ItemLoc {
 
     /// A top-level (non-member) location.
     pub fn top_level(file: SourceFile, name: std::sync::Arc<str>, disambiguator: u32) -> ItemLoc {
-        ItemLoc {
-            file,
-            name,
-            disambiguator,
-            member: None,
-        }
+        ItemLoc::new(file, name, disambiguator, None)
     }
 
     /// One inherent member of `owner`, name-keyed. The only way to build a
     /// member location: the owner half is copied wholesale, so a caller can
     /// never pair one owner's file with another's name.
     pub fn member(owner: &ItemLoc, name: &str, disambiguator: u32) -> ItemLoc {
-        ItemLoc {
-            file: owner.file,
-            name: owner.name.clone(),
-            disambiguator: owner.disambiguator,
-            member: Some((std::sync::Arc::from(name), disambiguator)),
-        }
+        ItemLoc::new(
+            owner.file,
+            owner.name.clone(),
+            owner.disambiguator,
+            Some((std::sync::Arc::from(name), disambiguator)),
+        )
     }
 
     /// Always succeeds (interning): an `ItemLoc` held across an edit that
@@ -164,14 +207,13 @@ impl ItemLoc {
 }
 
 pub fn item_loc(db: &dyn Db, item: ItemId<'_>) -> ItemLoc {
-    ItemLoc {
-        file: item.file(db),
-        name: std::sync::Arc::from(item.name(db).as_str()),
-        disambiguator: item.disambiguator(db),
-        member: item
-            .member(db)
+    ItemLoc::new(
+        item.file(db),
+        std::sync::Arc::from(item.name(db).as_str()),
+        item.disambiguator(db),
+        item.member(db)
             .map(|(name, dis)| (std::sync::Arc::from(name.as_str()), dis)),
-    }
+    )
 }
 
 /// Whether `item` has a generic binder (an inherent member counts its
@@ -2758,15 +2800,7 @@ fn trait_definition_diagnostics(db: &dyn Db, file: SourceFile, diagnostics: &mut
             // The signature must equal the requirement with `Self` (and
             // the binder params, index-matched) substituted. A requirement
             // that isn't fully written carries its own diagnostic.
-            let member_loc = ItemLoc {
-                file: site.owner.file,
-                name: site.owner.name.clone(),
-                disambiguator: site.owner.disambiguator,
-                member: Some((
-                    std::sync::Arc::from(member.name.as_str()),
-                    member.disambiguator,
-                )),
-            };
+            let member_loc = ItemLoc::member(&site.owner, &member.name, member.disambiguator);
             let Some(expected) =
                 traits::lower_requirement_sig(db, trait_loc, req, &member_loc, self_key.to_ty())
             else {

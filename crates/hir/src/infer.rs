@@ -5610,12 +5610,7 @@ impl<'db> InferCtx<'db> {
         crate::item_tree::type_members(self.db, decl.to_id(self.db))
             .iter()
             .find(|m| m.name == name)
-            .map(|m| ItemLoc {
-                file: decl.file,
-                name: decl.name.clone(),
-                disambiguator: decl.disambiguator,
-                member: Some((std::sync::Arc::from(m.name.as_str()), m.disambiguator)),
-            })
+            .map(|m| ItemLoc::member(decl, &m.name, m.disambiguator))
     }
 
     /// Complete a call whose callee is an ordinary VALUE of type
