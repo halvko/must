@@ -2687,6 +2687,29 @@ pub(crate) struct InferCtx<'db> {
     borrow_projections: rustc_hash::FxHashSet<ExprId>,
 }
 
+/// A dot-call `recv.name(args...)` after its receiver is inferred: the
+/// call's syntax and the receiver's type, shared by every resolution
+/// outcome.
+struct DotCall<'a> {
+    /// The call expression.
+    expr: ExprId,
+    /// The callee, the field-access expression `recv.name`.
+    callee: ExprId,
+    receiver: ExprId,
+    /// The written member name.
+    name: &'a str,
+    /// The written arguments; the receiver is appended as the LAST one.
+    args: &'a [ExprId],
+    /// The receiver's inferred type.
+    receiver_ty: Ty,
+    /// [`Self::receiver_ty`] shallow-resolved.
+    resolved: Ty,
+    /// [`Self::resolved`]'s shape.
+    receiver_shape: ReceiverShape,
+    /// The expectation recorded for the callee.
+    callee_expectation: Ty,
+}
+
 /// One trait that could carry a concrete-receiver dot-call — see
 /// [`InferCtx::trait_call_candidates`].
 struct TraitCallCandidate {
@@ -4321,24 +4344,9 @@ impl<'db> InferCtx<'db> {
                 // recv as the LAST argument (arguments evaluate BEFORE the
                 // receiver binds).
                 if *dot_call
-                    && let ExprData::Field {
-                        receiver,
-                        name,
-                        member_args,
-                    } = &self.body.exprs[*callee]
+                    && let Some(ty) = self.infer_dot_call(expr, *callee, args, expected, cause)
                 {
-                    let (callee, receiver, name) = (*callee, *receiver, name.clone());
-                    let member_args = member_args.clone();
-                    return self.infer_dot_call(
-                        expr,
-                        callee,
-                        receiver,
-                        &name,
-                        member_args.as_deref(),
-                        args,
-                        expected,
-                        cause,
-                    );
+                    return ty;
                 }
                 // `::Some(v)` — the elided sigil with payloads. The
                 // CALLEE is what carries the sigil, but the enum is in the
@@ -5745,19 +5753,46 @@ impl<'db> InferCtx<'db> {
     /// call of the field — neither reaches this function.) The member
     /// call desugars to the member with recv as the LAST argument.
     /// Module-level statics never resolve here (G13's deliberate opt-out);
-    /// NO auto-deref, NO auto-ref.
-    #[allow(clippy::too_many_arguments)]
+    /// NO auto-deref, NO auto-ref. `None` when `callee` is no field
+    /// access, so the call is not a dot-call after all.
     fn infer_dot_call(
         &mut self,
         expr: ExprId,
         callee: ExprId,
-        receiver: ExprId,
-        name: &str,
-        member_args: Option<&[GenericArgData]>,
         args: &[ExprId],
         expected: &Ty,
         cause: Option<Cause>,
-    ) -> Ty {
+    ) -> Option<Ty> {
+        let ExprData::Field {
+            receiver,
+            name,
+            member_args,
+        } = &self.body.exprs[callee]
+        else {
+            return None;
+        };
+        let (receiver, name) = (*receiver, name.clone());
+        let member_args = member_args.clone();
+        // The callee (the field-access expression) is visited by hand, so
+        // record its expectation and (in each outcome) its type like any
+        // visited expression.
+        let callee_expectation = self.fresh_var();
+        self.result
+            .expectation_of_expr
+            .insert(callee, callee_expectation.clone());
+        let receiver_ty = self.infer_expr_unconstrained(receiver);
+        let resolved = self.resolve_shallow(&receiver_ty);
+        let call = DotCall {
+            expr,
+            callee,
+            receiver,
+            name: &name,
+            args,
+            receiver_ty,
+            receiver_shape: ReceiverShape::of(&resolved),
+            resolved,
+            callee_expectation,
+        };
         // A written member turbofish (`s.flat_map::<usize>(f)`) is
         // spendable on THREE outcomes below — an inherent member, a
         // trait-impl member, and a bound-directed requirement — and each
@@ -5781,44 +5816,32 @@ impl<'db> InferCtx<'db> {
         // could spend stays silent. Typing the whole list up front instead
         // would let the value be passed by value, at the price of that
         // parity.
-        let mut unspent = member_args;
-        let ty = self.infer_dot_call_resolved(
-            expr,
-            callee,
-            receiver,
-            name,
-            &mut unspent,
-            args,
-            expected,
-            cause,
-        );
+        let mut unspent = member_args.as_deref();
+        let ty = self.infer_dot_call_resolved(&call, &mut unspent, expected, cause);
         self.drop_member_args(&mut unspent);
-        ty
+        Some(ty)
     }
 
     /// [`Self::infer_dot_call`]'s resolution proper — see there for what
     /// `member_args` being a `&mut Option` buys.
-    #[allow(clippy::too_many_arguments)]
     fn infer_dot_call_resolved(
         &mut self,
-        expr: ExprId,
-        callee: ExprId,
-        receiver: ExprId,
-        name: &str,
+        call: &DotCall<'_>,
         member_args: &mut Option<&[GenericArgData]>,
-        args: &[ExprId],
         expected: &Ty,
         cause: Option<Cause>,
     ) -> Ty {
-        // The callee (the field-access expression) is visited by hand, so
-        // record its expectation and (below) its type like any visited
-        // expression.
-        let callee_expectation = self.fresh_var();
-        self.result
-            .expectation_of_expr
-            .insert(callee, callee_expectation.clone());
-        let receiver_ty = self.infer_expr_unconstrained(receiver);
-        let resolved = self.resolve_shallow(&receiver_ty);
+        let DotCall {
+            expr,
+            callee,
+            receiver,
+            name,
+            args,
+            ref resolved,
+            receiver_shape,
+            ref callee_expectation,
+            ..
+        } = *call;
 
         // A BORROW receiver reaches the referent's MEMBERS — and only its
         // members. Which members is the whole question, and the answer is
@@ -5832,8 +5855,7 @@ impl<'db> InferCtx<'db> {
         // Note this is a *lookup* through the borrow, not a coercion: the
         // receiver's type is unchanged, and the only thing that ever meets
         // the member's `Self` parameter is the borrow the user wrote.
-        let receiver_shape = ReceiverShape::of(&resolved);
-        let member_recv = match &resolved {
+        let member_recv = match resolved {
             Ty::Borrow { referent, .. } => self.resolve_shallow(referent),
             _ => resolved.clone(),
         };
@@ -5853,19 +5875,7 @@ impl<'db> InferCtx<'db> {
             // mention is a value position however it is written — the
             // answer `place_positions` could not have.
             self.value_receivers.insert(receiver);
-            let ty = self.infer_bound_member_dot_call(
-                expr,
-                callee,
-                receiver,
-                &receiver_ty,
-                &param,
-                name,
-                member_args,
-                args,
-                &callee_expectation,
-                receiver_shape,
-                &resolved,
-            );
+            let ty = self.infer_bound_member_dot_call(call, &param, member_args);
             return self.finish_dot_call(expr, ty, expected, cause);
         }
 
@@ -5999,18 +6009,7 @@ impl<'db> InferCtx<'db> {
                         .expect("an inherent member needs a named receiver");
                     self.value_receivers.insert(receiver);
                     let sig = signature(self.db, member_loc.to_id(self.db));
-                    let ret = self.infer_member_call(
-                        expr,
-                        callee,
-                        receiver,
-                        &receiver_ty,
-                        &named,
-                        member_loc,
-                        sig,
-                        &callee_expectation,
-                        member_args,
-                        args,
-                    );
+                    let ret = self.infer_member_call(call, &named, member_loc, sig, member_args);
                     return self.finish_dot_call(expr, ret, expected, cause);
                 }
                 if let [candidate] = trait_carriers.as_slice() {
@@ -6020,18 +6019,7 @@ impl<'db> InferCtx<'db> {
                         .cloned()
                         .expect("a carrying candidate has its impl member");
                     self.value_receivers.insert(receiver);
-                    let ty = self.infer_impl_member_call(
-                        expr,
-                        callee,
-                        receiver,
-                        &receiver_ty,
-                        member_loc,
-                        name,
-                        member_args,
-                        args,
-                        &callee_expectation,
-                        receiver_shape,
-                    );
+                    let ty = self.infer_impl_member_call(call, member_loc, member_args);
                     return self.finish_dot_call(expr, ty, expected, cause);
                 }
                 // A BUILTIN member (`line.next_char(i)`). Consulted HERE,
@@ -6063,15 +6051,7 @@ impl<'db> InferCtx<'db> {
                     // Resolved, and a builtin member has no binder: one
                     // of the three places the refusal is TRUE.
                     self.refuse_member_args(callee, callee, |_| name.to_owned(), member_args);
-                    let ty = self.infer_builtin_member_call(
-                        expr,
-                        callee,
-                        receiver,
-                        &receiver_ty,
-                        builtin,
-                        args,
-                        &callee_expectation,
-                    );
+                    let ty = self.infer_builtin_member_call(call, builtin);
                     return self.finish_dot_call(expr, ty, expected, cause);
                 }
                 // Nothing carries the call: an impl missing the
@@ -6099,15 +6079,7 @@ impl<'db> InferCtx<'db> {
                         // `receiver_takes`'s table read backwards.
                         Some(member) => {
                             let position = self.self_position(&member);
-                            let diagnostic = self.receiver_shape_refusal(
-                                expr,
-                                callee,
-                                name,
-                                receiver_shape,
-                                position,
-                                &resolved,
-                                member,
-                            );
+                            let diagnostic = self.receiver_shape_refusal(call, position, member);
                             self.result.diagnostics.push(diagnostic);
                         }
                         None => {
@@ -6134,7 +6106,7 @@ impl<'db> InferCtx<'db> {
         } else {
             self.field_access_ty(callee, receiver, name, resolved.clone())
         };
-        let callee_ty = self.check(callee, callee_ty, &callee_expectation, None);
+        let callee_ty = self.check(callee, callee_ty, callee_expectation, None);
         self.result.type_of_expr.insert(callee, callee_ty.clone());
         // A named receiver's plain (non-fn) field under call syntax gets
         // the precise story — the field exists but is no fn, and there is
@@ -6208,20 +6180,17 @@ impl<'db> InferCtx<'db> {
     /// record the resolution for MIR/IDE, and check the written arguments
     /// plus the receiver-as-last-argument. Returns the call's (pre-`check`)
     /// type.
-    #[allow(clippy::too_many_arguments)]
     fn infer_member_call(
         &mut self,
-        expr: ExprId,
-        callee: ExprId,
-        receiver: ExprId,
-        receiver_ty: &Ty,
+        call: &DotCall<'_>,
         named: &NamedTy,
         member_loc: ItemLoc,
         sig: Ty,
-        callee_expectation: &Ty,
         member_args: &mut Option<&[GenericArgData]>,
-        args: &[ExprId],
     ) -> Ty {
+        let DotCall {
+            expr, callee, args, ..
+        } = *call;
         // A member's binder is the OWNER's followed by its own (TR10), so
         // the receiver type's arguments map onto the owner's PREFIX
         // position by position; everything past it is the member's own,
@@ -6261,15 +6230,7 @@ impl<'db> InferCtx<'db> {
         // last argument, checked against the instantiated Self param —
         // identical by construction (a plain unification that lets
         // leftover inference variables flow).
-        self.finish_receiver_call(
-            expr,
-            callee,
-            receiver,
-            receiver_ty,
-            inst,
-            callee_expectation,
-            args,
-        )
+        self.finish_receiver_call(call, inst)
     }
 
     /// The shared tail of every receiver-appending call resolution
@@ -6278,17 +6239,16 @@ impl<'db> InferCtx<'db> {
     /// callee against `inst`, check arity, infer each written argument
     /// against its param, then check the receiver against the LAST
     /// param.
-    #[allow(clippy::too_many_arguments)]
-    fn finish_receiver_call(
-        &mut self,
-        expr: ExprId,
-        callee: ExprId,
-        receiver: ExprId,
-        receiver_ty: &Ty,
-        inst: Ty,
-        callee_expectation: &Ty,
-        args: &[ExprId],
-    ) -> Ty {
+    fn finish_receiver_call(&mut self, call: &DotCall<'_>, inst: Ty) -> Ty {
+        let DotCall {
+            expr,
+            callee,
+            receiver,
+            args,
+            ref receiver_ty,
+            ref callee_expectation,
+            ..
+        } = *call;
         let inst_ty = self.check(callee, inst.clone(), callee_expectation, None);
         self.result.type_of_expr.insert(callee, inst_ty);
         let Ty::Fn(f) = inst else {
@@ -6335,27 +6295,11 @@ impl<'db> InferCtx<'db> {
     /// [`Self::infer_member_call`]'s shape with none of the instantiation
     /// (a builtin member has no binder, no owner and no regions), so it is
     /// just the signature and the shared receiver-appending tail.
-    #[allow(clippy::too_many_arguments)]
-    fn infer_builtin_member_call(
-        &mut self,
-        expr: ExprId,
-        callee: ExprId,
-        receiver: ExprId,
-        receiver_ty: &Ty,
-        builtin: Builtin,
-        args: &[ExprId],
-        callee_expectation: &Ty,
-    ) -> Ty {
-        self.result.builtin_member_of_expr.insert(expr, builtin);
-        self.finish_receiver_call(
-            expr,
-            callee,
-            receiver,
-            receiver_ty,
-            builtin_type(self.db, builtin),
-            callee_expectation,
-            args,
-        )
+    fn infer_builtin_member_call(&mut self, call: &DotCall<'_>, builtin: Builtin) -> Ty {
+        self.result
+            .builtin_member_of_expr
+            .insert(call.expr, builtin);
+        self.finish_receiver_call(call, builtin_type(self.db, builtin))
     }
 
     /// Consume a member turbofish that nothing could spend, SILENTLY —
@@ -6658,7 +6602,6 @@ impl<'db> InferCtx<'db> {
     /// rather than forcing a spelling for something that has none. CONST
     /// member parameters stay reserved, and a member whose own binder
     /// declares one refuses the WHOLE list rather than spending part of it.
-    #[allow(clippy::too_many_arguments)]
     fn member_own_type_subst(
         &mut self,
         key: ExprId,
@@ -6787,17 +6730,20 @@ impl<'db> InferCtx<'db> {
     /// the bound-directed one so a rigid receiver never gets different
     /// advice from a nominal one; `member` is what the diagnostic points at
     /// (the member itself concretely, the trait for a bound-directed call).
-    #[allow(clippy::too_many_arguments)]
     fn receiver_shape_refusal(
         &self,
-        expr: ExprId,
-        callee: ExprId,
-        name: &str,
-        receiver_shape: ReceiverShape,
+        call: &DotCall<'_>,
         position: Option<SelfPosition>,
-        resolved: &Ty,
         member: ItemLoc,
     ) -> InferenceDiagnostic {
+        let DotCall {
+            expr,
+            callee,
+            name,
+            ref resolved,
+            receiver_shape,
+            ..
+        } = *call;
         match (receiver_shape, position) {
             // An owned receiver, a borrow `Self`: NOT auto-ref (clause 2
             // forbids borrowing the local) — write the borrow.
@@ -6926,20 +6872,20 @@ impl<'db> InferCtx<'db> {
     /// [`Self::infer_member_call`], with the member's OWN binder
     /// instantiated at the written turbofish where there is one and fresh
     /// otherwise, and its bounds becoming obligations of this call.
-    #[allow(clippy::too_many_arguments)]
     fn infer_impl_member_call(
         &mut self,
-        expr: ExprId,
-        callee: ExprId,
-        receiver: ExprId,
-        receiver_ty: &Ty,
+        call: &DotCall<'_>,
         member_loc: ItemLoc,
-        name: &str,
         member_args: &mut Option<&[GenericArgData]>,
-        args: &[ExprId],
-        callee_expectation: &Ty,
-        receiver_shape: ReceiverShape,
     ) -> Ty {
+        let DotCall {
+            expr,
+            callee,
+            name,
+            args,
+            receiver_shape,
+            ..
+        } = *call;
         let member_id = member_loc.to_id(self.db);
         let sig = signature(self.db, member_id);
         if sig.contains_error() {
@@ -6979,15 +6925,7 @@ impl<'db> InferCtx<'db> {
             TurbofishSpelling::Dot,
         );
         self.result.member_of_expr.insert(expr, member_loc);
-        self.finish_receiver_call(
-            expr,
-            callee,
-            receiver,
-            receiver_ty,
-            inst,
-            callee_expectation,
-            args,
-        )
+        self.finish_receiver_call(call, inst)
     }
 
     /// Instantiate a member's OWN generic binder — at the written
@@ -7046,21 +6984,20 @@ impl<'db> InferCtx<'db> {
     /// A dot-call on a RIGID receiver: bound-directed resolution (TR07 —
     /// bounds are the only re-opener). The call lowers as an indirect
     /// call through the enclosing body's hidden dictionary parameter.
-    #[allow(clippy::too_many_arguments)]
     fn infer_bound_member_dot_call(
         &mut self,
-        expr: ExprId,
-        callee: ExprId,
-        receiver: ExprId,
-        receiver_ty: &Ty,
+        call: &DotCall<'_>,
         param: &crate::ty::ParamTy,
-        name: &str,
         member_args: &mut Option<&[GenericArgData]>,
-        args: &[ExprId],
-        callee_expectation: &Ty,
-        receiver_shape: ReceiverShape,
-        resolved: &Ty,
     ) -> Ty {
+        let DotCall {
+            expr,
+            callee,
+            name,
+            args,
+            receiver_shape,
+            ..
+        } = *call;
         // The shared enumeration, narrowed to the written name by the
         // shared rule — the same call completion makes for every name it
         // considers offering.
@@ -7159,15 +7096,8 @@ impl<'db> InferCtx<'db> {
         // is; admitting the call never does.
         let self_ty = Ty::Param(param.clone());
         if !dot_callable(&inst, &self_ty, receiver_shape) {
-            let diagnostic = self.receiver_shape_refusal(
-                expr,
-                callee,
-                name,
-                receiver_shape,
-                self_position_of(&inst, &self_ty),
-                resolved,
-                trait_loc,
-            );
+            let diagnostic =
+                self.receiver_shape_refusal(call, self_position_of(&inst, &self_ty), trait_loc);
             self.result.diagnostics.push(diagnostic);
             self.result.type_of_expr.insert(callee, Ty::Error);
             self.infer_args_broken(args);
@@ -7182,15 +7112,7 @@ impl<'db> InferCtx<'db> {
                 receiver_appended: true,
             },
         );
-        self.finish_receiver_call(
-            expr,
-            callee,
-            receiver,
-            receiver_ty,
-            inst,
-            callee_expectation,
-            args,
-        )
+        self.finish_receiver_call(call, inst)
     }
 
     /// Lower a requirement's signature with `Self` bound to `self_ty` and
