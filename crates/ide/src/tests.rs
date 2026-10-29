@@ -6849,3 +6849,59 @@ static main = fn { g(h, 1); };
         );
     }
 }
+
+/// `text` fixed by the quick fix labelled `label` on its only error.
+fn apply_error_fix(text: &str, label: &str) -> String {
+    let (analysis, file, _) = fixture(&format!("{text}$0"));
+    let errors: Vec<_> = (analysis.diagnostics(file).into_iter())
+        .filter(|d| d.severity == crate::Severity::Error)
+        .collect();
+    assert_eq!(errors.len(), 1, "{errors:#?}");
+    let fix = errors[0].fix.as_ref().expect("the error has a fix");
+    assert_eq!(fix.label, label);
+    apply_fix(text, fix)
+}
+
+#[test]
+fn a_leak_blamed_on_a_parameter_offers_the_forget_bound() {
+    // From the path-sensitive half (a binding not consumed on a path)...
+    let fixed = apply_error_fix(
+        "static f = fn::<T>(t: T) -> usize { 1 };",
+        "Require `T: forget`",
+    );
+    assert!(fixed.contains("fn::<T: forget>(t: T)"), "{fixed}");
+    assert_eq!(diagnostic_messages(&fixed), ["unused binding `t`"]);
+    // ...and from hir's (a `..` skipping a field of that type), after a
+    // bound the parameter already has.
+    let fixed = apply_error_fix(
+        "trait D = requires { d: fn(Self) -> usize; };\n\
+         type Box = struct::<T> { v: T, n: usize };\n\
+         static f = fn::<T: D>(b: Box::<T>) -> usize { let Box(struct { n, .. }) = b; n };",
+        "Require `T: forget`",
+    );
+    assert!(
+        fixed.contains("fn::<T: D + forget>(b: Box::<T>)"),
+        "{fixed}"
+    );
+    assert_eq!(diagnostic_messages(&fixed), Vec::<String>::new());
+}
+
+#[test]
+fn a_leak_blamed_on_the_owning_types_parameter_has_no_forget_fix() {
+    // A `type` declaration's parameters take no capability bounds, so
+    // there is no binder to write `T: forget` into.
+    let (analysis, file, _) = fixture(
+        "type Box = struct::<T> { v: T } with {\n\
+             impl Self { f = fn (b: Self) -> usize { 1 }; }\n\
+         };$0",
+    );
+    let errors: Vec<_> = (analysis.diagnostics(file).into_iter())
+        .filter(|d| d.severity == crate::Severity::Error)
+        .collect();
+    assert_eq!(errors.len(), 1, "{errors:#?}");
+    assert!(
+        errors[0].message.contains("write `T: forget`"),
+        "{errors:#?}"
+    );
+    assert_eq!(errors[0].fix, None);
+}
