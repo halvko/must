@@ -68,6 +68,7 @@
 
 (path_type head: (identifier) @type)
 (path_type variant: (identifier) @type.enum.variant)
+(fn_bound name: (identifier) @keyword)
 (with_clause name: (identifier) @type)
 (requires_clause name: (identifier) @type)
 (named_arg name: (identifier) @type)

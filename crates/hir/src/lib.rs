@@ -2667,7 +2667,28 @@ fn trait_definition_diagnostics(db: &dyn Db, file: SourceFile, diagnostics: &mut
             // `requires::<...>`) carry their own reservations.
             continue;
         }
+        let mut fn_bounds = 0;
         for bound in type_param.bounds() {
+            if let ast::Type::FnBound(fn_bound) = &bound {
+                if !fn_bound.is_fn() {
+                    continue; // validation refuses every other name
+                }
+                fn_bounds += 1;
+                // TODO: halvko/must#223: a requirement's fn bound needs its
+                // call sites to relate the instantiation to it.
+                let refusal = if owner_kind.is_some_and(ast::FnType::can_cast) {
+                    Some("a fn bound on a requirement's parameter is not supported yet")
+                } else {
+                    fn_bound_refusal(fn_bound, fn_bounds)
+                };
+                if let Some(message) = refusal {
+                    diagnostics.push(simple_error(
+                        bound.syntax().text_range(),
+                        message.to_owned(),
+                    ));
+                }
+                continue;
+            }
             let ast::Type::PathType(path) = &bound else {
                 continue; // validation's shape errors cover it
             };
@@ -2678,6 +2699,9 @@ fn trait_definition_diagnostics(db: &dyn Db, file: SourceFile, diagnostics: &mut
                 continue;
             };
             let name = name_ref.text();
+            if name == syntax::FN_BOUND_NAME {
+                continue; // validation asks for the parameter list
+            }
             // A CAPABILITY in the bounds slot is not a trait lookup at all:
             // the vocabulary is the language's (`syntax::CAPABILITIES`), so
             // no file can declare its way into or out of one, and no scope
@@ -3063,9 +3087,15 @@ fn type_param_binding(path_type: &ast::PathType, name: &str) -> TypeParamBinding
     // the list (if the path is inside one) strictly before that literal.
     let mut inside_binder = true;
     let mut passed_a_binder_list = false;
+    // A type param's fn bound (`F: Fn(T) -> U`, #223) may name its
+    // binder's other params; only a const param's TYPE may not.
+    let mut passed_a_const_param = false;
     for ancestor in path_type.syntax().ancestors() {
         if ast::GenericParamList::can_cast(ancestor.kind()) {
             passed_a_binder_list = true;
+        }
+        if ast::ConstParam::can_cast(ancestor.kind()) {
+            passed_a_const_param = true;
         }
         // A binder can sit on a fn literal or (for type declarations) on a
         // `struct`/`enum` literal — all three are climbed the same way. A
@@ -3129,7 +3159,7 @@ fn type_param_binding(path_type: &ast::PathType, name: &str) -> TypeParamBinding
                 ast::GenericParam::RegionParam(_) | ast::GenericParam::ConstParam(_) => false,
             });
         if declares {
-            return if inside_binder && passed_a_binder_list {
+            return if inside_binder && passed_a_binder_list && passed_a_const_param {
                 TypeParamBinding::InOwnBinder
             } else {
                 TypeParamBinding::Bound
@@ -4139,4 +4169,24 @@ fn region_param_on_type_declaration(node: &syntax::SyntaxNode) -> bool {
             _ => None,
         })
         .unwrap_or(false)
+}
+
+/// Why a fn bound (`F: Fn(usize) -> ()`, #223) is refused, if it is.
+/// `nth` counts the fn bounds on its parameter so far, this one included.
+fn fn_bound_refusal(fn_bound: &ast::FnBound, nth: usize) -> Option<&'static str> {
+    if nth > 1 {
+        return Some("a parameter takes at most one fn bound: a value is called one way");
+    }
+    // TODO: halvko/must#144: a hole in a bound waits for generic signatures
+    // with holes, which fill it from the body.
+    if !TypeRef::from_ast(ast::Type::FnBound(fn_bound.clone())).is_fully_typed() {
+        return Some("a fn bound writes every type, its return type included (`-> ()` for none)");
+    }
+    // TODO: halvko/must#223: a borrow in a fn bound needs the call site's
+    // region substitution carried into the bound.
+    let mut nodes = fn_bound.syntax().descendants();
+    if nodes.any(|node| ast::BorrowType::can_cast(node.kind())) {
+        return Some("a fn bound that mentions a borrow is not supported yet");
+    }
+    None
 }

@@ -2672,6 +2672,12 @@ pub(crate) struct InferCtx<'db> {
     /// canonical slot order (push order — see
     /// [`crate::traits::bound_slots`]).
     pending_obligations: Vec<PendingObligation>,
+    /// Fn bounds from instantiation edges (#223), as (key, instantiation,
+    /// instantiated bound): settled once the call's arguments are checked
+    /// (see [`Self::settle_known_fn_bounds`]), or earlier by a fn literal the
+    /// instantiation is the expected type of (see
+    /// [`Self::take_fn_bound_hint`]).
+    pending_fn_bounds: Vec<(ExprId, Ty, Ty)>,
     /// `const { ... }` nesting depth: a const block lowers to a separate
     /// MIR body, so — like a nested fn literal — it cannot reach the root
     /// body's dictionary parameters (see [`Self::in_nested_body`]).
@@ -2891,6 +2897,7 @@ impl<'db> InferCtx<'db> {
             negated_literals: rustc_hash::FxHashSet::default(),
             number_expectations: rustc_hash::FxHashSet::default(),
             pending_obligations: Vec::new(),
+            pending_fn_bounds: Vec::new(),
             const_block_depth: 0,
             direct_callees: body
                 .exprs
@@ -3513,6 +3520,13 @@ impl<'db> InferCtx<'db> {
     pub(crate) fn solve(&mut self) {
         let diagnostics = self.constraints.solve(&mut self.table);
         self.result.diagnostics.extend(diagnostics);
+        // A fn bound whose argument was a join waits for it to solve, and
+        // settling may relate what the joins left free: solve once more.
+        if !self.pending_fn_bounds.is_empty() {
+            self.settle_fn_bounds();
+            let diagnostics = self.constraints.solve(&mut self.table);
+            self.result.diagnostics.extend(diagnostics);
+        }
         let called = std::mem::take(&mut self.safe_calls);
         self.constraints.settle_safety(&mut self.table, called);
     }
@@ -5276,6 +5290,7 @@ impl<'db> InferCtx<'db> {
                 // nothing and its body is checked on its own. `Ty::Error` is
                 // infectious and silent there for the same reason.
                 let own_sig = Ty::fn_type(param_tys.clone(), ret.clone());
+                self.take_fn_bound_hint(expected);
                 let reported = self.result.diagnostics.len();
                 let fn_ty = self.check(expr, own_sig.clone(), expected, cause);
                 // `check` poisons the unresolved numbers in what it was
@@ -5697,7 +5712,15 @@ impl<'db> InferCtx<'db> {
         args: &[ExprId],
         callee_ty: Ty,
     ) -> Ty {
-        match self.resolve_shallow(&callee_ty) {
+        let callee_ty = self.resolve_shallow(&callee_ty);
+        // A rigid parameter with a fn bound (#223) is called as its bound.
+        if let Ty::Param(param) = &callee_ty
+            && let Some(bound) =
+                crate::ty::param_fn_bound(self.db, param.item.to_id(self.db), param.index)
+        {
+            return self.call_of_value(expr, callee, args, bound);
+        }
+        match callee_ty {
             // The callee's type is still being inferred (an
             // in-group signature, e.g. mutual recursion): calling
             // it commits it to a function of this shape. A
@@ -5764,6 +5787,7 @@ impl<'db> InferCtx<'db> {
                     let param = f.params.get(i).cloned().unwrap_or(Ty::Error);
                     self.infer_expr_with(arg, &param, Some(Cause::CallSite { call: expr, arg }));
                 }
+                self.settle_known_fn_bounds();
                 f.ret.clone()
             }
             Ty::Error => {
@@ -6335,6 +6359,7 @@ impl<'db> InferCtx<'db> {
         if let Some(last) = f.params.last() {
             self.check(receiver, receiver_ty.clone(), last, None);
         }
+        self.settle_known_fn_bounds();
         f.ret.clone()
     }
 
@@ -6705,7 +6730,93 @@ impl<'db> InferCtx<'db> {
         // and are skipped — an owner's bounds are the type declaration's
         // business, checked where the receiver was built.
         self.push_bound_obligations(key, &site.path, &subst);
+        self.relate_fn_bounds(key, &site.path, &subst, &FxHashMap::default());
         subst
+    }
+
+    /// Record each fn-bounded parameter's instantiation against its bound
+    /// (#223), to settle once the call's arguments are checked. Not unified
+    /// on the spot: an argument may be the caller's OWN fn-bounded parameter
+    /// (`apply_twice(g, 1)` inside `fn::<G: Fn(usize) -> usize>`), and a
+    /// rigid `G` never unifies with a fn type.
+    fn relate_fn_bounds(
+        &mut self,
+        key: ExprId,
+        binder: &SiteName,
+        subst: &FxHashMap<u32, Ty>,
+        const_subst: &FxHashMap<u32, ConstArgValue>,
+    ) {
+        let item = self.site_item(binder);
+        let has_fn_bound = crate::item_data(self.db, item.to_id(self.db))
+            .as_ref()
+            .is_some_and(|data| data.generics.iter().any(|param| param.fn_bound.is_some()));
+        if !has_fn_bound {
+            return;
+        }
+        let mut indices: Vec<u32> = subst.keys().copied().collect();
+        indices.sort_unstable();
+        for index in indices {
+            let Some(bound) = crate::ty::param_fn_bound(self.db, item.to_id(self.db), index) else {
+                continue;
+            };
+            let bound = instantiate_scheme(&bound, &item, subst, const_subst);
+            self.pending_fn_bounds
+                .push((key, subst[&index].clone(), bound));
+        }
+    }
+
+    /// A fn literal checked against an instantiation that still waits on
+    /// its fn bound takes the bound as its signature now, so `fn (x) { x +
+    /// 1 }` passed for `F: Fn(usize) -> usize` learns `x: usize` before its
+    /// body runs.
+    fn take_fn_bound_hint(&mut self, expected: &Ty) {
+        let Ty::Infer(want) = self.resolve_shallow(expected) else {
+            return;
+        };
+        let Some(at) = (0..self.pending_fn_bounds.len()).find(|&at| {
+            let var = self.pending_fn_bounds[at].1.clone();
+            matches!(self.resolve_shallow(&var), Ty::Infer(var) if self.table.find(var) == self.table.find(want))
+        }) else {
+            return;
+        };
+        let (key, var, bound) = self.pending_fn_bounds.remove(at);
+        self.check(key, var, &bound, None);
+    }
+
+    /// Settle every pending fn bound whose instantiation is known, once a
+    /// call's arguments are checked. One that is still a bare variable (a
+    /// join's result, say) waits for [`Self::solve`].
+    fn settle_known_fn_bounds(&mut self) {
+        if self.pending_fn_bounds.is_empty() {
+            return;
+        }
+        for (key, var, bound) in std::mem::take(&mut self.pending_fn_bounds) {
+            if matches!(self.resolve_shallow(&var), Ty::Infer(_)) {
+                self.pending_fn_bounds.push((key, var, bound));
+            } else {
+                self.settle_fn_bound(key, var, &bound);
+            }
+        }
+    }
+
+    /// Settle every fn bound still pending, after the joins have solved.
+    fn settle_fn_bounds(&mut self) {
+        for (key, var, bound) in std::mem::take(&mut self.pending_fn_bounds) {
+            self.settle_fn_bound(key, var, &bound);
+        }
+    }
+
+    /// An instantiation that is itself a fn-bounded parameter satisfies
+    /// `bound` when the two bounds agree; anything else is checked as a
+    /// value of the bound's fn type.
+    fn settle_fn_bound(&mut self, key: ExprId, var: Ty, bound: &Ty) {
+        let own = match self.resolve_shallow(&var) {
+            Ty::Param(param) => {
+                crate::ty::param_fn_bound(self.db, param.item.to_id(self.db), param.index)
+            }
+            _ => None,
+        };
+        self.check(key, own.unwrap_or(var), bound, None);
     }
 
     /// Mint one fresh EXISTENTIAL per member-own REGION binder, and relate
@@ -8495,6 +8606,7 @@ impl<'db> InferCtx<'db> {
         // would need a captured dictionary — reserved; the reservation is
         // the WHOLE story for such a mention (no cannot-infer noise on
         // params the reserved value was never going to determine).
+        self.relate_fn_bounds(expr, &owner, &subst, &const_subst);
         let mut reserved_as_value = false;
         if !crate::traits::bound_slots(self.db, loc.file, generics).is_empty() {
             if self.direct_callees.contains(&expr) {
@@ -10509,6 +10621,7 @@ fn builtin_generics(builtin: Builtin) -> Option<&'static [GenericParamData]> {
                 // `alloc_array::<String>` is exactly as sound as
                 // `alloc_array::<usize>`.
                 forget: false,
+                fn_bound: None,
             }]
         });
     match builtin {

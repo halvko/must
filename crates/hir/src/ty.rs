@@ -1575,6 +1575,20 @@ pub(crate) fn lower_decl_ty(db: &dyn Db, file: SourceFile, type_ref: &TypeRef) -
     if ty.contains_infer() { Ty::Error } else { ty }
 }
 
+/// The FN BOUND of `item`'s type parameter `index` (`F: Fn(usize) -> ()`,
+/// #223), lowered under the item's own binder: the type a value of `F` is
+/// called as. `None` without one. A bound with a hole lowers to `{error}`;
+/// the bound carries the diagnostic.
+#[salsa::tracked]
+pub(crate) fn param_fn_bound<'db>(db: &'db dyn Db, item: ItemId<'db>, index: u32) -> Option<Ty> {
+    let data = crate::item_data(db, item).as_ref()?;
+    let bound = data.generics.get(index as usize)?.fn_bound.as_ref()?;
+    let scope = generic_param_scope(db, item, &data.generics);
+    let mut table = InPlaceUnificationTable::new();
+    let ty = lower_type_ref_in(db, item.file(db), bound, &mut table, &scope);
+    Some(if ty.contains_infer() { Ty::Error } else { ty })
+}
+
 /// The self-type of a MEMBER item: the OWNING type declaration at its full
 /// binders — each of the owner's params spelled as the member's own rigid
 /// [`Ty::Param`]/[`ConstArgValue::Param`] (member schemes are keyed by the

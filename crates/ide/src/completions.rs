@@ -1198,7 +1198,8 @@ fn trait_scope_items(
 
 /// What a live bound may name, minus the bounds already `written` on the
 /// parameter: the file's non-generic traits (a generic trait is reserved),
-/// then the capabilities a bound can ask for (`forget`).
+/// then the capabilities a bound can ask for (`forget`) and the fn bound
+/// (`Fn`).
 fn bound_items(
     db: &RootDatabase,
     file: SourceFile,
@@ -1225,7 +1226,17 @@ fn bound_items(
                     None,
                     edit_range,
                 )
-            }),
+            })
+            .chain(fresh(syntax::FN_BOUND_NAME).then(|| {
+                completion_item(
+                    syntax::FN_BOUND_NAME,
+                    CompletionItemKind::Keyword,
+                    Provenance::Keyword,
+                    TYPE_TIER_NONE,
+                    None,
+                    edit_range,
+                )
+            })),
     );
     items
 }

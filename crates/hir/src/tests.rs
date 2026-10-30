@@ -5335,6 +5335,200 @@ fn rigid_param_field_access_call_and_arithmetic_error_ordinarily() {
 }
 
 #[test]
+fn fn_bound_makes_a_param_callable() {
+    // The literal learns `n: usize` from the bound, and `four` passes its
+    // own `G` through. Copying and discarding are checked in mir's moves
+    // tests.
+    check_diagnostics(
+        r#"
+static twice = fn::<F: Fn(usize) -> usize>(f: F, x: usize) -> usize { f(f(x)) };
+static four = fn::<G: Fn(usize) -> usize>(g: G, x: usize) -> usize { twice(g, twice(g, x)) };
+static unused = fn::<G: Fn() -> ()>(g: G) -> () { () };
+static map = fn::<T, U, F: Fn(T) -> U>(x: T, f: F) -> U { f(x) };
+static double = fn (n: usize) -> usize { n * 2 };
+static main = fn () -> bool {
+    let a = twice(double, 1) + four(fn (n) { n + 1 }, 0);
+    map(a, fn (n: usize) -> bool { n == 8 })
+};
+"#,
+        expect![[r#""#]],
+    );
+}
+
+#[test]
+fn fn_bound_settles_before_the_result_is_used() {
+    // A named fn fixes `U` at the call, also through a `let`-bound callee,
+    // so `.a` reads a field of `Pair`; a join of the caller's own `G` passes
+    // through like `G` itself.
+    check_diagnostics(
+        r#"
+type Pair = struct { a: usize, b: usize };
+static map = fn::<T, U, F: Fn(T) -> U>(x: T, f: F) -> U { f(x) };
+static make = fn (n: usize) -> Pair { Pair(struct { a = n, b = n }) };
+static named = fn () -> usize { map(1, make).a };
+static through_a_let = fn () -> usize { let m = map; m(1, make).a };
+static twice = fn::<F: Fn(usize) -> usize>(f: F, x: usize) -> usize { f(f(x)) };
+static joined = fn::<G: Fn(usize) -> usize>(g: G, c: bool) -> usize {
+    let h = if c { g } else { g };
+    twice(h, 1)
+};
+"#,
+        expect![[r#""#]],
+    );
+}
+
+#[test]
+fn fn_bound_is_what_a_call_site_must_pass() {
+    // A call site's argument, and a caller's own fn bound passed through,
+    // are both held to the callee's bound.
+    check_diagnostics(
+        r#"
+static call = fn::<F: Fn(usize) -> usize>(f: F) -> usize { f(1) };
+static narrow = fn (n: u8) -> u8 { n };
+static a = fn () -> usize { call(narrow) };
+static b = fn::<G: Fn(u8) -> u8>(g: G) -> usize { call(g) };
+static c = fn::<G>(g: G) -> usize { call(g) };
+"#,
+        expect![[r#"
+            136..140: type mismatch: expected `fn(usize) -> usize`, found `fn(u8) -> u8`
+            202..206: type mismatch: expected `fn(usize) -> usize`, found `fn(u8) -> u8`
+            249..253: type mismatch: expected `fn(usize) -> usize`, found `G`
+        "#]],
+    );
+}
+
+#[test]
+fn fn_bound_on_a_member() {
+    // An inherent member's fn bound holds its dot-call to the bound.
+    check_diagnostics(
+        r#"
+type Counter = struct { n: usize } with {
+    impl Self {
+        apply = fn::<F: Fn(usize) -> usize>(f: F, c: Self) -> usize { f(c.n) };
+    }
+};
+static ok = fn (c: Counter) -> usize { c.apply(fn (x) { x * 10 }) };
+static bad = fn (c: Counter) -> usize { c.apply(fn (x: u8) -> u8 { x }) };
+"#,
+        expect![[r#"
+            265..287: type mismatch: expected `fn(usize) -> usize`, found `fn(u8) -> u8`
+        "#]],
+    );
+}
+
+#[test]
+fn fn_bound_on_a_requirement_is_refused() {
+    // TODO: halvko/must#223: a requirement's fn bound is refused.
+    check_diagnostics(
+        r#"
+trait Run = requires {
+    run: fn::<F: Fn(usize) -> usize>(F, Self) -> usize;
+} with {
+    impl usize {
+        run = fn::<F: Fn(usize) -> usize>(f: F, x: usize) -> usize { f(x) };
+    }
+};
+"#,
+        expect![[r#"
+            41..59: a fn bound on a requirement's parameter is not supported yet
+        "#]],
+    );
+}
+
+#[test]
+fn fn_bound_member_is_matched_in_presence_only() {
+    // TODO: halvko/must#223: `wide`'s different bound passes the binder
+    // match. The requirement's own refusal is the one expected line.
+    check_diagnostics(
+        r#"
+trait Wide = requires {
+    wide: fn::<F: Fn(usize) -> usize>(F, Self) -> usize;
+} with {
+    impl bool {
+        wide = fn::<F: Fn(u8) -> u8>(f: F, x: bool) -> usize { 1 };
+    }
+};
+"#,
+        expect![[r#"
+            43..61: a fn bound on a requirement's parameter is not supported yet
+        "#]],
+    );
+}
+
+#[test]
+fn fn_bound_on_a_member_without_one_in_its_requirement_mismatches() {
+    check_diagnostics(
+        r#"
+trait Go = requires {
+    go: fn::<F>(F, Self) -> usize;
+} with {
+    impl usize {
+        go = fn::<F: Fn(usize) -> usize>(f: F, x: usize) -> usize { f(x) };
+    }
+};
+"#,
+        expect![[r#"
+            92..94: member `go`'s generic binder does not match `Go`'s requirement (arity, kinds and bounds must agree, the bounds in the requirement's order) (required by the trait here at 27..29)
+        "#]],
+    );
+}
+
+#[test]
+fn a_refused_fn_bound_shape_does_not_make_a_param_callable() {
+    // Only the `Fn(..)` node is a fn bound: a fn type, a bare `Fn` or
+    // another name with a parameter list is refused by the parser alone
+    // and leaves its param uncallable, with no trait lookup behind it.
+    check_diagnostics(
+        r#"
+static a = fn::<F: fn(usize) -> usize>(f: F) -> usize { f(1) };
+static b = fn::<F: Fn>(f: F) -> usize { f(1) };
+static c = fn::<F: Wrap(usize) -> usize>(f: F) -> usize { f(1) };
+"#,
+        expect![[r#"
+            20..38: a fn type is not a bound: the fn bound is written `Fn(..) -> ..`
+            57..58: expression of type `F` is not callable
+            84..86: a fn bound writes its parameters and return type: `Fn(A) -> R`
+            105..106: expression of type `F` is not callable
+            132..152: only `Fn` takes a parameter list in a bound
+            171..172: expression of type `F` is not callable
+        "#]],
+    );
+}
+
+#[test]
+fn fn_bound_refusals() {
+    // TODO: halvko/must#144: `b`'s hole is refused.
+    // TODO: halvko/must#223: `c`'s borrow is refused.
+    check_diagnostics(
+        r#"
+static a = fn::<F: Fn(usize)>(f: F) -> () { f(1) };
+static b = fn::<F: Fn(_) -> usize>(f: F) -> usize { f(1) };
+static c = fn::<@r, F: Fn(usize.&::<@r>) -> usize>(x: usize.&::<@r>, f: F) -> usize { f(x) };
+static d = fn::<F: Fn(usize) -> usize + Fn(u8) -> u8>(f: F) -> usize { f(1) };
+"#,
+        expect![[r#"
+            20..29: a fn bound writes every type, its return type included (`-> ()` for none)
+            72..86: a fn bound writes every type, its return type included (`-> ()` for none)
+            136..162: a fn bound that mentions a borrow is not supported yet
+            247..259: a parameter takes at most one fn bound: a value is called one way
+        "#]],
+    );
+}
+
+#[test]
+fn unsafe_fn_bound_makes_calls_through_the_param_unsafe() {
+    check_diagnostics(
+        r#"
+static bare = fn::<F: unsafe Fn(usize) -> usize>(f: F) -> usize { f(1) };
+static wrapped = fn::<F: unsafe Fn(usize) -> usize>(f: F) -> usize { unsafe { f(2) } };
+"#,
+        expect![[r#"
+            67..71: calling a value of `unsafe fn` type requires an `unsafe { ... }` block
+        "#]],
+    );
+}
+
+#[test]
 fn const_param_reads_as_a_value_of_its_declared_type() {
     check_diagnostics(
         "static f = fn::<const N: usize>() -> usize { N + 1 };",
@@ -5842,12 +6036,15 @@ fn fn_typed_const_param_is_rejected_at_the_declaration() {
 
 #[test]
 fn fn_typed_const_param_smuggled_in_a_record_is_rejected_too() {
+    // `{` is no type, so the binder breaks there; the leftover
+    // `g: fn() -> usize` reads as a param `g` bounded by a fn type, which is
+    // refused as a bound. The parse errors are the rejection.
     check_diagnostics(
         "static f = fn::<const N: { g: fn() -> usize }>() -> usize { 1 };",
         expect![[r#"
             25..26: expected a type
             27..28: expected `,` or `>`
-            30..43: only a trait name can be a bound
+            30..43: a fn type is not a bound: the fn bound is written `Fn(..) -> ..`
             44..45: expected `,` or `>`
         "#]],
     );

@@ -89,6 +89,11 @@ pub struct GenericParamData {
     /// A `bool` because `forget` is the only capability a bound can ask
     /// for; a second one turns this into a set, at the same place.
     pub forget: bool,
+    /// The type param's FN BOUND (`F: Fn(usize) -> ()`, #223): the fn type a
+    /// value of the param is called as. Split out of [`Self::bounds`] like
+    /// `forget`, so trait readers never meet one. The first one written;
+    /// the diagnostics pass refuses a second.
+    pub fn_bound: Option<TypeRef>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -291,22 +296,35 @@ pub enum ConstArgRef {
 }
 
 impl TypeRef {
+    fn fn_of(
+        params: Vec<Option<ast::Type>>,
+        ret: Option<ast::RetType>,
+        unsafe_to_call: bool,
+    ) -> TypeRef {
+        TypeRef::Fn {
+            params: params
+                .into_iter()
+                .map(|ty| ty.map_or(TypeRef::Error, TypeRef::from_ast))
+                .collect(),
+            ret: ret
+                .and_then(|rt| rt.ty())
+                .map(|t| Box::new(TypeRef::from_ast(t))),
+            unsafe_to_call,
+        }
+    }
+
     pub fn from_ast(ty: ast::Type) -> TypeRef {
         match ty {
             ast::Type::UnitType(_) => TypeRef::Unit,
             ast::Type::NeverType(_) => TypeRef::Never,
-            ast::Type::FnType(it) => TypeRef::Fn {
-                params: it
-                    .params_types()
-                    .into_iter()
-                    .map(|ty| ty.map_or(TypeRef::Error, TypeRef::from_ast))
-                    .collect(),
-                ret: it
-                    .ret_type()
-                    .and_then(|rt| rt.ty())
-                    .map(|t| Box::new(TypeRef::from_ast(t))),
-                unsafe_to_call: it.is_unsafe(),
-            },
+            ast::Type::FnType(it) => {
+                TypeRef::fn_of(it.params_types(), it.ret_type(), it.is_unsafe())
+            }
+            // `F: Fn(A) -> R` (#223): the bound is kept as the fn type a
+            // value of `F` is called as.
+            ast::Type::FnBound(it) => {
+                TypeRef::fn_of(it.params_types(), it.ret_type(), it.is_unsafe())
+            }
             ast::Type::RawPtrType(it) => match it.ty() {
                 Some(inner) => TypeRef::RawPtr {
                     inner: Box::new(TypeRef::from_ast(inner)),
@@ -841,6 +859,7 @@ fn generics_from_param_list(list: Option<ast::GenericParamList>) -> Vec<GenericP
                 // A region names a duration, never a value, so nothing can
                 // be done with one and nothing needs saying about it.
                 forget: false,
+                fn_bound: None,
             },
             ast::GenericParam::TypeParam(it) => {
                 // The written bounds split in two: a capability is the
@@ -849,14 +868,28 @@ fn generics_from_param_list(list: Option<ast::GenericParamList>) -> Vec<GenericP
                 // resolve per file. Splitting at the item tree means no
                 // downstream consumer can mistake `forget` for a trait it
                 // failed to find.
+                // The fn bound is told apart by its node; a fn type or a
+                // bare `Fn` in the bounds is validation's to refuse.
+                let fn_bound = it.bounds().find_map(|bound| match bound {
+                    ast::Type::FnBound(fn_bound) if fn_bound.is_fn() => {
+                        Some(TypeRef::from_ast(ast::Type::FnBound(fn_bound)))
+                    }
+                    _ => None,
+                });
                 let written: Vec<TypeRef> = it.bounds().map(TypeRef::from_ast).collect();
+                let refused = |bound: &TypeRef| match bound {
+                    TypeRef::Fn { .. } => true,
+                    TypeRef::Path(name) => name == syntax::FN_BOUND_NAME,
+                    _ => false,
+                };
                 GenericParamData {
                     name: it.name().map(|n| n.text()).unwrap_or_default(),
                     kind: GenericParamKind::Type,
                     forget: written.iter().any(bound_is_forget),
+                    fn_bound,
                     bounds: written
                         .into_iter()
-                        .filter(|bound| !bound_is_forget(bound))
+                        .filter(|bound| !bound_is_forget(bound) && !refused(bound))
                         .collect(),
                     outlives: Vec::new(),
                 }
@@ -871,6 +904,7 @@ fn generics_from_param_list(list: Option<ast::GenericParamList>) -> Vec<GenericP
                 // A const parameter's values are plain data — always
                 // forgettable, never in need of a bound saying so.
                 forget: false,
+                fn_bound: None,
             },
         })
         .collect()
