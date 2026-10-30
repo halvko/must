@@ -7,7 +7,7 @@
 use base_db::Db;
 use hir::body::{BinOp, Body, ExprData, LiteralData, MatchArm, PatData, Stmt};
 use hir::infer::{InferenceDiagnostic, InferenceResult};
-use hir::{BindingId, ExprId, ItemId, ItemLoc, PatId, Resolution, Ty};
+use hir::{BindingId, ExprId, ItemId, ItemLoc, PatId, PlaceChain, PlaceRoot, Resolution, Ty};
 use la_arena::{Arena, ArenaMap};
 use rustc_hash::{FxHashMap, FxHashSet};
 
@@ -727,14 +727,13 @@ impl LowerCtx<'_> {
     /// variable, a field or element of one, or a deref chain. A call
     /// result, a literal or a freshly-formed borrow is not one.
     fn is_place_expr(&self, expr: ExprId) -> bool {
-        match &self.body.exprs[expr] {
-            ExprData::NameRef(_) => {
-                matches!(self.resolutions.get(expr), Some(Resolution::Local(_)))
+        let (root, kind) = self.body.place_root(expr);
+        match kind {
+            PlaceRoot::Name(_) => {
+                matches!(self.resolutions.get(root), Some(Resolution::Local(_)))
             }
-            ExprData::Field { receiver, .. } => self.is_place_expr(*receiver),
-            ExprData::Index { base, .. } => self.is_place_expr(*base),
-            ExprData::Deref { .. } => true,
-            _ => false,
+            PlaceRoot::Deref { .. } => true,
+            PlaceRoot::Temporary(_) | PlaceRoot::Missing | PlaceRoot::Value => false,
         }
     }
 
@@ -2602,7 +2601,11 @@ impl LowerCtx<'_> {
         value: ExprId,
         value_op: Operand,
     ) {
-        let (root, chain) = self.place_chain(target);
+        let PlaceChain {
+            root,
+            kind,
+            steps: chain,
+        } = self.body.place_chain(target);
         // A deref roots the chain (`p.* = v;`, `p.*.x = v;`, `p.*[i] = v;`):
         // the store goes through the raw pointer — a new root whose
         // legality is the pointer's provenance (judged by the machine),
@@ -2611,8 +2614,7 @@ impl LowerCtx<'_> {
         // loads with their own unsafe gating — and the store's place is a
         // pointer-rooted temp with a leading `Deref` projection; liveness
         // and writability are the machine's store-time checks.
-        if let ExprData::Deref { receiver } = &self.body.exprs[root] {
-            let receiver = *receiver;
+        if let PlaceRoot::Deref { receiver } = kind {
             let deref = root;
             // The write was rejected on the governing deref (a shared
             // pointer): trap with the squiggle's exact text — the write
@@ -2666,19 +2668,20 @@ impl LowerCtx<'_> {
             self.trap(b, link, messages);
             return;
         }
-        let ExprData::NameRef(name) = &self.body.exprs[root] else {
-            match &self.body.exprs[root] {
-                // Justified by the parse errors of the broken source.
-                ExprData::Missing => {
-                    self.trap(b, root, "syntax error: missing expression".to_owned());
-                }
-                // A chain rooted in a non-variable: validation already
-                // squiggled the whole target with exactly this text.
-                _ => {
-                    self.trap(b, target, syntax::CAN_ONLY_ASSIGN_TO_A_VARIABLE.to_owned());
-                }
+        let name = match kind {
+            PlaceRoot::Name(name) => name,
+            // Justified by the parse errors of the broken source.
+            PlaceRoot::Missing => {
+                self.trap(b, root, "syntax error: missing expression".to_owned());
+                return;
             }
-            return;
+            // A chain rooted in a non-variable: validation already
+            // squiggled the whole target with exactly this text. (A deref
+            // root was lowered above.)
+            PlaceRoot::Deref { .. } | PlaceRoot::Temporary(_) | PlaceRoot::Value => {
+                self.trap(b, target, syntax::CAN_ONLY_ASSIGN_TO_A_VARIABLE.to_owned());
+                return;
+            }
         };
         match self.resolutions.get(root) {
             Some(Resolution::Local(binding)) => match b.local_for_binding.get(binding) {
@@ -2725,7 +2728,7 @@ impl LowerCtx<'_> {
                 None => {
                     let diag = MirDiagnostic::UnsupportedCapture {
                         expr: root,
-                        name: name.clone(),
+                        name: name.to_owned(),
                     };
                     let message = diag.message();
                     self.diagnostics.push(diag);
@@ -2740,7 +2743,7 @@ impl LowerCtx<'_> {
             Some(Resolution::ConstParam(_)) => {
                 let message = InferenceDiagnostic::AssignToConstParam {
                     target: root,
-                    name: name.clone(),
+                    name: name.to_owned(),
                 }
                 .message();
                 self.trap(b, root, message);
@@ -2764,7 +2767,7 @@ impl LowerCtx<'_> {
             Some(Resolution::TypeItem(_)) => {
                 let message = InferenceDiagnostic::TypeNotValue {
                     expr: root,
-                    name: name.clone(),
+                    name: name.to_owned(),
                 }
                 .message();
                 self.trap(b, root, message);
@@ -2772,7 +2775,7 @@ impl LowerCtx<'_> {
             Some(Resolution::TraitItem(_)) => {
                 let message = InferenceDiagnostic::TraitNotValue {
                     expr: root,
-                    name: name.clone(),
+                    name: name.to_owned(),
                 }
                 .message();
                 self.trap(b, root, message);
@@ -2801,7 +2804,7 @@ impl LowerCtx<'_> {
     /// materializing the receiver and extracting from the copy. Built out
     /// of the same three pieces the write side
     /// ([`Self::lower_field_assign_target`]) and address-of
-    /// ([`Self::lower_addr_of_flavored`]) are — [`Self::place_chain`],
+    /// ([`Self::lower_addr_of_flavored`]) are — [`Body::place_chain`],
     /// [`Self::lower_deref_root`], [`Self::lower_place_projection`].
     ///
     /// This is what keeps the dynamic aliasing check's path narrow: a
@@ -2817,7 +2820,11 @@ impl LowerCtx<'_> {
     /// [`ValueExpr::Field`]/[`ValueExpr::Index`] over a materialized base,
     /// which is the right shape for a value that has no place of its own.
     fn lower_place_read(&mut self, b: &mut BodyBuilder, expr: ExprId) -> Option<Operand> {
-        let (root, chain) = self.place_chain(expr);
+        let PlaceChain {
+            root,
+            kind,
+            steps: chain,
+        } = self.body.place_chain(expr);
         // `a.` — a missing field name anywhere in the chain: the general
         // path reports the parse error, after evaluating the receiver.
         if chain.iter().any(|&link| {
@@ -2829,9 +2836,8 @@ impl LowerCtx<'_> {
         // the POINTER (the read goes through it, path extended — nothing
         // materialized, the original allocation's identity preserved), a
         // name roots it in the binding's own storage.
-        let local = match &self.body.exprs[root] {
-            ExprData::Deref { receiver } => {
-                let receiver = *receiver;
+        let local = match kind {
+            PlaceRoot::Deref { receiver } => {
                 match self.lower_deref_root(b, root, receiver) {
                     DerefRoot::Local(local) => local,
                     DerefRoot::Trap(messages) => return Some(self.trap(b, root, messages)),
@@ -2839,7 +2845,7 @@ impl LowerCtx<'_> {
                     DerefRoot::Silent => return Some(Operand::Const(Const::Unit)),
                 }
             }
-            ExprData::NameRef(_) => {
+            PlaceRoot::Name(_) => {
                 let Some(Resolution::Local(binding)) = self.resolutions.get(root) else {
                     return None;
                 };
@@ -2847,7 +2853,7 @@ impl LowerCtx<'_> {
                 // general path reports the unsupported capture.
                 *b.local_for_binding.get(binding)?
             }
-            _ => return None,
+            PlaceRoot::Temporary(_) | PlaceRoot::Missing | PlaceRoot::Value => return None,
         };
         // A broken root or link INSIDE the chain (unknown field,
         // non-record receiver, non-array base, compile-time OOB),
@@ -2924,12 +2930,15 @@ impl LowerCtx<'_> {
         place: ExprId,
         flavor: PtrFlavor,
     ) -> Operand {
-        let (root, chain) = self.place_chain(place);
+        let PlaceChain {
+            root,
+            kind,
+            steps: chain,
+        } = self.body.place_chain(place);
         // A deref-rooted place: the pointer reads like any expression
         // (deeper derefs inside it are ordinary loads with their own
         // unsafe gating), then the address is that pointer, path-extended.
-        if let ExprData::Deref { receiver } = &self.body.exprs[root] {
-            let receiver = *receiver;
+        if let PlaceRoot::Deref { receiver } = kind {
             let deref = root;
             // The deref rule is uniform — the place's own deref included —
             // so a broken or unguarded one traps here.
@@ -2958,19 +2967,24 @@ impl LowerCtx<'_> {
         if let Some((link, messages)) = self.first_link_trap(root_outward(root, &chain)) {
             return self.trap(b, link, messages);
         }
-        // A materialized temporary at the root (M12): the value is lowered
-        // where it is written and stored into its own local, which is then
-        // addressed. The store is the initialization, on whatever path runs.
-        if let Some(binding) = self.body.temp_local(root) {
-            let value = self.lower_expr(b, root);
-            let local = self.alloc_binding_local(b, binding);
-            b.push_assign(local, ValueExpr::Use(value), root);
-            return self.address_of_local(b, flavor, local, &chain, expr);
-        }
-        let ExprData::NameRef(name) = &self.body.exprs[root] else {
+        let name = match kind {
+            PlaceRoot::Name(name) => name,
+            // A materialized temporary at the root (M12): the value is
+            // lowered where it is written and stored into its own local,
+            // which is then addressed. The store is the initialization, on
+            // whatever path runs.
+            PlaceRoot::Temporary(binding) => {
+                let value = self.lower_expr(b, root);
+                let local = self.alloc_binding_local(b, binding);
+                b.push_assign(local, ValueExpr::Use(value), root);
+                return self.address_of_local(b, flavor, local, &chain, expr);
+            }
             // Non-place roots were diagnosed (`AddrOfNonPlace`) and
-            // trapped by the wrapper; a missing root is a parse error.
-            return Operand::Const(Const::Unit);
+            // trapped by the wrapper; a missing root is a parse error. (A
+            // deref root was lowered above.)
+            PlaceRoot::Deref { .. } | PlaceRoot::Missing | PlaceRoot::Value => {
+                return Operand::Const(Const::Unit);
+            }
         };
         match self.resolutions.get(root) {
             Some(Resolution::Local(binding)) => match b.local_for_binding.get(binding) {
@@ -2980,7 +2994,7 @@ impl LowerCtx<'_> {
                 None => {
                     let diag = MirDiagnostic::UnsupportedCapture {
                         expr: root,
-                        name: name.clone(),
+                        name: name.to_owned(),
                     };
                     let message = diag.message();
                     self.diagnostics.push(diag);
@@ -3137,7 +3151,9 @@ impl LowerCtx<'_> {
     /// refused, root outward (the order its links evaluate in): the refusal
     /// pre-empts the walk, but each error inside has its trap.
     fn place_traps(&mut self, b: &mut BodyBuilder, place: ExprId) {
-        let (root, chain) = self.place_chain(place);
+        let PlaceChain {
+            root, steps: chain, ..
+        } = self.body.place_chain(place);
         for link in root_outward(root, &chain) {
             if let Some(messages) = self.link_traps(link) {
                 self.trap(b, link, messages);
@@ -3165,36 +3181,6 @@ impl LowerCtx<'_> {
             return None;
         }
         Some(entry.into_iter().chain(value).flatten().cloned().collect())
-    }
-
-    /// Walk a place chain to its root: the field and index steps,
-    /// OUTERMOST first, and the expression at the base (a name, a deref,
-    /// or something that is no place at all). The walk stops at a deref —
-    /// the chain's outermost one, the one that governs the access;
-    /// everything beneath it is an ordinary read producing the pointer.
-    ///
-    /// The one walk all three place lowerings share — the write target
-    /// ([`Self::lower_field_assign_target`]), the address-of operand
-    /// ([`Self::lower_addr_of_flavored`]) and the read
-    /// ([`Self::lower_place_read`]) — which is what makes them agree by
-    /// construction, not by inspection, about what a chain names.
-    fn place_chain(&self, expr: ExprId) -> (ExprId, Vec<ExprId>) {
-        let mut chain = Vec::new();
-        let mut root = expr;
-        loop {
-            match &self.body.exprs[root] {
-                ExprData::Field { receiver, .. } => {
-                    chain.push(root);
-                    root = *receiver;
-                }
-                ExprData::Index { base, .. } => {
-                    chain.push(root);
-                    root = *base;
-                }
-                _ => break,
-            }
-        }
-        (root, chain)
     }
 
     /// Resolve a deref-rooted place chain's root: the pointer (the

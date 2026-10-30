@@ -30,7 +30,9 @@ use base_db::{Db, SourceFile, parse};
 use syntax::TextRange;
 use syntax::ast::{self, AstNode as _};
 
-pub use body::{BindingId, Body, BodySourceMap, ExprId, PatId, body_with_source_map};
+pub use body::{
+    BindingId, Body, BodySourceMap, ExprId, PatId, PlaceChain, PlaceRoot, body_with_source_map,
+};
 pub use const_check::ConstCheckDiagnostic;
 pub use constraint::Cause;
 pub use constraint::{RegionConstraint, RegionConstraintReason};
