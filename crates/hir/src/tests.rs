@@ -12532,8 +12532,8 @@ fn a_record_operand_of_one_field_is_settled_by_its_name() {
     // a value (retired `:`), `r`'s `usize` a type. With more fields no name
     // decides: `s` is a record type, while `t` and `u` have a field (`1`,
     // `[1]`) only a value can be, so they are values and every `:` is retired.
-    // TODO: halvko/must#244: `v`'s names are all values, yet it reads as a
-    // record type, not the retired `:`.
+    // `v`'s names are all values, but no single name decides a record of two
+    // fields, so it reads as a record type, as `s` does.
     check_diagnostics(
         r#"
 static f = fn (n: usize) -> usize {
