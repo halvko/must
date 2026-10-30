@@ -20,7 +20,7 @@ use crate::body::{
 };
 use crate::constraint::{
     self, Cause, Constraints, Join, RegionConstraint, RegionConstraintReason, Relation, Witness,
-    is_unresolved_number, resolve_args_fully, resolve_finished, resolve_fully,
+    bound_cause, is_unresolved_number, resolve_args_fully, resolve_finished, resolve_fully,
 };
 use crate::item_tree::RegionRef;
 use crate::item_tree::{
@@ -3379,7 +3379,8 @@ impl<'db> InferCtx<'db> {
                 resolve_fully(&mut self.table, &Ty::Infer(var)),
                 Ty::Infer(_)
             ) {
-                self.table.union_value(var, TyVarValue::Known(Ty::Error));
+                self.table
+                    .union_value(var, TyVarValue::Known(Ty::Error, None));
             }
         }
     }
@@ -10165,17 +10166,14 @@ impl<'db> InferCtx<'db> {
             }
         }
         let mut reasons: Vec<Cause> = cause.into_iter().collect();
-        // When a turbofish pinned the expected side, say so: direct checks
-        // don't otherwise consult the cause store (only the join solver
-        // does), and "because `T` was instantiated to `usize` by this
-        // argument" is exactly the missing why.
-        for recorded in self
-            .constraints
-            .generic_arg_causes(&mut self.table, expected)
+        // When a turbofish pinned the expected side, say so: "because `T`
+        // was instantiated to `usize` by this argument" is exactly the
+        // missing why.
+        if let Some(cause @ (Cause::GenericArg { .. } | Cause::MemberGenericArg { .. })) =
+            bound_cause(&mut self.table, expected)
+            && !reasons.contains(&cause)
         {
-            if !reasons.contains(&recorded) {
-                reasons.push(recorded);
-            }
+            reasons.push(cause);
         }
         // A free NUMBER variable anywhere on either side renders
         // `{number}`, captured eagerly because it is poisoned to `{error}`

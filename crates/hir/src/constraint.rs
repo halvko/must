@@ -15,15 +15,14 @@
 //!   played against each other.
 //!
 //! Whenever unification binds a type variable to a concrete type, the
-//! [`Cause`] is recorded. Blame attribution reads these records back instead
-//! of threading "why was this expected" state through the traversal: when a
-//! deferred join finds a disagreeing witness, the causes on the join's
-//! result variable say why the winning type won, and the sibling witnesses
+//! [`Cause`] is stored in the binding. Blame attribution reads it back instead of
+//! threading "why was this expected" state through the traversal: when a
+//! deferred join finds a disagreeing witness, the cause on the join's
+//! result variable says why the winning type won, and the sibling witnesses
 //! that match it say who voted for it.
 
 use ena::unify::{InPlace, InPlaceUnificationTable, Snapshot};
 use la_arena::ArenaMap;
-use rustc_hash::FxHashMap;
 
 use crate::ItemLoc;
 use crate::body::{BindingId, ExprId, PatId};
@@ -235,8 +234,6 @@ pub(crate) struct Constraints {
     /// for a voted borrow result (the MEET of its branches) and cannot
     /// reach back into `InferCtx` to ask for one.
     next_region: u32,
-    /// Canonical root var → the causes that decided its concrete type.
-    causes: FxHashMap<TyVar, Vec<Cause>>,
     /// `(sub, sup)`: open safety variables related by the safe-to-unsafe
     /// conversion, `sub <= sup` ([`Self::coerce_safety`]). Read when either
     /// side is decided, which can decide the other: an `unsafe` sub makes
@@ -323,7 +320,7 @@ impl Constraints {
         if self.leave_errors_unbound {
             self.left_unbound.push(var);
         } else {
-            table.union_value(var, TyVarValue::Known(Ty::Error));
+            table.union_value(var, TyVarValue::Known(Ty::Error, None));
         }
     }
 
@@ -362,7 +359,7 @@ impl Constraints {
             if self.leave_errors_unbound {
                 self.left_unbound.push(var);
             } else {
-                table.union_value(var, TyVarValue::Known(Ty::Error));
+                table.union_value(var, TyVarValue::Known(Ty::Error, None));
             }
         });
     }
@@ -700,40 +697,8 @@ impl Constraints {
         true
     }
 
-    /// The turbofish causes ([`Cause::GenericArg`],
-    /// [`Cause::MemberGenericArg`]) recorded on `ty`'s variable (if it is
-    /// one): why an instantiated type parameter has the type it has.
-    /// Consulted by `InferCtx::check` on a direct mismatch — unlike the
-    /// join solver, direct checks don't otherwise read the cause store, and
-    /// without this the "instantiated by this argument" hint would only
-    /// ever show on join mismatches.
-    pub(crate) fn generic_arg_causes(
-        &self,
-        table: &mut InPlaceUnificationTable<TyVar>,
-        ty: &Ty,
-    ) -> Vec<Cause> {
-        let Ty::Infer(var) = ty else {
-            return Vec::new();
-        };
-        self.causes
-            .get(&table.find(*var))
-            .map(|causes| {
-                causes
-                    .iter()
-                    .copied()
-                    .filter(|cause| {
-                        matches!(
-                            cause,
-                            Cause::GenericArg { .. } | Cause::MemberGenericArg { .. }
-                        )
-                    })
-                    .collect()
-            })
-            .unwrap_or_default()
-    }
-
     /// The one unification entry point. Binding a variable to a concrete
-    /// type records `cause` (first cause wins) for later blame attribution.
+    /// type stores `cause` in the binding, for later blame attribution.
     /// ADOPTION: one side is an unbound variable (or an `Error`), so it
     /// takes the other's type WHOLESALE — including its regions. There is
     /// no second set of regions to relate, so no obligation can be lost.
@@ -811,18 +776,7 @@ impl Constraints {
                 if table.unioned(v1, v2) {
                     return true;
                 }
-                // The union picks one root; carry recorded causes over to it.
-                let carried: Vec<Cause> = self
-                    .causes
-                    .remove(&table.find(v1))
-                    .into_iter()
-                    .chain(self.causes.remove(&table.find(v2)))
-                    .flatten()
-                    .collect();
                 table.union(v1, v2);
-                if !carried.is_empty() {
-                    self.causes.insert(table.find(v1), carried);
-                }
                 true
             }
             (Ty::Infer(var), ty) | (ty, Ty::Infer(var)) => {
@@ -842,12 +796,7 @@ impl Constraints {
                 if occurs(table, var, &ty) {
                     return false;
                 }
-                table.union_value(var, TyVarValue::Known(ty));
-                if let Some(cause) = cause {
-                    self.causes
-                        .entry(table.find(var))
-                        .or_insert_with(|| vec![cause]);
-                }
+                table.union_value(var, TyVarValue::Known(ty, cause));
                 true
             }
             // Errors are infectious and silent.
@@ -1298,12 +1247,7 @@ impl Constraints {
                 };
                 (winner, Basis::Vote(winners))
             }
-            // A resolved class is never re-rooted or given new causes, so
-            // its root keys the same causes after the witness loop.
-            concrete => match &join.result {
-                Ty::Infer(var) => (concrete, Basis::Var(table.find(*var))),
-                _ => (concrete, Basis::Fixed),
-            },
+            concrete => (concrete, Basis::Bound),
         };
 
         // Witnesses that agree become "this branch has type …" hints; free
@@ -1396,8 +1340,8 @@ impl Constraints {
                     .iter()
                     .map(|&(blame, _)| Cause::Branch(blame))
                     .collect(),
-                Basis::Var(root) => self.causes.get(&root).cloned().unwrap_or_default(),
-                Basis::Fixed => Vec::new(),
+                // The witness loop never rebinds the result's class.
+                Basis::Bound => bound_cause(table, &join.result).into_iter().collect(),
             };
             // Unanimous means *every* witness is a culprit of the same
             // type. A vote can't end up here unanimously (its winner comes
@@ -1441,12 +1385,11 @@ impl Constraints {
     }
 }
 
-/// What decided a join's expected type: the winning leaves of a vote, the
-/// root of the resolved result variable, or a result that was never a variable.
+/// What decided a join's expected type: the winning leaves of a vote, or
+/// the result's binding, which carries the cause.
 enum Basis {
     Vote(Vec<(ExprId, Ty)>),
-    Var(TyVar),
-    Fixed,
+    Bound,
 }
 
 /// Which "family" a join leaf votes for. `Named` leaves of one declaration
@@ -1532,11 +1475,23 @@ fn compose_reasons(expected_causes: &[Cause], siblings: &[Cause]) -> Vec<Cause> 
     reasons
 }
 
+/// The cause stored in the binding of `ty`'s variable, if `ty` is a bound
+/// variable and its binding has one.
+pub(crate) fn bound_cause(table: &mut InPlaceUnificationTable<TyVar>, ty: &Ty) -> Option<Cause> {
+    match ty {
+        Ty::Infer(var) => match table.probe_value(*var) {
+            TyVarValue::Known(_, cause) => cause,
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
 pub(crate) fn resolve_shallow(table: &mut InPlaceUnificationTable<TyVar>, ty: &Ty) -> Ty {
     let mut ty = ty.clone();
     while let Ty::Infer(var) = ty {
         match table.probe_value(var) {
-            TyVarValue::Known(known) => ty = known,
+            TyVarValue::Known(known, _) => ty = known,
             TyVarValue::Unknown | TyVarValue::UnknownNumber => break,
             TyVarValue::Safety(_) => unreachable!("a type variable holds a safety"),
         }
@@ -1595,7 +1550,7 @@ fn unresolved_numbers(
 pub(crate) fn resolve_fully(table: &mut InPlaceUnificationTable<TyVar>, ty: &Ty) -> Ty {
     match ty {
         Ty::Infer(var) => match table.probe_value(*var) {
-            TyVarValue::Known(known) => resolve_fully(table, &known),
+            TyVarValue::Known(known, _) => resolve_fully(table, &known),
             // Canonicalize so equal results stay equal across runs. The
             // number flavor stays in the table here — `resolve_finished`
             // is the one place it becomes a rendered `{number}`.
@@ -1713,7 +1668,7 @@ fn occurs(table: &mut InPlaceUnificationTable<TyVar>, var: TyVar, ty: &Ty) -> bo
                 return true;
             }
             match table.probe_value(*other) {
-                TyVarValue::Known(known) => occurs(table, var, &known),
+                TyVarValue::Known(known, _) => occurs(table, var, &known),
                 TyVarValue::Unknown | TyVarValue::UnknownNumber => false,
                 TyVarValue::Safety(_) => unreachable!("a type variable holds a safety"),
             }
