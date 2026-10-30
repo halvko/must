@@ -5,7 +5,7 @@
 use crate::BRACE_RULE;
 use crate::SyntaxKind;
 use crate::SyntaxKind::*;
-use crate::parser::{CompletedMarker, Parser};
+use crate::parser::{CompletedMarker, ErrorSlot, Parser};
 
 /// Tokens an expression parser must not consume on error: the enclosing
 /// construct knows what to do with them.
@@ -108,6 +108,8 @@ fn item(p: &mut Parser<'_>) {
     if has_eq || (node == TRAIT_ITEM && at_trait_constructor(p)) {
         if node == TRAIT_ITEM {
             trait_rhs(p, has_eq);
+        } else if node == TYPE_ITEM && p.at(STRUCT_KW) && at_type_literal_body(p) {
+            record_expr(p, FieldShape::Type);
         } else {
             expr(p);
         }
@@ -725,7 +727,13 @@ pub(crate) fn expr(p: &mut Parser<'_>) -> Option<CompletedMarker> {
 }
 
 fn expr_bp(p: &mut Parser<'_>, min_bp: u8) -> Option<CompletedMarker> {
-    let mut lhs = primary_expr(p)?;
+    let lhs = primary_expr(p)?;
+    Some(expr_continue(p, lhs, min_bp))
+}
+
+/// The postfix segments and binary operators after an already-parsed
+/// operand `lhs`.
+fn expr_continue(p: &mut Parser<'_>, mut lhs: CompletedMarker, min_bp: u8) -> CompletedMarker {
     loop {
         // Calls bind tighter than any binary operator.
         if p.at(L_PAREN) {
@@ -819,7 +827,7 @@ fn expr_bp(p: &mut Parser<'_>, min_bp: u8) -> Option<CompletedMarker> {
         }
         lhs = m.complete(p, BIN_EXPR);
     }
-    Some(lhs)
+    lhs
 }
 
 fn primary_expr(p: &mut Parser<'_>) -> Option<CompletedMarker> {
@@ -843,7 +851,7 @@ fn primary_expr(p: &mut Parser<'_>) -> Option<CompletedMarker> {
     // token with "expected an expression" — there is nothing else useful a
     // caller could do with it.
     if p.at(STRUCT_KW) && at_type_literal_body(p) {
-        return Some(record_expr(p));
+        return Some(record_expr(p, FieldShape::Value));
     }
     // `enum { ... }` — same dispatch scheme as `struct`. Grammar-wise it is
     // an expression (a `type` item's RHS parses with `expr`); validation
@@ -1997,11 +2005,19 @@ fn at_type_literal_body(p: &Parser<'_>) -> bool {
     p.nth(1) == L_BRACE || (p.nth(1) == COLON2 && p.nth(2) == L_ANGLE)
 }
 
+/// What a [`record_expr`]'s fields are: a `type` declaration's shape
+/// declares types, a construction literal defines values.
+#[derive(Clone, Copy)]
+enum FieldShape {
+    Type,
+    Value,
+}
+
 /// `struct { field, field: expr, ... }` — a record literal, with an
 /// optional `::<T, const N: usize>` binder between the keyword and the
 /// braces (`type Pair = struct::<T> { ... }`). The caller has already
 /// confirmed `p.at(STRUCT_KW)` and [`at_type_literal_body`].
-fn record_expr(p: &mut Parser<'_>) -> CompletedMarker {
+fn record_expr(p: &mut Parser<'_>, shape: FieldShape) -> CompletedMarker {
     let m = p.start();
     p.bump(STRUCT_KW);
     if p.at(COLON2) && p.nth(1) == L_ANGLE {
@@ -2015,7 +2031,7 @@ fn record_expr(p: &mut Parser<'_>) -> CompletedMarker {
             // Open-record marker: a bare token, validation rejects it later.
             p.bump(DOT3);
         } else {
-            record_expr_field(p);
+            record_expr_field(p, shape);
         }
     });
     m.complete(p, RECORD_EXPR)
@@ -2055,49 +2071,368 @@ fn enum_variant(p: &mut Parser<'_>) {
     m.complete(p, ENUM_VARIANT);
 }
 
-/// A record-literal field, the full member production `name[: Type][= value]`
-/// (the equals-defines respell, G12): `name = expr` defines,
-/// `name: Type` annotates a TYPE — everywhere, uniformly — `name: Type =
-/// expr` does both, and bare `name` is shorthand for `name = name`. The
-/// retired construction spelling `name: value` gets a targeted parse error
-/// on literal-shaped values (never a silent reinterpretation — the shape
-/// may return later as a value-type annotation); an identifier after the
-/// colon reads as the type it now is, and the value-less-field check
-/// carries the story from there. `pub` superset-parses here too (a `type`
-/// declaration's shape is written as a `struct` literal); validation
-/// rejects it everywhere fields appear.
-fn record_expr_field(p: &mut Parser<'_>) {
+/// A record-literal field, `name[: Type][= value]` (G12): `=` defines, `:`
+/// annotates a type, and bare `name` is shorthand for `name = name`. In a
+/// construction, a `:` operand only a value can be (`x: 1`, `x: p.x`) is the
+/// retired `name: value` spelling, reported on the `:`; in a `type`
+/// declaration, only a literal-shaped one is. `pub` superset-parses here, and
+/// validation rejects it.
+fn record_expr_field(p: &mut Parser<'_>, shape: FieldShape) -> RecordField {
     let m = p.start();
     p.eat(PUB_KW);
-    if p.at(IDENT) {
+    let name = if p.at(IDENT) {
         let nm = p.start();
         p.bump(IDENT);
-        nm.complete(p, NAME_REF);
+        Some(nm.complete(p, NAME_REF))
     } else {
         p.error("expected a field name");
-    }
-    if p.eat(COLON) {
-        if matches!(
-            p.current(),
-            INT_NUMBER | STRING | CHAR | TRUE_KW | FALSE_KW | MINUS
-        ) {
-            // The retired `name: value` construction spelling, recognized
-            // on a literal-shaped value before anything is consumed. A
-            // composite value (`x: foo()`, `x: fn () -> R { .. }`) is
-            // type-shaped at its first token and is left to the ordinary
-            // type grammar: by the time it gives itself away the field is
-            // already unrecoverable, so naming the retired spelling there
-            // buries the message in a cascade instead of replacing one.
-            p.error("record fields are defined with `=` (`name = value`); `:` annotates a type");
-            expr(p);
-        } else {
-            type_(p);
+        None
+    };
+    // The shorthand `name` defines a value.
+    let mut reading = Reading::Value;
+    if p.at(COLON) {
+        match shape {
+            FieldShape::Value => {
+                let colon = p.reserve_error();
+                p.bump(COLON);
+                reading = type_or_value(p).reading;
+                if reading == Reading::Value {
+                    colon.fill_replacing(
+                        p,
+                        crate::RETIRED_FIELD_COLON,
+                        crate::RETIRED_FIELD_COLON_FIX,
+                        " =",
+                    );
+                }
+            }
+            FieldShape::Type => {
+                if matches!(
+                    p.nth(1),
+                    INT_NUMBER | STRING | CHAR | TRUE_KW | FALSE_KW | MINUS
+                ) {
+                    p.error_replacing_current(
+                        crate::RETIRED_FIELD_COLON,
+                        crate::RETIRED_FIELD_COLON_FIX,
+                        " =",
+                    );
+                    p.bump(COLON);
+                    expr(p);
+                } else {
+                    p.bump(COLON);
+                    type_(p);
+                }
+            }
         }
     }
     if p.eat(EQ) {
         expr(p);
+        reading = Reading::Value;
     }
-    m.complete(p, RECORD_EXPR_FIELD);
+    RecordField {
+        node: m.complete(p, RECORD_EXPR_FIELD),
+        name,
+        reading,
+    }
+}
+
+/// A parsed [`record_expr_field`].
+struct RecordField {
+    node: CompletedMarker,
+    name: Option<CompletedMarker>,
+    /// A defining field (`= value`, the shorthand) makes the enclosing
+    /// `struct` operand ([`record_type_or_value`]) a value; an annotation
+    /// reads as its own operand.
+    reading: Reading,
+}
+
+// ---- a construction field's `:` operand: a type or a value ----
+
+/// What a [`type_or_value`] operand is by its form.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Reading {
+    /// Only a type is written this way (`!`, `fn(usize)`, `_`).
+    Type,
+    /// Only a value is (`1`, `f(x)`, `p.x - 1`).
+    Value,
+    /// Both are (`other`, `Vec::<usize>`, `[a; 3]`). It stays type syntax,
+    /// and hir decides by what its name resolves to.
+    Either,
+}
+
+/// A parsed [`type_or_value`] operand.
+struct Operand {
+    reading: Reading,
+    /// The innermost node [`Operand::read_as_value`] re-kinds, with the
+    /// borrows wrapped around it.
+    head: Option<CompletedMarker>,
+}
+
+impl Operand {
+    fn new(reading: Reading) -> Operand {
+        Operand {
+            reading,
+            head: None,
+        }
+    }
+
+    /// Re-kind the operand as the value it reads the same as. False, and
+    /// nothing changed, when it isn't one.
+    fn read_as_value(&self, p: &mut Parser<'_>) -> bool {
+        let Some(head) = self.head else {
+            return false;
+        };
+        if self.reading != Reading::Either
+            || !std::iter::successors(Some(head), |node| node.parent(p))
+                .all(|node| as_value_kind(node.kind(p)).is_some())
+        {
+            return false;
+        }
+        let mut node = head;
+        loop {
+            if let Some(kind) = as_value_kind(node.kind(p)) {
+                node.change_kind(p, kind);
+            }
+            match node.parent(p) {
+                Some(parent) => node = parent,
+                None => return true,
+            }
+        }
+    }
+}
+
+/// The value node a type node reads the same as, child for child.
+fn as_value_kind(kind: SyntaxKind) -> Option<SyntaxKind> {
+    Some(match kind {
+        PATH_TYPE => PATH_EXPR,
+        BORROW_TYPE => BORROW_EXPR,
+        RAW_PTR_TYPE => ADDR_OF_EXPR,
+        _ => return None,
+    })
+}
+
+/// The operand of a construction field's `:`, parsed once as a type or a
+/// value: a cover grammar, the superset of both. It is decided by form as
+/// soon as the syntax can tell (a literal, a call, an operator; a `fn` with
+/// no body). A form both spell the same is kept as type syntax and read
+/// [`Reading::Either`], for name resolution to settle.
+fn type_or_value(p: &mut Parser<'_>) -> Operand {
+    let reading = match p.current() {
+        IDENT => return path_type_or_value(p),
+        L_BRACKET => return array_type_or_value(p),
+        STRUCT_KW if at_type_literal_body(p) => return record_type_or_value(p),
+        FN_KW => return fn_type_or_value(p),
+        UNSAFE_KW if p.nth(1) == FN_KW => return fn_type_or_value(p),
+        // `()` has no name to decide by: it is the unit type.
+        L_PAREN if p.nth(1) == R_PAREN => Reading::Type,
+        // The retired prefix borrow, `&T` and `&x` alike.
+        AMP => Reading::Either,
+        _ if at_expr_start(p) => {
+            expr(p);
+            return Operand::new(Reading::Value);
+        }
+        _ => Reading::Type,
+    };
+    type_(p);
+    Operand::new(reading)
+}
+
+/// A [`type_or_value`] operand starting with a name. A variant path
+/// (`Shape::Circle`) and a segment after an owner's turbofish
+/// (`Option::<usize>::Some`) are values by form.
+fn path_type_or_value(p: &mut Parser<'_>) -> Operand {
+    let m = p.start();
+    name_ref(p);
+    if p.at(COLON2) {
+        p.bump(COLON2);
+        if p.at(L_ANGLE) {
+            generic_arg_list(p);
+            if p.at(COLON2) {
+                trailing_qualified_segment(p);
+                let node = m.complete(p, PATH_EXPR);
+                return value_from(p, node);
+            }
+        } else if p.at(IDENT) {
+            name_ref(p);
+            member_generic_args(p);
+            let node = m.complete(p, PATH_EXPR);
+            return value_from(p, node);
+        } else {
+            p.error("expected a variant name after `::`");
+        }
+    } else if let Some(group) = scan_bare_angle_group(p) {
+        // The bare-angle typo for `::<` (`Pair<usize, bool>`), which a type
+        // and a generic call share; anything else after the group makes the
+        // `<` a comparison.
+        let ends_operand = match p.nth(group.len) {
+            EQ | COMMA | R_BRACE | EOF => true,
+            DOT => p.nth(group.len + 1) == AMP,
+            _ => false,
+        };
+        if ends_operand {
+            generic_arg_list(p);
+        } else if bare_angle_generic_args_expr(p) {
+            generic_arg_list(p);
+            trailing_qualified_segment(p);
+            let node = m.complete(p, PATH_EXPR);
+            return value_from(p, node);
+        }
+    }
+    let head = m.complete(p, PATH_TYPE);
+    type_or_value_postfix(p, head, Reading::Either)
+}
+
+/// A `[` operand: the array type `[T; N]` and the repeat value `[x; 3]`
+/// share a form. A list (`[a, b]`), a value element, or a length a type
+/// can't have (`[x; n + 1]`) makes it a value.
+fn array_type_or_value(p: &mut Parser<'_>) -> Operand {
+    let m = p.start();
+    p.bump(L_BRACKET);
+    if p.eat(R_BRACKET) {
+        let node = m.complete(p, ARRAY_EXPR);
+        return value_from(p, node);
+    }
+    let element = type_or_value(p);
+    let type_length = p.at(SEMICOLON)
+        && match p.nth(1) {
+            INT_NUMBER | STRING | CHAR | TRUE_KW | FALSE_KW | IDENT => p.nth(2) == R_BRACKET,
+            CONST_KW => true,
+            _ => false,
+        };
+    if type_length && element.reading != Reading::Value {
+        let reading = element.reading;
+        p.bump(SEMICOLON);
+        array_len_arg(p);
+        p.expect_after_prev(R_BRACKET);
+        let head = m.complete(p, ARRAY_TYPE);
+        return type_or_value_postfix(p, head, reading);
+    }
+    element.read_as_value(p);
+    if p.eat(SEMICOLON) {
+        expr(p);
+        p.expect_after_prev(R_BRACKET);
+    } else {
+        list_separator(p, R_BRACKET);
+        comma_list(p, R_BRACKET, |p| {
+            expr(p);
+        });
+    }
+    let node = m.complete(p, ARRAY_EXPR);
+    value_from(p, node)
+}
+
+/// A `struct { ... }` operand: a record type and a record value share the
+/// form until a field defines a value (`a = 1`, or the shorthand `a`). Until
+/// then each field's operand is its type, and it becomes the record type.
+fn record_type_or_value(p: &mut Parser<'_>) -> Operand {
+    let m = p.start();
+    p.bump(STRUCT_KW);
+    if p.at(COLON2) && p.nth(1) == L_ANGLE {
+        generic_param_list(p);
+    }
+    let mut reading = Reading::Either;
+    let mut fields = Vec::new();
+    if p.expect(L_BRACE, "`{`") {
+        comma_list(p, R_BRACE, |p| {
+            if p.at(DOT3) {
+                // Open-record marker: a bare token, validation rejects it later.
+                p.bump(DOT3);
+                return;
+            }
+            let field = record_expr_field(p, FieldShape::Value);
+            reading = match (reading, field.reading) {
+                (Reading::Value, _) | (_, Reading::Value) => Reading::Value,
+                (Reading::Type, _) | (_, Reading::Type) => Reading::Type,
+                _ => Reading::Either,
+            };
+            fields.push(field);
+        });
+    }
+    if reading == Reading::Value {
+        let node = m.complete(p, RECORD_EXPR);
+        return value_from(p, node);
+    }
+    for field in fields {
+        field.node.change_kind(p, RECORD_TYPE_FIELD);
+        if let Some(name) = field.name {
+            name.change_kind(p, NAME);
+        }
+    }
+    let head = m.complete(p, RECORD_TYPE);
+    type_or_value_postfix(p, head, reading)
+}
+
+/// A `fn` operand: a fn type, unless a `{ }` body follows its signature.
+/// Then it was a fn literal, which only a value can be; its parameters were
+/// read as a type's, so the literal is kept as an error node, and the `:`
+/// error says what to write.
+fn fn_type_or_value(p: &mut Parser<'_>) -> Operand {
+    let mut deferred = Vec::new();
+    let ty = anon_fn_type_deferring(p, Some(&mut deferred));
+    if p.at(L_BRACE) {
+        let m = ty.precede(p);
+        block_expr(p);
+        m.complete(p, ERROR);
+        return Operand::new(Reading::Value);
+    }
+    for (slot, msg) in deferred {
+        slot.fill(p, msg);
+    }
+    type_or_value_postfix(p, ty, Reading::Type)
+}
+
+/// The postfix borrows a type and a value share (`.&`, `.&mut::<@a>`,
+/// `.&raw`) after `head`. If the operand then goes on as only a value can
+/// (`.x`, a call, an operator), it is re-kinded as that value and parsed on
+/// as an expression.
+fn type_or_value_postfix(p: &mut Parser<'_>, head: CompletedMarker, reading: Reading) -> Operand {
+    let mut lhs = head;
+    while p.at(DOT) && p.nth(1) == AMP {
+        let m = lhs.precede(p);
+        p.bump(DOT);
+        p.bump(AMP);
+        lhs = if p.eat(RAW_KW) {
+            m.complete(p, RAW_PTR_TYPE)
+        } else {
+            p.eat(MUT_KW);
+            borrow_op_generic_args(p);
+            m.complete(p, BORROW_TYPE)
+        };
+    }
+    let operand = Operand {
+        reading,
+        head: Some(head),
+    };
+    if at_value_continuation(p) && operand.read_as_value(p) {
+        return value_from(p, lhs);
+    }
+    operand
+}
+
+/// Whether the token after an operand can only go on as an expression: a
+/// call, an index, a field or deref, or a binary operator.
+fn at_value_continuation(p: &Parser<'_>) -> bool {
+    matches!(
+        p.current(),
+        L_PAREN
+            | L_BRACKET
+            | DOT
+            | EQ2
+            | NEQ
+            | L_ANGLE
+            | R_ANGLE
+            | LTEQ
+            | GTEQ
+            | PLUS
+            | MINUS
+            | STAR
+            | SLASH
+    )
+}
+
+/// The rest of an operand that is a value from `lhs` on.
+fn value_from(p: &mut Parser<'_>, lhs: CompletedMarker) -> Operand {
+    expr_continue(p, lhs, 0);
+    Operand::new(Reading::Value)
 }
 
 fn block_expr(p: &mut Parser<'_>) -> CompletedMarker {
@@ -2261,6 +2596,13 @@ fn borrow_op_generic_args(p: &mut Parser<'_>) {
 /// parameter list of bare types, and an optional return type —
 /// `unsafe fn(u8.&raw, usize) -> isize`.
 fn anon_fn_type(p: &mut Parser<'_>) -> CompletedMarker {
+    anon_fn_type_deferring(p, None)
+}
+
+/// [`anon_fn_type`], holding the errors only a type has (a missing `(`, a
+/// named parameter) in `deferred` rather than reporting them, for a caller
+/// that may yet read the `fn` as a literal.
+fn anon_fn_type_deferring(p: &mut Parser<'_>, mut deferred: Deferred<'_>) -> CompletedMarker {
     let m = p.start();
     p.eat(UNSAFE_KW);
     p.bump(FN_KW);
@@ -2270,9 +2612,13 @@ fn anon_fn_type(p: &mut Parser<'_>) -> CompletedMarker {
         generic_param_list(p);
     }
     if p.at(L_PAREN) {
-        fn_type_param_list(p);
+        fn_type_param_list(p, deferred);
     } else {
-        p.error("expected `(`: function types are written `fn(...) -> ...`");
+        defer_error(
+            p,
+            &mut deferred,
+            "expected `(`: function types are written `fn(...) -> ...`",
+        );
     }
     if p.at(THIN_ARROW) {
         ret_type(p);
@@ -2291,10 +2637,10 @@ fn anon_fn_type(p: &mut Parser<'_>) -> CompletedMarker {
 /// fn-pointer types (E0561) — and the shapes that only a pattern could mean
 /// are refused where they are written instead of being reinterpreted as
 /// something else.
-fn fn_type_param_list(p: &mut Parser<'_>) {
+fn fn_type_param_list(p: &mut Parser<'_>, mut deferred: Deferred<'_>) {
     let m = p.start();
     p.bump(L_PAREN);
-    comma_list(p, R_PAREN, fn_type_param);
+    comma_list(p, R_PAREN, |p| fn_type_param(p, deferred.as_deref_mut()));
     m.complete(p, PARAM_LIST);
 }
 
@@ -2302,12 +2648,13 @@ fn fn_type_param_list(p: &mut Parser<'_>) {
 /// a pattern that parsed as a type and then met its colon (`struct { x }:
 /// T`), is refused once and consumed, so one written mistake costs the
 /// reader one message, not the rest of the list.
-fn fn_type_param(p: &mut Parser<'_>) {
+fn fn_type_param(p: &mut Parser<'_>, mut deferred: Deferred<'_>) {
     let m = p.start();
     let at_name = |p: &Parser<'_>| matches!(p.current(), IDENT | HOLE) && p.nth(1) == COLON;
+    let mut refuse = |p: &mut Parser<'_>| defer_error(p, &mut deferred, FN_TYPE_PARAM_IS_BARE);
     let refused = p.at(MUT_KW) || at_name(p);
     if refused {
-        p.error(FN_TYPE_PARAM_IS_BARE);
+        refuse(p);
         p.eat(MUT_KW);
         if at_name(p) {
             p.bump_any();
@@ -2317,12 +2664,23 @@ fn fn_type_param(p: &mut Parser<'_>) {
     type_(p);
     if p.at(COLON) {
         if !refused {
-            p.error(FN_TYPE_PARAM_IS_BARE);
+            refuse(p);
         }
         p.bump(COLON);
         type_(p);
     }
     m.complete(p, PARAM);
+}
+
+/// Errors held back from a fn type's parse ([`anon_fn_type_deferring`]).
+type Deferred<'a> = Option<&'a mut Vec<(ErrorSlot, &'static str)>>;
+
+/// Report `msg` here, or hold it in a slot when the caller defers.
+fn defer_error(p: &mut Parser<'_>, deferred: &mut Deferred<'_>, msg: &'static str) {
+    match deferred {
+        Some(slots) => slots.push((p.reserve_error(), msg)),
+        None => p.error(msg),
+    }
 }
 
 const FN_TYPE_PARAM_IS_BARE: &str =

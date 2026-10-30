@@ -29,6 +29,16 @@ pub use validation::{
 /// variants derived, keeping the two from drifting apart.
 pub(crate) const BRACE_RULE: &str = "function bodies are blocks";
 
+/// A construction field written `name: value`. The parser reports it when
+/// the operand can only be a value; hir does when a name decides it.
+pub const RETIRED_FIELD_COLON: &str =
+    "record fields are defined with `=` (`name = value`); `:` annotates a type";
+/// The quick fix for [`RETIRED_FIELD_COLON`].
+pub const RETIRED_FIELD_COLON_FIX: &str = "Replace `:` with `=`";
+/// A construction field written `name: Type` with no value.
+pub const FIELD_TYPE_NO_VALUE: &str =
+    "this field has a type but no value; write `name: Type = value` (or `name = value`)";
+
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct SyntaxError {
     pub message: String,
