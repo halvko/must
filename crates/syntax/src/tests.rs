@@ -16833,6 +16833,20 @@ fn a_comparison_a_list_or_a_defining_record_after_a_colon_is_a_value() {
 }
 
 #[test]
+fn a_field_operand_a_value_could_spell_is_left_to_hir() {
+    // A name, a generic path, a repeat array and a borrow are each a type
+    // or a value by what their name resolves to, which hir judges; `()`
+    // and a fn type with no body are types, so those fields have no value.
+    check_errors(
+        "static f = fn { g(struct { a: other, b: Vec::<usize>, c: [n; 3], d: n.&, e: (), h: fn() }) };",
+        expect![[r#"
+            73..78: this field has a type but no value; write `name: Type = value` (or `name = value`)
+            80..87: this field has a type but no value; write `name: Type = value` (or `name = value`)
+        "#]],
+    );
+}
+
+#[test]
 fn a_record_type_after_a_fields_colon_is_a_record_type() {
     // Before its `=`, `struct { a: usize }` reads as either; no field
     // defines a value, so it is the record type.
@@ -16910,8 +16924,8 @@ fn deeply_nested_field_operands_parse_once() {
         field = format!("f: [usize; const {{ g(struct {{ {field} }}) }}]");
     }
     let parse = crate::parse(&format!("static s = g(struct {{ {field} }});"));
-    // Only the innermost operand is a value by its form; each `f:` reads as
-    // an array type, with no value.
+    // Only the innermost operand is a value by its form; each `f:` is an
+    // array type or value by what `usize` names, which hir judges.
     let count = |prefix: &str| {
         parse
             .errors()
@@ -16921,8 +16935,8 @@ fn deeply_nested_field_operands_parse_once() {
     };
     let retired = count("record fields are defined with `=`");
     let valueless = count("this field has a type but no value");
-    assert_eq!((retired, valueless), (1, 30), "{:?}", parse.errors());
-    assert_eq!(parse.errors().len(), 31, "{:?}", parse.errors());
+    assert_eq!((retired, valueless), (1, 0), "{:?}", parse.errors());
+    assert_eq!(parse.errors().len(), 1, "{:?}", parse.errors());
 }
 
 #[test]
@@ -16956,7 +16970,6 @@ fn an_unclosed_turbofish_in_a_field_type_ends_at_the_literal() {
     check_errors(
         "static f = fn (q: usize) { struct { p: Vec::<usize = q, n: 1 }; };",
         expect![[r#"
-            36..57: this field has a type but no value; write `name: Type = value` (or `name = value`)
             57..58: expected `,` or `>`
         "#]],
     );
@@ -17003,12 +17016,11 @@ fn a_struct_type_in_a_fn_signature_is_not_a_fn_body() {
 
 #[test]
 fn a_record_field_missing_its_comma_keeps_the_ordinary_errors() {
-    // `n: usize` stays an annotation with no value, and the missing `,` is
-    // the only other error.
+    // The comma error is the only syntax error: `n: usize` stays an
+    // annotation, and hir reports that it has no value.
     check_errors(
         "static p = struct { n: usize m = 1 };",
         expect![[r#"
-            20..28: this field has a type but no value; write `name: Type = value` (or `name = value`)
             29..30: expected `,` or `}`
         "#]],
     );

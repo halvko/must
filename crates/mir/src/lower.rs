@@ -204,9 +204,16 @@ impl LowerCtx<'_> {
                     push_trap(&mut self.value_traps, *expr, diag.message());
                 }
                 // A bare type name read as a value: the name itself is the
-                // value that cannot be produced.
-                InferenceDiagnostic::TypeNotValue { expr, .. } => {
+                // value that cannot be produced. So is `other` in an
+                // undecided record field (`x: other`) that reads as a value.
+                InferenceDiagnostic::TypeNotValue { expr, .. }
+                | InferenceDiagnostic::FieldColonValue { expr } => {
                     push_trap(&mut self.value_traps, *expr, diag.message());
+                }
+                // `x: Type` with no value: there is nothing to evaluate, so
+                // the field traps before the type name is read.
+                InferenceDiagnostic::FieldTypeNoValue { expr } => {
+                    push_trap(&mut self.entry_traps, *expr, diag.message());
                 }
                 // A construction call with the wrong arity: like
                 // `ArgCountMismatch`, the call operation itself is broken.

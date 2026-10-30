@@ -64,17 +64,16 @@ pub(crate) fn validate(root: &SyntaxNode) -> Vec<SyntaxError> {
             // A CONSTRUCTION literal (any record expr that is not a `type`
             // declaration's RHS) must define every field: an annotation
             // with no value has nothing to construct from. Type-decl RHS
-            // fields are the opposite (annotation-only) — hir judges those.
-            let is_type_decl_rhs = record_expr
-                .syntax()
-                .parent()
-                .is_some_and(|p| ast::TypeItem::can_cast(p.kind()));
+            // fields are the opposite (annotation-only) — hir judges those,
+            // and any `x: other`-shaped field, which may be a value.
+            let is_type_decl_rhs = record_expr.is_type_decl_shape();
             for field in record_expr.fields() {
                 reject_pub_field(field.pub_token(), &mut errors);
                 if !is_type_decl_rhs
                     && field.ty().is_some()
                     && field.eq_token().is_none()
                     && field.expr().is_none()
+                    && field.deciding_name().is_none()
                 {
                     errors.push(SyntaxError {
                         message: crate::FIELD_TYPE_NO_VALUE.to_owned(),

@@ -2325,6 +2325,44 @@ static main = fn {
 }
 
 #[test]
+fn an_undecided_record_field_traps_with_the_diagnostic_message() {
+    // `x: n` and `x: n.&::<@_>` (values) and `x: usize` (a type) each crash
+    // with exactly the text the squiggle shows.
+    check_run(
+        r#"
+static f = fn (n: usize) -> usize { struct { x: n }.x };
+static main = fn {
+    print("before");
+    f(1);
+};
+"#,
+        "main()",
+        expect![[r#"
+            output: "before"
+            error[Trap]: record fields are defined with `=` (`name = value`); `:` annotates a type
+        "#]],
+    );
+    check_run(
+        r#"
+static g = fn -> usize { struct { x: usize }.x };
+"#,
+        "g()",
+        expect![[r#"
+            error[Trap]: this field has a type but no value; write `name: Type = value` (or `name = value`)
+        "#]],
+    );
+    check_run(
+        r#"
+static h = fn (n: usize) -> usize { struct { x: n.&::<@_> }; 1 };
+"#,
+        "h(1)",
+        expect![[r#"
+            error[Trap]: record fields are defined with `=` (`name = value`); `:` annotates a type
+        "#]],
+    );
+}
+
+#[test]
 fn match_on_a_reassigned_value_round_trips() {
     // Construct, reassign another variant, dispatch on the tag — the full
     // round trip.

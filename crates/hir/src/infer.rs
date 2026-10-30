@@ -15,8 +15,8 @@ use la_arena::ArenaMap;
 use rustc_hash::FxHashMap;
 
 use crate::body::{
-    BindingId, Body, ExprData, ExprId, GenericArgData, LiteralData, MatchArm, PatData, PatId, Stmt,
-    body,
+    BindingId, Body, ExprData, ExprId, GenericArgData, LiteralData, MatchArm, PatData, PatId,
+    RecordLitField, Stmt, Undecided, body,
 };
 use crate::constraint::{
     self, Cause, Constraints, Join, RegionConstraint, RegionConstraintReason, Relation, Witness,
@@ -379,6 +379,17 @@ pub enum InferenceDiagnostic {
         expr: ExprId,
         /// The receiver — carries the squiggle: the annotation goes there.
         receiver: ExprId,
+    },
+    /// An undecided construction field whose deciding name resolves to a
+    /// value: the retired spelling of `name = value`.
+    FieldColonValue {
+        /// The deciding name (the squiggle goes on the field's `:`).
+        expr: ExprId,
+    },
+    /// A construction field written `name: Type` with no value.
+    FieldTypeNoValue {
+        /// The type name (the squiggle covers the whole field).
+        expr: ExprId,
     },
     /// A bare use of a `type` item in expression position. Types are not
     /// first-class values; the one expression position a type name may
@@ -1499,6 +1510,8 @@ impl InferenceDiagnostic {
             | InferenceDiagnostic::RecordLitExtraField { expr, .. }
             | InferenceDiagnostic::NoSuchField { expr, .. }
             | InferenceDiagnostic::TypeNotValue { expr, .. }
+            | InferenceDiagnostic::FieldColonValue { expr }
+            | InferenceDiagnostic::FieldTypeNoValue { expr }
             | InferenceDiagnostic::TypeCtorArgCount { expr, .. }
             | InferenceDiagnostic::ElidedVariantNoEnum { expr, .. }
             | InferenceDiagnostic::NoSuchVariant { expr, .. }
@@ -1868,6 +1881,8 @@ impl InferenceDiagnostic {
             InferenceDiagnostic::TypeNotValue { name, .. } => {
                 format!("`{name}` is a type, not a value")
             }
+            InferenceDiagnostic::FieldColonValue { .. } => syntax::RETIRED_FIELD_COLON.to_owned(),
+            InferenceDiagnostic::FieldTypeNoValue { .. } => syntax::FIELD_TYPE_NO_VALUE.to_owned(),
             InferenceDiagnostic::TypeCtorArgCount { item, found, .. } => format!(
                 "`{}` takes exactly one argument (its underlying `struct` value), found {found}",
                 item.display_name()
@@ -3837,6 +3852,8 @@ impl<'db> InferCtx<'db> {
                 | InferenceDiagnostic::AssignToBuiltin { .. }
                 | InferenceDiagnostic::FieldOnUnknownType { .. }
                 | InferenceDiagnostic::TypeNotValue { .. }
+                | InferenceDiagnostic::FieldColonValue { .. }
+                | InferenceDiagnostic::FieldTypeNoValue { .. }
                 | InferenceDiagnostic::TypeCtorArgCount { .. }
                 | InferenceDiagnostic::NoSuchVariant { .. }
                 | InferenceDiagnostic::ElidedVariantNoEnum { expected: None, .. }
@@ -4041,6 +4058,56 @@ impl<'db> InferCtx<'db> {
     /// arithmetic operand position) starts as.
     fn fresh_number_var(&mut self) -> Ty {
         Ty::Infer(self.table.new_key(TyVarValue::UnknownNumber))
+    }
+
+    /// How a record literal's field reads: a value (with its `: Type`
+    /// ascription) or a type with no value. An undecided field (`x: other`)
+    /// is judged by what its deciding name resolves to; an unknown name
+    /// reads as a value, and its unresolved-name error says why.
+    fn field_reading(&mut self, field: &RecordLitField) -> FieldReading {
+        let names_value = match self.resolutions.get(field.value) {
+            _ if field.undecided.is_none() => None,
+            Some(Resolution::TypeItem(_) | Resolution::TraitItem(_)) => Some(false),
+            None => match &self.body.exprs[field.value] {
+                ExprData::NameRef(name)
+                    if builtin_type_by_name(name).is_some()
+                        || self.type_params.types.contains_key(name) =>
+                {
+                    Some(false)
+                }
+                _ => None,
+            },
+            Some(_) => Some(true),
+        };
+        let lower = |this: &mut Self| {
+            field
+                .type_ref
+                .clone()
+                .map(|type_ref| this.lower_type_ref(&type_ref))
+        };
+        match names_value {
+            Some(true) => {
+                (self.result.diagnostics)
+                    .push(InferenceDiagnostic::FieldColonValue { expr: field.value });
+                // The value is the name itself only when nothing more is
+                // written (`x: other`). Past it (`x: other.&`) the value is
+                // not lowered, so the field is left unknown.
+                if field.undecided == Some(Undecided::Whole) {
+                    return FieldReading::Value(None);
+                }
+                self.result.type_of_expr.insert(field.value, Ty::Error);
+                FieldReading::TypeOnly(Ty::Error)
+            }
+            Some(false) => {
+                (self.result.diagnostics)
+                    .push(InferenceDiagnostic::FieldTypeNoValue { expr: field.value });
+                let ty = lower(self).unwrap_or(Ty::Error);
+                self.result.type_of_expr.insert(field.value, ty.clone());
+                FieldReading::TypeOnly(ty)
+            }
+            None if field.undecided.is_some() => FieldReading::Value(None),
+            None => FieldReading::Value(lower(self)),
+        }
     }
 
     /// Infer the arguments of an already-broken call freely, then silence
@@ -4781,10 +4848,10 @@ impl<'db> InferCtx<'db> {
                             });
                     }
                     for (i, field) in fields.iter().enumerate() {
-                        let ascription = field
-                            .type_ref
-                            .clone()
-                            .map(|type_ref| self.lower_type_ref(&type_ref));
+                        let ascription = match self.field_reading(field) {
+                            FieldReading::Value(ascription) => ascription,
+                            FieldReading::TypeOnly(_) => continue,
+                        };
                         match expected_rec.field_ty(&field.name) {
                             Some(field_ty) => match &ascription {
                                 Some(ascribed) => {
@@ -4829,17 +4896,14 @@ impl<'db> InferCtx<'db> {
                 let field_tys = fields
                     .iter()
                     .map(|field| {
-                        let expected_field = match &field.type_ref {
-                            Some(type_ref) => {
-                                let type_ref = type_ref.clone();
-                                self.lower_type_ref(&type_ref)
+                        let ty = match self.field_reading(field) {
+                            FieldReading::Value(ascription) => {
+                                let expected_field = ascription.unwrap_or_else(|| self.fresh_var());
+                                self.infer_expr(field.value, &expected_field)
                             }
-                            None => self.fresh_var(),
+                            FieldReading::TypeOnly(ty) => ty,
                         };
-                        (
-                            field.name.clone(),
-                            self.infer_expr(field.value, &expected_field),
-                        )
+                        (field.name.clone(), ty)
                     })
                     .collect();
                 Ty::record(field_tys)
@@ -11034,4 +11098,12 @@ fn named_with_fresh_args(db: &dyn Db, loc: &ItemLoc, fresh: &mut dyn FnMut() -> 
         decl: loc.clone(),
         args,
     }
+}
+
+/// See [`InferCtx::field_reading`].
+enum FieldReading {
+    /// The value checks against the ascription, when there is one.
+    Value(Option<Ty>),
+    /// A type with no value; the field has this type.
+    TypeOnly(Ty),
 }
