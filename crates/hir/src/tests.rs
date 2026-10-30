@@ -19260,3 +19260,80 @@ static y = fn () { x(2) };
         "#]],
     );
 }
+
+// ---- place chains ---------------------------------------------------------
+
+/// Every field and index expression as [`crate::Body::place_chain`] takes
+/// it apart: `range 'snippet': kind 'root' [steps, outermost first]`.
+fn check_place_chains(text: &str, expect: Expect) {
+    use crate::body::{ExprData, PlaceChain, PlaceRoot};
+    let db = RootDatabase::default();
+    let file = SourceFile::new(&db, "test.must".to_owned(), text.to_owned());
+    let mut rows: Vec<(u32, String)> = Vec::new();
+    for &item in crate::file_item_ids(&db, file) {
+        let (body, source_map) = crate::body_with_source_map(&db, item);
+        let range = |expr| source_map.node_for_expr(expr).unwrap().text_range();
+        let snippet = |expr| &text[range(expr)];
+        for (expr, data) in body.exprs.iter() {
+            if !matches!(data, ExprData::Field { .. } | ExprData::Index { .. }) {
+                continue;
+            }
+            let PlaceChain { root, kind, steps } = body.place_chain(expr);
+            assert_eq!(body.place_root(expr), (root, kind));
+            let kind = match kind {
+                PlaceRoot::Deref { receiver } => format!("deref of '{}'", snippet(receiver)),
+                PlaceRoot::Name(name) => format!("name `{name}`"),
+                PlaceRoot::Temporary(_) => "temporary".to_owned(),
+                PlaceRoot::Missing => "missing".to_owned(),
+                PlaceRoot::Value => "value".to_owned(),
+            };
+            let steps: Vec<_> = steps.iter().map(|&step| snippet(step)).collect();
+            rows.push((
+                range(expr).start().into(),
+                format!(
+                    "{:?} '{}': {kind} '{}' {steps:?}\n",
+                    range(expr),
+                    snippet(expr),
+                    snippet(root)
+                ),
+            ));
+        }
+    }
+    rows.sort();
+    expect.assert_eq(&rows.into_iter().map(|(_, row)| row).collect::<String>());
+}
+
+/// A chain stops at its outermost deref, and its root is classified once
+/// for every layer: a name, a deref, a borrowed value's temporary, or a
+/// value read with no storage of its own.
+#[test]
+fn place_chains_stop_at_the_outermost_deref_and_classify_the_root() {
+    let text = r#"
+type In = struct { b: [usize; 2] };
+type Out = struct { a: In };
+static mk = fn() -> Out { Out(struct { a = In(struct { b = [1, 2] }) }) };
+static f = fn::<@a, @b>(o: Out, r: Out.&mut::<@a>.&mut::<@b>) -> usize {
+    let x = o.a.b[0];
+    let y = r.*.*.a.b[1].&;
+    mk().a.b[0].& .* + mk().a.b[1] + x + y.*
+};
+"#;
+    check_diagnostics(text, expect![""]);
+    check_place_chains(
+        text,
+        expect![[r#"
+            226..229 'o.a': name `o` 'o' ["o.a"]
+            226..231 'o.a.b': name `o` 'o' ["o.a.b", "o.a"]
+            226..234 'o.a.b[0]': name `o` 'o' ["o.a.b[0]", "o.a.b", "o.a"]
+            248..255 'r.*.*.a': deref of 'r.*' 'r.*.*' ["r.*.*.a"]
+            248..257 'r.*.*.a.b': deref of 'r.*' 'r.*.*' ["r.*.*.a.b", "r.*.*.a"]
+            248..260 'r.*.*.a.b[1]': deref of 'r.*' 'r.*.*' ["r.*.*.a.b[1]", "r.*.*.a.b", "r.*.*.a"]
+            268..274 'mk().a': temporary 'mk()' ["mk().a"]
+            268..276 'mk().a.b': temporary 'mk()' ["mk().a.b", "mk().a"]
+            268..279 'mk().a.b[0]': temporary 'mk()' ["mk().a.b[0]", "mk().a.b", "mk().a"]
+            287..293 'mk().a': value 'mk()' ["mk().a"]
+            287..295 'mk().a.b': value 'mk()' ["mk().a.b", "mk().a"]
+            287..298 'mk().a.b[1]': value 'mk()' ["mk().a.b[1]", "mk().a.b", "mk().a"]
+        "#]],
+    );
+}

@@ -16,7 +16,7 @@ use rustc_hash::FxHashMap;
 
 use crate::body::{
     BindingId, Body, ExprData, ExprId, GenericArgData, LiteralData, MatchArm, PatData, PatId,
-    RecordLitField, Stmt, Undecided, body,
+    PlaceRoot, RecordLitField, Stmt, Undecided, body,
 };
 use crate::constraint::{
     self, Cause, Constraints, Join, RegionConstraint, RegionConstraintReason, Relation, Witness,
@@ -2369,14 +2369,14 @@ impl InferenceDiagnostic {
 pub fn mut_borrow_refused<'db>(db: &'db dyn Db, item: ItemId<'db>, place: ExprId) -> bool {
     let body = body(db, item);
     let types = &infer(db, item).type_of_expr;
-    let root = body.place_root(place);
-    match &body.exprs[root] {
-        ExprData::NameRef(_) => match resolutions(db, item).get(root) {
+    let (root, kind) = body.place_root(place);
+    match kind {
+        PlaceRoot::Name(_) => match resolutions(db, item).get(root) {
             Some(Resolution::Local(binding)) => !body.bindings[*binding].mutable,
             Some(Resolution::Item(_)) => true,
             _ => false,
         },
-        ExprData::Deref { receiver } if matches!(types.get(*receiver), Some(Ty::RawPtr { .. })) => {
+        PlaceRoot::Deref { receiver } if matches!(types.get(receiver), Some(Ty::RawPtr { .. })) => {
             true
         }
         _ => mut_reborrow_refused(db, item, place),
@@ -2411,12 +2411,10 @@ fn mut_reborrow_refused<'db>(db: &'db dyn Db, item: ItemId<'db>, place: ExprId) 
 /// [`InferCtx::shared_step_governing`]'s walk, reading each deref's
 /// receiver type through `ty_of`.
 fn shared_step(body: &Body, place: ExprId, ty_of: &mut dyn FnMut(ExprId) -> Ty) -> Option<Ty> {
-    match &body.exprs[place] {
-        ExprData::Field { receiver, .. } => shared_step(body, *receiver, ty_of),
-        ExprData::Index { base, .. } => shared_step(body, *base, ty_of),
-        ExprData::Deref { receiver } => match ty_of(*receiver) {
+    match body.place_root(place).1 {
+        PlaceRoot::Deref { receiver } => match ty_of(receiver) {
             Ty::RawPtr { .. } => None,
-            Ty::Borrow { mutable: true, .. } => shared_step(body, *receiver, ty_of),
+            Ty::Borrow { mutable: true, .. } => shared_step(body, receiver, ty_of),
             shared @ Ty::Borrow { .. } => Some(shared),
             // An unknown or broken receiver: the read already
             // carries its own diagnostic.
@@ -2969,18 +2967,6 @@ impl<'db> InferCtx<'db> {
         })
     }
 
-    /// The root of a place chain: `place` with its field and index steps
-    /// peeled off.
-    fn place_root(&self, mut place: ExprId) -> ExprId {
-        loop {
-            match &self.body.exprs[place] {
-                ExprData::Field { receiver, .. } => place = *receiver,
-                ExprData::Index { base, .. } => place = *base,
-                _ => return place,
-            }
-        }
-    }
-
     /// The name of `binding` (the local `place` is rooted at) and the text
     /// of `place`, when the binding is not `mut`: what a refused borrow or
     /// assignment through `place` reports.
@@ -3054,9 +3040,9 @@ impl<'db> InferCtx<'db> {
         // flavor: a shared borrow of a shared place is exactly what a
         // shared borrow is for.
         let governing = mutable.then(|| self.shared_step_governing(place)).flatten();
-        let root = self.place_root(place);
-        match &self.body.exprs[root] {
-            ExprData::NameRef(name) => match self.resolutions.get(root) {
+        let (root, kind) = self.body.place_root(place);
+        match kind {
+            PlaceRoot::Name(name) => match self.resolutions.get(root) {
                 Some(Resolution::Local(binding)) => {
                     if mutable && let Some((name, place)) = self.immutable_root(*binding, place) {
                         self.result
@@ -3093,7 +3079,7 @@ impl<'db> InferCtx<'db> {
                         .diagnostics
                         .push(InferenceDiagnostic::BorrowNonPlace {
                             expr: borrow,
-                            name: name.clone(),
+                            name: name.to_owned(),
                             what,
                         });
                 }
@@ -3103,11 +3089,11 @@ impl<'db> InferCtx<'db> {
             // this outermost deref. A RAW parent is refused outright:
             // `.&raw` is deliberately not a decayed safe borrow, so a
             // safe borrow may not be minted from one.
-            ExprData::Deref { receiver } => {
+            PlaceRoot::Deref { receiver } => {
                 let receiver_ty = self
                     .result
                     .type_of_expr
-                    .get(*receiver)
+                    .get(receiver)
                     .cloned()
                     .unwrap_or(Ty::Error);
                 match self.resolve_shallow(&receiver_ty) {
@@ -3154,8 +3140,8 @@ impl<'db> InferCtx<'db> {
                     _ => {}
                 }
             }
-            ExprData::Missing => {}
-            _ => self.type_temp_root(root),
+            PlaceRoot::Temporary(binding) => self.type_temp(root, binding),
+            PlaceRoot::Missing | PlaceRoot::Value => {}
         }
     }
 
@@ -7442,15 +7428,16 @@ impl<'db> InferCtx<'db> {
     /// (the inferred-from-initializer fallback hint would claim the
     /// *binding* has the projected type).
     fn check_field_assign_target(&mut self, target: ExprId) -> Option<Cause> {
-        let root = self.place_root(target);
-        let ExprData::NameRef(_) = &self.body.exprs[root] else {
+        let (root, kind) = self.body.place_root(target);
+        match kind {
+            PlaceRoot::Name(_) => {}
             // A deref roots the chain (`p.* = e;`, `p.*.x = e;`, or
             // `bb.*.* = e;`): the write goes through the pointers, so the
             // judgement is [`InferCtx::shared_step_governing`]'s — every
             // step of the chain must grant a write permission, not just
             // the outermost one. No binding-`mut` rule applies: writing
             // through a pointer reassigns nothing.
-            if matches!(self.body.exprs[root], ExprData::Deref { .. }) {
+            PlaceRoot::Deref { .. } => {
                 if let Some(ty) = self.shared_step_governing(root) {
                     self.result
                         .diagnostics
@@ -7462,8 +7449,8 @@ impl<'db> InferCtx<'db> {
             // squiggled the whole target ("can only assign to a variable
             // or its fields"); a missing root is a parse error. No second
             // squiggle either way.
-            return None;
-        };
+            PlaceRoot::Temporary(_) | PlaceRoot::Value | PlaceRoot::Missing => return None,
+        }
         // The same target taxonomy as a plain-name assignment, judged at
         // the root; the silent arms match its reasoning too (the root read
         // already carries `TypeNotValue` / unresolved-name / duplicate
@@ -7522,18 +7509,16 @@ impl<'db> InferCtx<'db> {
         }
     }
 
-    /// Give a materialized temporary's local (M12) the root's type. A
-    /// root without a mark is broken source and stays silent.
-    fn type_temp_root(&mut self, root: ExprId) {
-        if let Some(binding) = self.body.temp_local(root) {
-            let ty = self
-                .result
-                .type_of_expr
-                .get(root)
-                .cloned()
-                .unwrap_or(Ty::Error);
-            self.result.type_of_binding.insert(binding, ty);
-        }
+    /// Give a materialized temporary's local (M12) the type of `root`,
+    /// the value it holds.
+    fn type_temp(&mut self, root: ExprId, binding: BindingId) {
+        let ty = self
+            .result
+            .type_of_expr
+            .get(root)
+            .cloned()
+            .unwrap_or(Ty::Error);
+        self.result.type_of_binding.insert(binding, ty);
     }
 
     /// The place rules for `place.&raw`: a variable, a chain of its
@@ -7542,9 +7527,9 @@ impl<'db> InferCtx<'db> {
     /// write-permission rule: a write's permission comes from the
     /// provenance of the place, which the abstract machine judges (#183).
     fn check_addr_of_place(&mut self, addr_of: ExprId, place: ExprId) {
-        let root = self.place_root(place);
-        match &self.body.exprs[root] {
-            ExprData::NameRef(root_name) => {
+        let (root, kind) = self.body.place_root(place);
+        match kind {
+            PlaceRoot::Name(root_name) => {
                 // Locals and items are places. Unresolved/ambiguous roots
                 // carry their own diagnostics from the read.
                 if let Some(resolution) = self.resolutions.get(root)
@@ -7554,7 +7539,7 @@ impl<'db> InferCtx<'db> {
                         .diagnostics
                         .push(InferenceDiagnostic::AddrOfNonPlace {
                             expr: addr_of,
-                            name: root_name.clone(),
+                            name: root_name.to_owned(),
                             what,
                         });
                 }
@@ -7563,8 +7548,8 @@ impl<'db> InferCtx<'db> {
             // the original allocation's address with an extended path; a
             // deref-rooted place is always one. Broken source: the parse
             // error covers it.
-            ExprData::Deref { .. } | ExprData::Missing => {}
-            _ => self.type_temp_root(root),
+            PlaceRoot::Deref { .. } | PlaceRoot::Missing | PlaceRoot::Value => {}
+            PlaceRoot::Temporary(binding) => self.type_temp(root, binding),
         }
     }
 

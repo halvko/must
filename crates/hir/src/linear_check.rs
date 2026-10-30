@@ -7,7 +7,7 @@ use base_db::Db;
 use la_arena::ArenaMap;
 use rustc_hash::FxHashSet;
 
-use crate::body::{Body, ExprData, ExprId, PatData, PatId, Stmt, body};
+use crate::body::{Body, ExprData, ExprId, PatData, PatId, PlaceRoot, Stmt, body};
 use crate::capability::{Affine, has_forget};
 use crate::infer::{InferenceResult, infer};
 use crate::scopes::{Resolution, resolutions};
@@ -524,14 +524,12 @@ impl CheckCtx<'_> {
     /// is. A `.&mut` deref is no hatch: it is safe code, and the value it
     /// writes over is one somebody still owes.
     fn writes_through_raw_pointer(&self, expr: ExprId) -> bool {
-        match &self.body.exprs[expr] {
-            ExprData::Field { receiver, .. } => self.writes_through_raw_pointer(*receiver),
-            ExprData::Index { base, .. } => self.writes_through_raw_pointer(*base),
-            ExprData::Deref { receiver } => {
+        match self.body.place_root(expr).1 {
+            PlaceRoot::Deref { receiver } => {
                 matches!(
-                    self.infer.type_of_expr.get(*receiver),
+                    self.infer.type_of_expr.get(receiver),
                     Some(Ty::RawPtr { .. })
-                ) || self.writes_through_raw_pointer(*receiver)
+                ) || self.writes_through_raw_pointer(receiver)
             }
             _ => false,
         }
