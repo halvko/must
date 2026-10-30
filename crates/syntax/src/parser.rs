@@ -339,6 +339,50 @@ impl<'t> Parser<'t> {
         });
         Marker { pos }
     }
+
+    /// Hold a place at the current token for an error decided later, once
+    /// what follows the token is parsed. A slot never filled reports
+    /// nothing.
+    pub(crate) fn reserve_error(&mut self) -> ErrorSlot {
+        ErrorSlot {
+            pos: self.start().pos,
+        }
+    }
+}
+
+/// An error held at the token it was reserved on ([`Parser::reserve_error`]).
+pub(crate) struct ErrorSlot {
+    pos: u32,
+}
+
+impl ErrorSlot {
+    /// Report `msg` on the slot's token, with a quick fix that replaces the
+    /// token with `insert`.
+    pub(crate) fn fill_replacing(
+        self,
+        p: &mut Parser<'_>,
+        msg: impl Into<String>,
+        label: impl Into<String>,
+        insert: impl Into<String>,
+    ) {
+        p.events[self.pos as usize] = Event::Error {
+            msg: msg.into(),
+            after_prev: false,
+            fix: Some(TokenFix {
+                label: label.into(),
+                insert: insert.into(),
+            }),
+        };
+    }
+
+    /// Report `msg` on the slot's token.
+    pub(crate) fn fill(self, p: &mut Parser<'_>, msg: impl Into<String>) {
+        p.events[self.pos as usize] = Event::Error {
+            msg: msg.into(),
+            after_prev: false,
+            fix: None,
+        };
+    }
 }
 
 pub(crate) struct Marker {
@@ -373,11 +417,39 @@ impl Marker {
     }
 }
 
+#[derive(Clone, Copy)]
 pub(crate) struct CompletedMarker {
     pos: u32,
 }
 
 impl CompletedMarker {
+    /// The kind this node was completed as.
+    pub(crate) fn kind(self, p: &Parser<'_>) -> SyntaxKind {
+        match p.events[self.pos as usize] {
+            Event::Start { kind, .. } => kind,
+            _ => unreachable!(),
+        }
+    }
+
+    /// The node [`Self::precede`] wrapped around this one, if any.
+    pub(crate) fn parent(self, p: &Parser<'_>) -> Option<CompletedMarker> {
+        match p.events[self.pos as usize] {
+            Event::Start { forward_parent, .. } => forward_parent.map(|distance| CompletedMarker {
+                pos: self.pos + distance,
+            }),
+            _ => unreachable!(),
+        }
+    }
+
+    /// Re-kind a completed node whose children read the same either way
+    /// (`PATH_TYPE` and `PATH_EXPR`, say).
+    pub(crate) fn change_kind(self, p: &mut Parser<'_>, new: SyntaxKind) {
+        match &mut p.events[self.pos as usize] {
+            Event::Start { kind, .. } => *kind = new,
+            _ => unreachable!(),
+        }
+    }
+
     /// Start a new node that will wrap this completed one.
     pub(crate) fn precede(self, p: &mut Parser<'_>) -> Marker {
         let new = p.start();

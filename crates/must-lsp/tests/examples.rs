@@ -349,10 +349,11 @@ fn errors_checks_dirty_with_the_documented_count() {
                 |                             ^^^
 
             error: record fields are defined with `=` (`name = value`); `:` annotates a type
-              --> examples/errors.must:157:56
+              --> examples/errors.must:157:54
                 |
             157 | static old_spelling: struct { x: usize } = struct { x: 1 };
-                |                                                        ^
+                |                                                      ^
+               = help: Replace `:` with `=`
 
             error: unknown trait `Display`
               --> examples/errors.must:164:10

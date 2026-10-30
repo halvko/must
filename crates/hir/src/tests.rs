@@ -2647,7 +2647,7 @@ type Foo = struct { a: 5, b, c: missing, d: five };
 "#,
         expect![[r#"
             15..16: cannot infer the type of this number: it has no defining use — add a type annotation
-            41..42: record fields are defined with `=` (`name = value`); `:` annotates a type
+            39..40: record fields are defined with `=` (`name = value`); `:` annotates a type
             44..45: expected a type for field `b`: `name: Type`
             50..57: unknown type `missing`
             62..66: `five` is not a type
@@ -12435,7 +12435,28 @@ fn old_colon_construction_spelling_gets_the_targeted_error() {
 static a: struct { n: usize } = struct { n: 1 };
 "#,
         expect![[r#"
-            45..46: record fields are defined with `=` (`name = value`); `:` annotates a type
+            43..44: record fields are defined with `=` (`name = value`); `:` annotates a type
+        "#]],
+    );
+}
+
+#[test]
+fn old_colon_construction_spelling_with_a_composite_value_is_checked_as_a_value() {
+    // `p.x - 1` is type-shaped up to its `.`, but it is the value: one
+    // error per field, the literal checks against `P`, and the body after
+    // it still checks (the `true` is the only other error).
+    check_diagnostics(
+        r#"
+type P = struct { x: usize, y: usize };
+static f = fn (p: P) -> usize {
+    let q = P(struct { x: p.x - 1, y: p.y });
+    q.x + true
+};
+"#,
+        expect![[r#"
+            97..98: record fields are defined with `=` (`name = value`); `:` annotates a type
+            109..110: record fields are defined with `=` (`name = value`); `:` annotates a type
+            129..133: type mismatch: expected `usize`, found `bool` (`+` requires `usize` operands at 127..128)
         "#]],
     );
 }

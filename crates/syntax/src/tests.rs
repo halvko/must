@@ -12566,7 +12566,7 @@ fn record_field_old_colon_value_is_a_targeted_parse_error() {
                   WHITESPACE@24..25 " "
                   R_BRACE@25..26 "}"
                 SEMICOLON@26..27 ";"
-            error 23..24: record fields are defined with `=` (`name = value`); `:` annotates a type
+            error 21..22: record fields are defined with `=` (`name = value`); `:` annotates a type
         "#]],
     );
 }
@@ -16800,4 +16800,216 @@ static f = fn() -> () {
         70..71: expected an expression => LET_STMT 64..71
     "#]]
     .assert_eq(&text);
+}
+
+#[test]
+fn a_record_field_written_name_colon_value_parses_its_value() {
+    // `p.n + 1` reads as either up to `p`; the `.n` only a value has makes
+    // it the retired construction spelling: one error on the `:`, and the
+    // value is a value (no "unknown type `p`", no cascade through the call
+    // and the block).
+    check_errors(
+        "static f = fn { g(struct { n: p.n + 1, m: p.m }); h() };",
+        expect![[r#"
+            28..29: record fields are defined with `=` (`name = value`); `:` annotates a type
+            40..41: record fields are defined with `=` (`name = value`); `:` annotates a type
+        "#]],
+    );
+}
+
+#[test]
+fn a_comparison_a_list_or_a_defining_record_after_a_colon_is_a_value() {
+    // No `>` closes `n < limit` as a generic list, `[a, b]` is a list, and
+    // `struct { a = 1 }` defines a field: each is a value by its form, with
+    // the one `:` error.
+    check_errors(
+        "static f = fn { g(struct { ok: n < limit, xs: [a, b], p: struct { a = 1 } }) };",
+        expect![[r#"
+            29..30: record fields are defined with `=` (`name = value`); `:` annotates a type
+            44..45: record fields are defined with `=` (`name = value`); `:` annotates a type
+            55..56: record fields are defined with `=` (`name = value`); `:` annotates a type
+        "#]],
+    );
+}
+
+#[test]
+fn a_record_type_after_a_fields_colon_is_a_record_type() {
+    // Before its `=`, `struct { a: usize }` reads as either; no field
+    // defines a value, so it is the record type.
+    check(
+        "static s = struct { x: struct { a: usize } = v };",
+        expect![[r#"
+            SOURCE_FILE@0..49
+              STATIC_ITEM@0..49
+                ITEM_HEAD@0..6
+                  STATIC_KW@0..6 "static"
+                WHITESPACE@6..7 " "
+                NAME@7..8
+                  IDENT@7..8 "s"
+                WHITESPACE@8..9 " "
+                EQ@9..10 "="
+                WHITESPACE@10..11 " "
+                RECORD_EXPR@11..48
+                  STRUCT_KW@11..17 "struct"
+                  WHITESPACE@17..18 " "
+                  L_BRACE@18..19 "{"
+                  WHITESPACE@19..20 " "
+                  RECORD_EXPR_FIELD@20..46
+                    NAME_REF@20..21
+                      IDENT@20..21 "x"
+                    COLON@21..22 ":"
+                    WHITESPACE@22..23 " "
+                    RECORD_TYPE@23..42
+                      STRUCT_KW@23..29 "struct"
+                      WHITESPACE@29..30 " "
+                      L_BRACE@30..31 "{"
+                      WHITESPACE@31..32 " "
+                      RECORD_TYPE_FIELD@32..40
+                        NAME@32..33
+                          IDENT@32..33 "a"
+                        COLON@33..34 ":"
+                        WHITESPACE@34..35 " "
+                        PATH_TYPE@35..40
+                          NAME_REF@35..40
+                            IDENT@35..40 "usize"
+                      WHITESPACE@40..41 " "
+                      R_BRACE@41..42 "}"
+                    WHITESPACE@42..43 " "
+                    EQ@43..44 "="
+                    WHITESPACE@44..45 " "
+                    PATH_EXPR@45..46
+                      NAME_REF@45..46
+                        IDENT@45..46 "v"
+                  WHITESPACE@46..47 " "
+                  R_BRACE@47..48 "}"
+                SEMICOLON@48..49 ";"
+        "#]],
+    );
+}
+
+#[test]
+fn a_half_written_field_type_keeps_its_own_errors() {
+    // A `type` declaration's field is a type, so a half-written one gets
+    // the type grammar's errors.
+    check_errors(
+        "type P = struct { xs: Vec::<usize };",
+        expect![[r#"
+        32..33: expected `>`
+        34..35: expected `,` or `>`
+    "#]],
+    );
+}
+
+#[test]
+fn deeply_nested_field_operands_parse_once() {
+    // Each `f:` holds the next literal in a `const { }` block. Every
+    // operand is parsed once, so each level costs the same however deep
+    // the rest goes.
+    let mut field = "x: p.x - 1".to_owned();
+    for _ in 0..30 {
+        field = format!("f: [usize; const {{ g(struct {{ {field} }}) }}]");
+    }
+    let parse = crate::parse(&format!("static s = g(struct {{ {field} }});"));
+    // Only the innermost operand is a value by its form; each `f:` reads as
+    // an array type, with no value.
+    let count = |prefix: &str| {
+        parse
+            .errors()
+            .iter()
+            .filter(|err| err.message.starts_with(prefix))
+            .count()
+    };
+    let retired = count("record fields are defined with `=`");
+    let valueless = count("this field has a type but no value");
+    assert_eq!((retired, valueless), (1, 30), "{:?}", parse.errors());
+    assert_eq!(parse.errors().len(), 31, "{:?}", parse.errors());
+}
+
+#[test]
+fn a_field_type_with_turbofish_commas_still_finds_its_value() {
+    // The turbofish's `,` is inside the type, not the end of the field.
+    check_errors(
+        "static f = fn (q: Pair::<usize, bool>) { struct { p: Pair::<usize, bool> = q, n: a < b, c: 1 }; };",
+        expect![[r#"
+            79..80: record fields are defined with `=` (`name = value`); `:` annotates a type
+            89..90: record fields are defined with `=` (`name = value`); `:` annotates a type
+        "#]],
+    );
+}
+
+#[test]
+fn a_field_type_with_angle_groups_still_finds_its_value() {
+    // A nested turbofish and the bare-angle typo are annotations; the typo
+    // keeps its own `::` correction.
+    check_errors(
+        "static f = fn (q: usize) { struct { a: A::<B::<usize, bool>, u8> = q, b: Pair<usize, bool> = q }; };",
+        expect![[r#"
+            73..90: generic arguments use the turbofish: write `Pair::<...>`
+        "#]],
+    );
+}
+
+#[test]
+fn an_unclosed_turbofish_in_a_field_type_ends_at_the_literal() {
+    // TODO: halvko/must#242: the open generic list swallows `n: 1`, so its
+    // retired `:` goes unreported.
+    check_errors(
+        "static f = fn (q: usize) { struct { p: Vec::<usize = q, n: 1 }; };",
+        expect![[r#"
+            36..57: this field has a type but no value; write `name: Type = value` (or `name = value`)
+            57..58: expected `,` or `>`
+        "#]],
+    );
+}
+
+#[test]
+fn a_value_less_fn_type_field_is_a_type_and_fn_literals_are_values() {
+    // A `fn` with no body is a type, so it has no value; a `fn` literal and
+    // an array are values written with the retired `:`.
+    check_errors(
+        "static s = struct { f: fn(usize) -> usize, g: fn (a: usize) { a }, xs: [1, 2] };",
+        expect![[r#"
+            20..41: this field has a type but no value; write `name: Type = value` (or `name = value`)
+            44..45: record fields are defined with `=` (`name = value`); `:` annotates a type
+            69..70: record fields are defined with `=` (`name = value`); `:` annotates a type
+        "#]],
+    );
+}
+
+/// A `fn` literal with no parameter list is a value, so the `(` its type
+/// reading would want is never reported: the one error is the `:`.
+#[test]
+fn a_paramless_fn_literal_after_a_fields_colon_gets_only_the_colon_error() {
+    check_errors(
+        "static s = struct { k: fn { 1 } };",
+        expect![[r#"
+            21..22: record fields are defined with `=` (`name = value`); `:` annotates a type
+        "#]],
+    );
+}
+
+#[test]
+fn a_struct_type_in_a_fn_signature_is_not_a_fn_body() {
+    // The `{` after `struct` opens a record type, not a body, so `h` stays a
+    // fn type; `k`'s body comes after its `struct { .. }` return type.
+    check_errors(
+        "static s = struct { h: fn(struct { a: usize }) -> struct { b: usize }, k: fn() -> struct { b: usize } { 1 } };",
+        expect![[r#"
+            20..69: this field has a type but no value; write `name: Type = value` (or `name = value`)
+            72..73: record fields are defined with `=` (`name = value`); `:` annotates a type
+        "#]],
+    );
+}
+
+#[test]
+fn a_record_field_missing_its_comma_keeps_the_ordinary_errors() {
+    // `n: usize` stays an annotation with no value, and the missing `,` is
+    // the only other error.
+    check_errors(
+        "static p = struct { n: usize m = 1 };",
+        expect![[r#"
+            20..28: this field has a type but no value; write `name: Type = value` (or `name = value`)
+            29..30: expected `,` or `}`
+        "#]],
+    );
 }

@@ -72,14 +72,12 @@ pub(crate) fn validate(root: &SyntaxNode) -> Vec<SyntaxError> {
             for field in record_expr.fields() {
                 reject_pub_field(field.pub_token(), &mut errors);
                 if !is_type_decl_rhs
-                    && field.colon_token().is_some()
+                    && field.ty().is_some()
                     && field.eq_token().is_none()
                     && field.expr().is_none()
                 {
                     errors.push(SyntaxError {
-                        message: "this field has a type but no value; \
-                                  write `name: Type = value` (or `name = value`)"
-                            .to_owned(),
+                        message: crate::FIELD_TYPE_NO_VALUE.to_owned(),
                         range: field.syntax().text_range(),
                         fix: None,
                     });
