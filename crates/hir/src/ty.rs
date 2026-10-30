@@ -6,6 +6,7 @@ use base_db::{Db, SourceFile};
 use ena::unify::{InPlaceUnificationTable, NoError, UnifyKey, UnifyValue};
 use rustc_hash::FxHashMap;
 
+use crate::constraint::Cause;
 use crate::item_tree::{
     ConstArgRef, GenericArgRef, GenericParamKind, RegionRef, TypeRef, type_decl,
 };
@@ -1076,7 +1077,9 @@ impl UnifyKey for TyVar {
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum TyVarValue {
-    Known(Ty),
+    /// Bound to a type, with the cause that decided it, if one was given:
+    /// read back only to explain a mismatch.
+    Known(Ty, Option<Cause>),
     Unknown,
     /// A NUMBER-CLASS variable: still unknown, but restricted to unify
     /// only with integer scalar types ([`Ty::Int`]) and other number
@@ -1094,19 +1097,18 @@ pub enum TyVarValue {
 impl UnifyValue for TyVarValue {
     type Error = NoError;
     fn unify_values(a: &Self, b: &Self) -> Result<Self, NoError> {
+        // Callers resolve variables before unioning, so two `Known`s never
+        // meet and at most one cause survives.
+        debug_assert!(
+            !matches!((a, b), (TyVarValue::Known(..), TyVarValue::Known(..))),
+            "two bound type variables are never unioned"
+        );
         Ok(match (a, b) {
-            // A poisoned variable stays poisoned: `Ty::Error` is infectious,
-            // so it beats an earlier (wrong) commitment instead of the
-            // commitment beating the poison.
-            (TyVarValue::Known(Ty::Error), _) | (_, TyVarValue::Known(Ty::Error)) => {
-                TyVarValue::Known(Ty::Error)
+            (TyVarValue::Known(t, cause), _) | (_, TyVarValue::Known(t, cause)) => {
+                TyVarValue::Known(t.clone(), *cause)
             }
-            // Two `Known`s only meet after the inference context has already
-            // unified them structurally (it resolves vars before unioning),
-            // so keeping either is fine.
-            (TyVarValue::Known(t), _) | (_, TyVarValue::Known(t)) => TyVarValue::Known(t.clone()),
-            // Like two `Known`s: `Constraints::unify_safety` only unions two
-            // decided safety variables after checking they agree.
+            // `Constraints::unify_safety` only unions two decided safety
+            // variables after checking they agree.
             (TyVarValue::Safety(s), _) | (_, TyVarValue::Safety(s)) => TyVarValue::Safety(*s),
             // Number-ness is infectious across var↔var merges: a plain
             // variable unified with a number variable is a number variable.

@@ -775,7 +775,9 @@ pub fn infer_group<'db>(db: &'db dyn Db, group: GroupId<'db>) -> GroupSignatures
             if let Ty::Infer(root) = resolve_fully(&mut solver.table, &Ty::Infer(var))
                 && produced.contains(&root)
             {
-                solver.table.union_value(root, TyVarValue::Known(Ty::Error));
+                solver
+                    .table
+                    .union_value(root, TyVarValue::Known(Ty::Error, None));
             }
         }
     }
