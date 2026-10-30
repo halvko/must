@@ -1846,6 +1846,9 @@ fn dispatch_ty(ty: &hir::Ty) -> &hir::Ty {
 /// documented at that function: a nested body still gets offers for what
 /// the captured-dictionary reservation refuses, and a name carried by two
 /// bounds is offered by neither.
+///
+/// A concrete receiver also reaches the members of the traits implemented
+/// for its type ([`hir::concrete_dot_offers`]).
 fn field_items(
     db: &RootDatabase,
     file: SourceFile,
@@ -1898,49 +1901,18 @@ fn field_items(
             item
         })
         .collect();
-    // Dot-callable inherent members of a named receiver, offered next to the
-    // fields they share the dot with. A borrow receiver's members hang off the
-    // REFERENT's declaration; which of them the dot offers, and which it
-    // offers refused, is `hir::dot_offer`'s.
-    let decl = match fields_of {
-        hir::Ty::Named(named) => Some(&named.decl),
-        _ => None,
-    };
-    if let Some(decl) = decl {
-        for member_id in hir::member_item_ids(db, decl.to_id(db)) {
-            let Some(position) = hir::member_self_position(db, member_id) else {
-                continue;
-            };
-            let Some(offer) = hir::dot_offer(&member_receiver, exclusive, position) else {
-                continue;
-            };
-            let sig = hir::signature(db, member_id);
-            // A member is fn-shaped, so it may satisfy the position when
-            // CALLED — the same ranking a top-level fn gets. The receiver
-            // does not count toward the written arity, so a
-            // nullary-through-the-dot member inserts `name()`.
-            let item = fn_shaped_item(
-                hir::item_loc(db, member_id).display_name().to_owned(),
-                Provenance::Item,
-                &sig,
-                Some(&sig),
-                expected,
-                edit_range,
-            );
-            let item = member_item(item, offer.reach, dot, &derefs);
-            items.push(if offer.refused { refuse(item) } else { item });
-        }
-    }
-    // A RIGID receiver's bounds — the whole of its dot. Which requirements
-    // survive resolution's narrowing and this receiver's shape is decided
-    // by `bound_dot_offers`, in hir, deliberately: were the filtering done
-    // here, the offered set and the callable set would start drifting on
-    // day one. This side renders what it is handed.
-    for offer in hir::bound_dot_offers(db, item, &member_receiver, exclusive) {
+    // Members, offered next to the fields: a CONCRETE receiver's inherent
+    // and trait-impl members, a RIGID one's bounds. hir decides which a call
+    // would resolve to and which it would refuse, so the offered set and the
+    // callable set can't drift; this side renders what it is handed.
+    let concrete = hir::concrete_dot_offers(db, file, &member_receiver, exclusive);
+    let bounds = hir::bound_dot_offers(db, item, &member_receiver, exclusive);
+    for offer in concrete.into_iter().chain(bounds) {
         let refused = offer.refused;
-        // A requirement is fn-shaped like a member, so it earns the same
-        // ranking and the same call-shaped insert (its receiver — `Self`
-        // — does not count toward the written arity either).
+        // A member is fn-shaped, so it may satisfy the position when
+        // CALLED — the same ranking a top-level fn gets. The receiver does
+        // not count toward the written arity, so a nullary-through-the-dot
+        // member inserts `name()`.
         let item = fn_shaped_item(
             offer.name,
             Provenance::Item,
@@ -1952,11 +1924,10 @@ fn field_items(
         let item = member_item(item, offer.reach, dot, &derefs);
         items.push(if refused { refuse(item) } else { item });
     }
-    // BUILTIN members (`"...".next_char`), offered on the same dot. Ranked
-    // as a builtin, like the builtin *functions* in expression position —
-    // a user's own member of the same name shadows it in resolution, and
-    // sorting it below theirs here says the same thing.
-    for &builtin in hir::Builtin::members_of(ty) {
+    // BUILTIN members (`"...".next_char`), offered on the same dot unless a
+    // user member of the name shadows it there. Ranked as a builtin, like
+    // the builtin *functions* in expression position.
+    for builtin in hir::builtin_dot_members(db, file, ty) {
         let sig = hir::infer::builtin_type(db, builtin);
         // The receiver does not count toward the written arity here
         // either. `None` tier candidate: a builtin ranks by its band
