@@ -1438,21 +1438,16 @@ pub fn file_diagnostics(db: &dyn Db, file: SourceFile) -> Vec<Diagnostic> {
                 // Write the borrow the message asks for: `.&` (or `.&mut`)
                 // right before the dot-call's own `.`, so `c.get()` becomes
                 // `c.&.get()` — a postfix chain whatever the receiver is.
-                InferenceDiagnostic::MemberWantsBorrowReceiver {
-                    expr,
-                    name,
-                    mutable,
-                    ..
-                } => source_map
-                    .node_for_expr(*expr)
-                    .and_then(|ptr| ast::CallExpr::cast(ptr.to_node(&syntax_root)))
-                    .and_then(|call| match call.callee()? {
-                        ast::Expr::FieldExpr(field) => field.dot_token(),
-                        _ => None,
-                    })
-                    .map(|dot| {
-                        insert_before_dot(&dot, if *mutable { ".&mut" } else { ".&" }, name)
-                    }),
+                InferenceDiagnostic::MemberWantsBorrowReceiver { name, mutable, .. } => {
+                    ast::CallExpr::cast(ptr.to_node(&syntax_root))
+                        .and_then(|call| match call.callee()? {
+                            ast::Expr::FieldExpr(field) => field.dot_token(),
+                            _ => None,
+                        })
+                        .map(|dot| {
+                            insert_before_dot(&dot, if *mutable { ".&mut" } else { ".&" }, name)
+                        })
+                }
                 InferenceDiagnostic::FieldColonValue { .. } => (undecided_field(&ptr))
                     .and_then(|field| field.colon_token())
                     .map(|colon| syntax::Fix {
@@ -1463,19 +1458,21 @@ pub fn file_diagnostics(db: &dyn Db, file: SourceFile) -> Vec<Diagnostic> {
                         }],
                     }),
                 InferenceDiagnostic::TypeMismatch {
-                    expr,
                     expected,
                     actual: Ty::Borrow { referent, .. },
                     ..
-                } if referent.as_ref() == expected => source_map
-                    .node_for_expr(*expr)
-                    .and_then(|ptr| ast::Expr::cast(ptr.to_node(&syntax_root)))
-                    .and_then(read_through_fix),
-                InferenceDiagnostic::DotThroughBorrow { expr, name, .. } => source_map
-                    .node_for_expr(*expr)
-                    .and_then(|ptr| ast::FieldExpr::cast(ptr.to_node(&syntax_root)))
-                    .and_then(|field| field.dot_token())
-                    .map(|dot| insert_before_dot(&dot, ".*", name)),
+                } if referent.as_ref() == expected => {
+                    let found = ptr.to_node(&syntax_root);
+                    match ast::Expr::cast(found.clone()) {
+                        Some(found) => read_through_fix(found),
+                        None => shorthand_read_through_fix(found),
+                    }
+                }
+                InferenceDiagnostic::DotThroughBorrow { name, .. } => {
+                    ast::FieldExpr::cast(ptr.to_node(&syntax_root))
+                        .and_then(|field| field.dot_token())
+                        .map(|dot| insert_before_dot(&dot, ".*", name))
+                }
                 _ => hint_fix,
             };
             diagnostics.push(Diagnostic {
@@ -2341,6 +2338,24 @@ fn read_through_fix(found: ast::Expr) -> Option<syntax::Fix> {
         edits: vec![syntax::TextEdit {
             range: TextRange::empty(found.syntax().text_range().end()),
             insert: ".*".to_owned(),
+        }],
+    })
+}
+
+/// The `.*` fix for a shorthand record field (`P { b }`), whose value is
+/// the name's own node rather than an expression: spell the value out as
+/// `b = b.*`.
+fn shorthand_read_through_fix(found: syntax::SyntaxNode) -> Option<syntax::Fix> {
+    let name = ast::NameRef::cast(found)?;
+    let field = ast::RecordExprField::cast(name.syntax().parent()?)?;
+    if !field.is_shorthand() {
+        return None;
+    }
+    Some(syntax::Fix {
+        label: "Read through the borrow with `.*`".to_owned(),
+        edits: vec![syntax::TextEdit {
+            range: TextRange::empty(name.syntax().text_range().end()),
+            insert: format!(" = {}.*", name.text()),
         }],
     })
 }

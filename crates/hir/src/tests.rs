@@ -16857,6 +16857,18 @@ static f = fn::<@a>(s: Opt::<usize>.&::<@a>) -> usize {
 }
 
 #[test]
+fn a_borrow_in_a_shorthand_field_is_read_through_by_spelling_the_value_out() {
+    // `struct { b, }` has no expression to put `.*` after: the value is the
+    // name itself, so the fix writes it out as `b = b.*`.
+    let fixed = apply_fix(
+        "static f = fn::<@a>(b: usize.&::<@a>) -> struct { b: usize } { struct { b, } };",
+        "Read through the borrow with `.*`",
+    );
+    assert!(fixed.contains("struct { b = b.*, }"), "fixed: {fixed}");
+    check_diagnostics(&fixed, expect![[r#""#]]);
+}
+
+#[test]
 fn a_borrow_broken_out_of_a_loop_is_read_through_at_the_break() {
     let fixed = apply_fix(
         "static f = fn::<@a>(r: usize.&::<@a>) -> usize { let x: usize = loop { break r; }; x };",
