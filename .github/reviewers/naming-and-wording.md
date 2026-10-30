@@ -15,6 +15,8 @@ docs, commit messages and the PR description.
   wording of existing messages for related errors. A message is true for
   the code after the change: the reason it gives is the real one, read
   against the program in each test that expects it.
+  A message that names an edit ("write `.*`") carries that edit as its
+  quick fix, and a test applies it.
 - Docs (`README.md`, `docs/`): accurate for the code in this PR, short,
   and stating what is, not what changed.
 - Commits: each is a semantic commit (`feat(hir): ...`, `fix(mir): ...`),
