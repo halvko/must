@@ -653,6 +653,13 @@ pub fn file_diagnostics(db: &dyn Db, file: SourceFile) -> Vec<Diagnostic> {
     };
 
     let syntax_root = parse(db, file).syntax_node();
+    // The record field an undecided field's deciding name (`other` in
+    // `x: other`) was written in.
+    let undecided_field = |ptr: &syntax::SyntaxNodePtr| {
+        ptr.to_node(&syntax_root)
+            .ancestors()
+            .find_map(ast::RecordExprField::cast)
+    };
     for item in all_checkable_items(db, file) {
         let BodyFindings {
             inference,
@@ -674,7 +681,14 @@ pub fn file_diagnostics(db: &dyn Db, file: SourceFile) -> Vec<Diagnostic> {
             .collect();
         for (expr, data) in body.exprs.iter() {
             let error = match data {
-                body::ExprData::NameRef(name) if resolutions.get(expr).is_none() => {
+                // An undecided field naming a type (`x: usize`, `x: T`) is
+                // an annotation with no value, which inference reports.
+                body::ExprData::NameRef(name)
+                    if resolutions.get(expr).is_none()
+                        && !inference.iter().any(|diag| {
+                            matches!(diag, InferenceDiagnostic::FieldTypeNoValue { expr: e } if *e == expr)
+                        }) =>
+                {
                     let fits = if path_bases.contains(&expr) {
                         is_type_or_trait
                     } else {
@@ -772,6 +786,14 @@ pub fn file_diagnostics(db: &dyn Db, file: SourceFile) -> Vec<Diagnostic> {
                 InferenceDiagnostic::AllBranchesMismatch { .. } => {
                     join_keyword(&ptr.to_node(&syntax_root)).unwrap_or(range)
                 }
+                // The `:` that should be `=`, or the whole value-less field.
+                InferenceDiagnostic::FieldColonValue { .. } => undecided_field(&ptr)
+                    .and_then(|field| field.colon_token())
+                    .map(|colon| colon.text_range())
+                    .unwrap_or(range),
+                InferenceDiagnostic::FieldTypeNoValue { .. } => undecided_field(&ptr)
+                    .map(|field| field.syntax().text_range())
+                    .unwrap_or(range),
                 _ => range,
             };
             // Pattern diagnostics squiggle the pattern; `diag.expr()` (the
@@ -1436,6 +1458,15 @@ pub fn file_diagnostics(db: &dyn Db, file: SourceFile) -> Vec<Diagnostic> {
                             }],
                         }
                     }),
+                InferenceDiagnostic::FieldColonValue { .. } => (undecided_field(&ptr))
+                    .and_then(|field| field.colon_token())
+                    .map(|colon| syntax::Fix {
+                        label: syntax::RETIRED_FIELD_COLON_FIX.to_owned(),
+                        edits: vec![syntax::TextEdit {
+                            range: colon.text_range(),
+                            insert: " =".to_owned(),
+                        }],
+                    }),
                 _ => hint_fix,
             };
             diagnostics.push(Diagnostic {
@@ -1629,6 +1660,24 @@ pub fn file_diagnostics(db: &dyn Db, file: SourceFile) -> Vec<Diagnostic> {
     diagnostics
 }
 
+/// Whether `node` is in a construction field's operand that may be a value
+/// (`x: other`, `x: a.&`); inference judges it by its deciding name, with
+/// the body's names in hand. The walk climbs only the type nodes and record
+/// type fields [`ast::RecordExprField::deciding_name`] descends through, so
+/// a generic argument (`Foo` in `x: Vec::<Foo>`) keeps its own diagnostics.
+fn in_undecided_operand(node: &syntax::SyntaxNode) -> bool {
+    for ancestor in node.ancestors() {
+        if let Some(field) = ast::RecordExprField::cast(ancestor.clone()) {
+            return field.deciding_name().is_some();
+        }
+        let kind = ancestor.kind();
+        if !(ast::Type::can_cast(kind) || kind == syntax::SyntaxKind::RECORD_TYPE_FIELD) {
+            return false;
+        }
+    }
+    false
+}
+
 /// The semantic diagnostics whose fact is a source range rather than a body
 /// node: annotation and declaration rules, and the member and trait/impl
 /// checks. [`range_traps`] turns their errors into trap sites.
@@ -1655,6 +1704,9 @@ pub fn range_diagnostics(db: &dyn Db, file: SourceFile) -> Vec<Diagnostic> {
         .descendants()
         .filter_map(ast::BorrowType::cast)
     {
+        if in_undecided_operand(borrow.syntax()) {
+            continue;
+        }
         let anchor = borrow
             .amp_token()
             .map(|token| token.text_range())
@@ -1947,6 +1999,9 @@ pub fn range_diagnostics(db: &dyn Db, file: SourceFile) -> Vec<Diagnostic> {
         // mentions, [`apply_position_diagnostics`] for annotations — never
         // as a type of its own.
         if in_const_arg_position(db, file, &path_type) {
+            continue;
+        }
+        if in_undecided_operand(path_type.syntax()) {
             continue;
         }
         let binder = enclosing_binder_info(path_type.syntax());

@@ -12461,6 +12461,163 @@ static f = fn (p: P) -> usize {
     );
 }
 
+#[test]
+fn a_lone_name_after_a_fields_colon_reads_as_what_it_names() {
+    // `other` is a value, so `x: other` is the retired spelling; `P` and
+    // `usize` are types, so those fields have no value. The literal still
+    // checks against `P` (the `true` is the only other error).
+    check_diagnostics(
+        r#"
+type P = struct { x: usize, y: usize };
+static f = fn (other: usize) -> usize {
+    let q = P(struct { x: other, y: P });
+    let r = P(struct { x: usize, y = 1 });
+    q.x + true
+};
+"#,
+        expect![[r#"
+            105..106: record fields are defined with `=` (`name = value`); `:` annotates a type
+            114..118: this field has a type but no value; write `name: Type = value` (or `name = value`)
+            146..154: this field has a type but no value; write `name: Type = value` (or `name = value`)
+            176..180: type mismatch: expected `usize`, found `bool` (`+` requires `usize` operands at 174..175)
+        "#]],
+    );
+}
+
+#[test]
+fn an_undecided_field_operand_reads_as_what_its_name_names() {
+    // A generic path, a borrow and an array are spelled alike as types and
+    // values; the name at their head decides. `Pair` and `usize` are types,
+    // so those fields have no value; `id` and `n` are values, so those are
+    // the retired spelling.
+    check_diagnostics(
+        r#"
+type Pair = struct::<T> { a: T };
+static id = fn::<T>(t: T) -> T { t };
+static f = fn (n: usize) {
+    let p = struct { a: Pair::<usize>, b: id::<usize>, c: n.&, d: [usize; 3], e: [n; 3] };
+};
+"#,
+        expect![[r#"
+            121..137: this field has a type but no value; write `name: Type = value` (or `name = value`)
+            140..141: record fields are defined with `=` (`name = value`); `:` annotates a type
+            156..157: record fields are defined with `=` (`name = value`); `:` annotates a type
+            163..176: this field has a type but no value; write `name: Type = value` (or `name = value`)
+            179..180: record fields are defined with `=` (`name = value`); `:` annotates a type
+        "#]],
+    );
+}
+
+#[test]
+fn a_type_parameter_after_a_fields_colon_is_a_type() {
+    // A type parameter is a type, so `x`, `y` and `z` have no value.
+    check_diagnostics(
+        r#"
+static f = fn::<T>(n: usize, t: T) -> usize {
+    let p = struct { x: T, y: [T; 3], z: T.&::<@_> };
+    n
+};
+"#,
+        expect![[r#"
+            68..72: this field has a type but no value; write `name: Type = value` (or `name = value`)
+            74..83: this field has a type but no value; write `name: Type = value` (or `name = value`)
+            85..97: this field has a type but no value; write `name: Type = value` (or `name = value`)
+        "#]],
+    );
+}
+
+#[test]
+fn a_record_operand_of_one_field_is_settled_by_its_name() {
+    // A one-field record operand is settled by its field's name: `q`'s `n` is
+    // a value (retired `:`), `r`'s `usize` a type. With more fields no name
+    // decides: `s` is a record type, while `t` and `u` have a field (`1`,
+    // `[1]`) only a value can be, so they are values and every `:` is retired.
+    // TODO: halvko/must#244: `v`'s names are all values, yet it reads as a
+    // record type, not the retired `:`.
+    check_diagnostics(
+        r#"
+static f = fn (n: usize) -> usize {
+    let p = struct { q: struct { a: n }, r: struct { a: usize } };
+    let o = struct { s: struct { a: usize, b: n }, t: struct { a: n, b: 1 }, u: struct { a: n, b: [1] }, v: struct { a: n, b: n } };
+    n
+};
+"#,
+        expect![[r#"
+            59..60: record fields are defined with `=` (`name = value`); `:` annotates a type
+            78..100: this field has a type but no value; write `name: Type = value` (or `name = value`)
+            125..153: this field has a type but no value; write `name: Type = value` (or `name = value`)
+            150..151: unknown type `n`
+            156..157: record fields are defined with `=` (`name = value`); `:` annotates a type
+            168..169: record fields are defined with `=` (`name = value`); `:` annotates a type
+            174..175: record fields are defined with `=` (`name = value`); `:` annotates a type
+            176..177: cannot infer the type of this number: it has no defining use — add a type annotation
+            182..183: record fields are defined with `=` (`name = value`); `:` annotates a type
+            194..195: record fields are defined with `=` (`name = value`); `:` annotates a type
+            200..201: record fields are defined with `=` (`name = value`); `:` annotates a type
+            203..204: cannot infer the type of this number: it has no defining use — add a type annotation
+            209..233: this field has a type but no value; write `name: Type = value` (or `name = value`)
+            224..225: unknown type `n`
+            230..231: unknown type `n`
+        "#]],
+    );
+}
+
+#[test]
+fn a_value_less_field_whose_parse_recovered_still_gets_its_error() {
+    // A missing `,` and an unclosed turbofish each leave `n` and `p` an
+    // annotation with no value. TODO: halvko/must#242: the open generic list
+    // swallows `n: 1`, so its retired `:` goes unreported and `q` and `n`
+    // are checked as type arguments.
+    check_diagnostics(
+        r#"
+type Box = struct::<T> { v: T };
+static a = struct { n: usize m = 1 };
+static b = fn (q: usize) { struct { p: Box::<usize = q, n: 1 }; };
+"#,
+        expect![[r#"
+            54..62: this field has a type but no value; write `name: Type = value` (or `name = value`)
+            63..64: expected `,` or `}`
+            67..68: cannot infer the type of this number: it has no defining use — add a type annotation
+            108..129: this field has a type but no value; write `name: Type = value` (or `name = value`)
+            125..126: unknown type `q`
+            128..129: unknown type `n`
+            129..130: expected `,` or `>`
+        "#]],
+    );
+}
+
+#[test]
+fn a_lone_unknown_or_trait_name_after_a_fields_colon() {
+    // An unknown name gets only its own error. A trait is not a value, so
+    // the field has no value. A `type` declaration's lone names are types.
+    check_diagnostics(
+        r#"
+trait Show = requires { show: fn(Self) -> usize; };
+type Q = struct { x: usize, y: usize };
+static f = fn -> Q { Q(struct { x: missing, y: Show }) };
+"#,
+        expect![[r#"
+            128..135: unresolved name `missing`
+            137..144: this field has a type but no value; write `name: Type = value` (or `name = value`)
+        "#]],
+    );
+}
+
+#[test]
+fn a_lone_value_name_after_a_fields_colon_offers_the_equals_fix() {
+    let text = "static f = fn (n: usize) { struct { n: n }; };";
+    let db = RootDatabase::default();
+    let file = SourceFile::new(&db, "test.must".to_owned(), text.to_owned());
+    let diagnostics = crate::file_diagnostics(&db, file);
+    assert_eq!(diagnostics.len(), 1, "diagnostics: {diagnostics:?}");
+    assert_eq!(u32::from(diagnostics[0].range.start()), 37);
+    let fix = diagnostics[0].fix.as_ref().expect("diagnostic has a fix");
+    assert_eq!(fix.label, "Replace `:` with `=`");
+    assert_eq!(fix.edits.len(), 1);
+    assert_eq!(fix.edits[0].insert, " =");
+    assert_eq!(fix.edits[0].range, diagnostics[0].range);
+}
+
 // ---- trait declarations: coherence, matching, bounds, resolution --------
 
 /// The proof shape: both impl homes, a bounded generic fn, a

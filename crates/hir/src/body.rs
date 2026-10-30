@@ -364,6 +364,21 @@ pub struct RecordLitField {
     pub value: ExprId,
     /// The written `: Type` ascription, when present.
     pub type_ref: Option<TypeRef>,
+    /// Written `name: T`, where `T` could also be spelled as a value
+    /// (`other`, `Vec::<usize>`, `[a; 3]`): `value` is the name that decides
+    /// it (`other`, `Vec`, `a`), `type_ref` is `T`, and inference keeps the
+    /// reading that name resolves to.
+    pub undecided: Option<Undecided>,
+}
+
+/// How much of an undecided field's operand its `value` is
+/// ([`RecordLitField::undecided`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Undecided {
+    /// All of it: `x: other`.
+    Whole,
+    /// The name heading it: `x: other.&`, `x: [a; 3]`.
+    Head,
 }
 
 /// One parameter of a `fn` literal: a pattern (construction's mirror image)
@@ -914,7 +929,13 @@ impl LowerCtx {
                         // No name: broken source, the parse error covers it.
                         let name_ref = field.name_ref()?;
                         let name = name_ref.text();
-                        let value = if field.is_shorthand() {
+                        let deciding = field.deciding_name();
+                        let value = if let Some(other) = &deciding {
+                            // The deciding name (`other` in `x: other`),
+                            // lowered as a name; inference decides whether
+                            // it is a value or a type.
+                            self.alloc_expr(ExprData::NameRef(other.text()), other.syntax())
+                        } else if field.is_shorthand() {
                             // `x` is sugar for `x = x`: the value is a normal
                             // `NameRef` allocated on the name's own node, so
                             // resolution, hover and the source map treat it
@@ -933,6 +954,14 @@ impl LowerCtx {
                             name,
                             value,
                             type_ref: field.ty().map(TypeRef::from_ast),
+                            undecided: deciding.map(|name| {
+                                let whole = field.ty().map(|ty| ty.syntax().text_range());
+                                if whole == Some(name.syntax().text_range()) {
+                                    Undecided::Whole
+                                } else {
+                                    Undecided::Head
+                                }
+                            }),
                         })
                     })
                     .collect();

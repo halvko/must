@@ -1730,6 +1730,11 @@ impl RecordExpr {
     pub fn fields(&self) -> impl Iterator<Item = RecordExprField> + use<> {
         children(&self.syntax)
     }
+    /// Whether this is a `type` declaration's shape, whose fields declare
+    /// types, rather than a construction.
+    pub fn is_type_decl_shape(&self) -> bool {
+        (self.syntax.parent()).is_some_and(|p| TypeItem::can_cast(p.kind()))
+    }
     /// The leading `struct` keyword.
     pub fn struct_token(&self) -> Option<SyntaxToken> {
         token(&self.syntax, STRUCT_KW)
@@ -1742,6 +1747,29 @@ impl RecordExpr {
     /// The trailing open-record marker `...`, if present.
     pub fn dot3_token(&self) -> Option<SyntaxToken> {
         token(&self.syntax, DOT3)
+    }
+}
+
+/// The name a type spelled like a value is settled by
+/// ([`RecordExprField::deciding_name`]): a path's own name, through the
+/// borrows and arrays around it. A record of one field is settled by that
+/// field's name (`struct { a: n }`); a record of more fields has a name per
+/// field and no one of them decides, so it reads as a record type.
+fn deciding_name_of(ty: Type) -> Option<NameRef> {
+    match ty {
+        Type::PathType(path) if path.variant_name_ref().is_none() => path.name_ref(),
+        Type::BorrowType(it) => deciding_name_of(it.ty()?),
+        Type::RawPtrType(it) => deciding_name_of(it.ty()?),
+        Type::ArrayType(it) => deciding_name_of(it.ty()?),
+        Type::RecordType(it) => {
+            let mut fields = it.fields();
+            let field = fields.next()?;
+            match fields.next() {
+                None => deciding_name_of(field.ty()?),
+                Some(_) => None,
+            }
+        }
+        _ => None,
     }
 }
 
@@ -1769,6 +1797,20 @@ impl RecordExprField {
     /// equals.
     pub fn is_shorthand(&self) -> bool {
         self.colon_token().is_none() && self.eq_token().is_none()
+    }
+    /// The name that settles a construction field written with a `:` and
+    /// no value, when a type and a value are spelled alike (`x: other`,
+    /// `x: Vec::<usize>`, `x: [a; 3]`, `x: a.&`): `other`, `Vec`, `a`. A
+    /// type reads as an annotation with no value, a value as the retired
+    /// `x: value` spelling; only name resolution can tell, so hir judges.
+    pub fn deciding_name(&self) -> Option<NameRef> {
+        if self.eq_token().is_some() || self.expr().is_some() {
+            return None;
+        }
+        if RecordExpr::cast(self.syntax.parent()?)?.is_type_decl_shape() {
+            return None;
+        }
+        deciding_name_of(self.ty()?)
     }
     /// The reserved `pub` marker, if written — field visibility is not
     /// supported yet; validation rejects it.
