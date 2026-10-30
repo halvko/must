@@ -31,9 +31,9 @@
   parentheses, which removes the wrong spelling: `p.*.hp = 0` is the only way to write it.
   Address-of is postfix too: `x.&raw`, with the type twin `T.&raw` — no prefix place
   adaptor (deref, address-of) exists in the grammar. A retired spelling is an ordinary parse
-  error (see Discarded), with three exceptions that #220 removes: the prefix spellings
+  error (see Discarded), with two exceptions that #220 removes: the prefix spellings
   `&raw x`, `&x`/`&mut x` and their type twins, which superset-parse into the postfix node
-  with a migration diagnostic; `name: value` (G12); and `without forget` (G21).
+  with a migration diagnostic; and `without forget` (G21).
   Plain `x.&` / `x.&mut` and the type twins `T.&` / `T.&mut`, with no `raw`, are the SAFE
   borrows; the type form carries the region turbofish (`T.&::<@a>`), required everywhere,
   since no elision exists yet for a hand-written type, and the expression form carries none
@@ -54,8 +54,7 @@
 - **G12** Record literals construct with `=`: `struct { x = 1 }`, spelled out
   `struct { a: usize = 10 }`. Colon means has-type, everywhere, so a field's annotation is a
   real type and fn, pointer and array field types are first class. Shorthand `struct { x }` is
-  `struct { x = x }`. The retired `name: value` spelling is a targeted error, never a silent
-  reinterpretation (a G08 leftover).
+  `struct { x = x }`.
 - **G20** Block comments nest. Both comment spellings lex to one `COMMENT` kind. An unclosed
   `/*` swallows the rest of the file; every still-open `/*` gets its own diagnostic, and only
   the innermost gets a fix, because nothing in the file says where the others were meant to
@@ -200,7 +199,7 @@
 - **Migrating retired spellings** — a retired spelling superset-parsed into the
   live node with a migration diagnostic and a rewriting fix. Dropped while the language
   moves fast and has no users to migrate: a retired spelling is an ordinary parse error.
-  Worth revisiting once there are users. **G08 G12 G21**
+  Worth revisiting once there are users. **G08 G21**
 - **`const { }` bounding `return` the way it bounds `break`** — reachable (a `const` block
   is a separate MIR body) but a different construct wearing the same spelling; the exit
   should leave the outer fn. **G15**
