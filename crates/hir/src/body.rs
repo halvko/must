@@ -47,11 +47,53 @@ impl Body {
         self.temps.get(expr).copied()
     }
 
-    /// The expression a place's field and index steps hang off: `a` for
-    /// `a.b[i].c`, and `place` itself when it has no such step.
-    pub fn place_root(&self, place: ExprId) -> ExprId {
-        place_root(&self.exprs, place)
+    /// The root of a place: the expression its field and index steps hang
+    /// off (`a` for `a.b[i].c`, `place` itself when it has none), and what
+    /// kind of storage that is.
+    pub fn place_root(&self, place: ExprId) -> (ExprId, PlaceRoot<'_>) {
+        let root = place_root(&self.exprs, place);
+        (root, place_root_kind(&self.exprs, &self.temps, root))
     }
+
+    /// A place taken apart: its root as [`Body::place_root`] gives it, and
+    /// the field and index steps above it, outermost first.
+    pub fn place_chain(&self, place: ExprId) -> PlaceChain<'_> {
+        let mut steps = Vec::new();
+        let mut root = place;
+        while let Some(next) = place_step(&self.exprs, root) {
+            steps.push(root);
+            root = next;
+        }
+        let kind = place_root_kind(&self.exprs, &self.temps, root);
+        PlaceChain { root, kind, steps }
+    }
+}
+
+/// A place taken apart by [`Body::place_chain`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PlaceChain<'a> {
+    pub root: ExprId,
+    pub kind: PlaceRoot<'a>,
+    /// The field and index steps, outermost first.
+    pub steps: Vec<ExprId>,
+}
+
+/// What a place's root is, before name resolution. The walk stops at the
+/// outermost deref, the one that governs the access; what a name refers to
+/// is read from `resolutions` by each caller.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PlaceRoot<'a> {
+    /// `p.*`: the chain's outermost deref, through the pointer `receiver`.
+    Deref { receiver: ExprId },
+    /// A name: storage if it resolves to a local or an item.
+    Name(&'a str),
+    /// A value materialized into this anonymous local (M12).
+    Temporary(BindingId),
+    /// Broken source.
+    Missing,
+    /// A value with no storage of its own: a call result, a literal, a
+    /// record literal that nothing borrows.
+    Value,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1259,7 +1301,7 @@ impl LowerCtx {
     /// stays where it is written.
     fn lower_borrowed_place(&mut self, expr: Option<ast::Expr>) -> ExprId {
         let place = self.lower_opt_expr(expr);
-        let Some(root) = borrowed_temp_root(&self.exprs, place) else {
+        let Some(root) = borrowed_temp_root(&self.exprs, &self.temps, place) else {
             return place;
         };
         let binding = self.bindings.alloc(BindingData {
@@ -1309,24 +1351,48 @@ impl LowerCtx {
 
 /// The root of a borrowed place when it is a value rather than a place:
 /// a name or a deref already has storage, broken source gets nothing.
-///
-/// TODO: one recorded place root for every layer (halvko/must#30).
-fn borrowed_temp_root(exprs: &Arena<ExprData>, place: ExprId) -> Option<ExprId> {
+fn borrowed_temp_root(
+    exprs: &Arena<ExprData>,
+    temps: &ArenaMap<ExprId, BindingId>,
+    place: ExprId,
+) -> Option<ExprId> {
     let root = place_root(exprs, place);
-    match &exprs[root] {
-        ExprData::NameRef(_) | ExprData::Deref { .. } | ExprData::Missing => None,
-        _ => Some(root),
+    matches!(place_root_kind(exprs, temps, root), PlaceRoot::Value).then_some(root)
+}
+
+/// The one definition of a transparent place step: a field or an element
+/// hangs off its receiver or base. Everything else is a root.
+fn place_step(exprs: &Arena<ExprData>, expr: ExprId) -> Option<ExprId> {
+    match &exprs[expr] {
+        ExprData::Field { receiver, .. } => Some(*receiver),
+        ExprData::Index { base, .. } => Some(*base),
+        _ => None,
     }
 }
 
 fn place_root(exprs: &Arena<ExprData>, place: ExprId) -> ExprId {
     let mut root = place;
-    loop {
-        match &exprs[root] {
-            ExprData::Field { receiver, .. } => root = *receiver,
-            ExprData::Index { base, .. } => root = *base,
-            _ => return root,
-        }
+    while let Some(next) = place_step(exprs, root) {
+        root = next;
+    }
+    root
+}
+
+fn place_root_kind<'a>(
+    exprs: &'a Arena<ExprData>,
+    temps: &ArenaMap<ExprId, BindingId>,
+    root: ExprId,
+) -> PlaceRoot<'a> {
+    match &exprs[root] {
+        ExprData::Deref { receiver } => PlaceRoot::Deref {
+            receiver: *receiver,
+        },
+        ExprData::NameRef(name) => PlaceRoot::Name(name),
+        ExprData::Missing => PlaceRoot::Missing,
+        _ => match temps.get(root) {
+            Some(binding) => PlaceRoot::Temporary(*binding),
+            None => PlaceRoot::Value,
+        },
     }
 }
 

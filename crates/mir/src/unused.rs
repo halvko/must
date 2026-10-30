@@ -5,7 +5,7 @@
 use base_db::Db;
 use hir::body::{ExprData, PatData, Stmt};
 use hir::infer::InferenceDiagnostic;
-use hir::{BindingId, ExprId, ItemId, Resolution};
+use hir::{BindingId, ExprId, ItemId, PlaceRoot, Resolution};
 use la_arena::ArenaMap;
 use rustc_hash::{FxHashMap, FxHashSet};
 use std::cell::OnceCell;
@@ -234,20 +234,14 @@ impl ItemCheck<'_> {
 fn root_binding(
     body: &hir::Body,
     resolutions: &ArenaMap<ExprId, Resolution>,
-    mut expr: ExprId,
+    expr: ExprId,
 ) -> Option<BindingId> {
-    loop {
-        match &body.exprs[expr] {
-            ExprData::Field { receiver, .. } => expr = *receiver,
-            ExprData::Index { base, .. } => expr = *base,
-            ExprData::NameRef(_) => {
-                return match resolutions.get(expr)? {
-                    Resolution::Local(binding) => Some(*binding),
-                    _ => None,
-                };
-            }
-            _ => return None,
-        }
+    let (root, PlaceRoot::Name(_)) = body.place_root(expr) else {
+        return None;
+    };
+    match resolutions.get(root)? {
+        Resolution::Local(binding) => Some(*binding),
+        _ => None,
     }
 }
 
