@@ -1436,21 +1436,16 @@ pub fn file_diagnostics(db: &dyn Db, file: SourceFile) -> Vec<Diagnostic> {
                 // Write the borrow the message asks for: `.&` (or `.&mut`)
                 // right before the dot-call's own `.`, so `c.get()` becomes
                 // `c.&.get()` — a postfix chain whatever the receiver is.
-                InferenceDiagnostic::MemberWantsBorrowReceiver {
-                    expr,
-                    name,
-                    mutable,
-                    ..
-                } => source_map
-                    .node_for_expr(*expr)
-                    .and_then(|ptr| ast::CallExpr::cast(ptr.to_node(&syntax_root)))
-                    .and_then(|call| match call.callee()? {
-                        ast::Expr::FieldExpr(field) => field.dot_token(),
-                        _ => None,
-                    })
-                    .map(|dot| {
-                        insert_before_dot(&dot, if *mutable { ".&mut" } else { ".&" }, name)
-                    }),
+                InferenceDiagnostic::MemberWantsBorrowReceiver { name, mutable, .. } => {
+                    ast::CallExpr::cast(ptr.to_node(&syntax_root))
+                        .and_then(|call| match call.callee()? {
+                            ast::Expr::FieldExpr(field) => field.dot_token(),
+                            _ => None,
+                        })
+                        .map(|dot| {
+                            insert_before_dot(&dot, if *mutable { ".&mut" } else { ".&" }, name)
+                        })
+                }
                 InferenceDiagnostic::FieldColonValue { .. } => (undecided_field(&ptr))
                     .and_then(|field| field.colon_token())
                     .map(|colon| syntax::Fix {
@@ -1461,19 +1456,17 @@ pub fn file_diagnostics(db: &dyn Db, file: SourceFile) -> Vec<Diagnostic> {
                         }],
                     }),
                 InferenceDiagnostic::TypeMismatch {
-                    expr,
                     expected,
                     actual: Ty::Borrow { referent, .. },
                     ..
-                } if referent.as_ref() == expected => source_map
-                    .node_for_expr(*expr)
-                    .and_then(|ptr| ast::Expr::cast(ptr.to_node(&syntax_root)))
-                    .and_then(read_through_fix),
-                InferenceDiagnostic::DotThroughBorrow { expr, name, .. } => source_map
-                    .node_for_expr(*expr)
-                    .and_then(|ptr| ast::FieldExpr::cast(ptr.to_node(&syntax_root)))
-                    .and_then(|field| field.dot_token())
-                    .map(|dot| insert_before_dot(&dot, ".*", name)),
+                } if referent.as_ref() == expected => {
+                    ast::Expr::cast(ptr.to_node(&syntax_root)).and_then(read_through_fix)
+                }
+                InferenceDiagnostic::DotThroughBorrow { name, .. } => {
+                    ast::FieldExpr::cast(ptr.to_node(&syntax_root))
+                        .and_then(|field| field.dot_token())
+                        .map(|dot| insert_before_dot(&dot, ".*", name))
+                }
                 _ => hint_fix,
             };
             diagnostics.push(Diagnostic {
