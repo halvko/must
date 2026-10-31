@@ -1089,6 +1089,16 @@ fn reject_type_item_annotation(type_item: &ast::TypeItem, errors: &mut Vec<Synta
 /// parse cleanly and are reserved; a superset-parsed `: Type` annotation
 /// is rejected like a `type` item's.
 fn validate_trait_item(trait_item: &ast::TraitItem, errors: &mut Vec<SyntaxError>) {
+    if let Some(name) = trait_item
+        .name()
+        .filter(|name| name.text() == FN_BOUND_NAME)
+    {
+        errors.push(SyntaxError {
+            message: "`Fn` is the language's fn bound, so no trait can take its name".to_owned(),
+            range: name.syntax().text_range(),
+            fix: None,
+        });
+    }
     if let Some(colon) = trait_item.colon_token() {
         let end = trait_item
             .ty()
@@ -1234,6 +1244,11 @@ pub const CAPABILITIES: &[Capability] = &[
     },
 ];
 
+/// The fn bound's name (`F: Fn(A) -> R`, #223). Like a capability it is
+/// the language's word, matched without looking at scope, so `F: Fn` never
+/// names a trait a file declares.
+pub const FN_BOUND_NAME: &str = "Fn";
+
 /// The capability `name` spells, if it spells one. Deliberately scope-free:
 /// the vocabulary is the language's, so no file can declare its way into or
 /// out of one.
@@ -1326,7 +1341,58 @@ fn validate_type_param_bounds(type_param: &ast::TypeParam, errors: &mut Vec<Synt
     for bound in type_param.bounds() {
         match &bound {
             ast::Type::PathType(path)
-                if path.variant_name_ref().is_none() && path.generic_arg_list().is_none() => {}
+                if path.variant_name_ref().is_none()
+                    && path.generic_arg_list().is_none()
+                    && path
+                        .name_ref()
+                        .is_none_or(|name| name.text() != FN_BOUND_NAME) => {}
+            // `F: Fn(usize) -> ()` — the fn bound (#223): what the argument
+            // must be callable as. Its own rules are `hir`'s.
+            ast::Type::FnBound(fn_bound) if fn_bound.is_fn() => {}
+            ast::Type::PathType(path)
+                if path
+                    .name_ref()
+                    .is_some_and(|name| name.text() == FN_BOUND_NAME) =>
+            {
+                errors.push(SyntaxError {
+                    message: "a fn bound writes its parameters and return type: `Fn(A) -> R`"
+                        .to_owned(),
+                    range: bound.syntax().text_range(),
+                    fix: Some(Fix {
+                        label: "Write `Fn() -> ()`".to_owned(),
+                        edits: vec![TextEdit {
+                            range: TextRange::empty(bound.syntax().text_range().end()),
+                            insert: "() -> ()".to_owned(),
+                        }],
+                    }),
+                });
+            }
+            ast::Type::FnBound(_) => {
+                errors.push(SyntaxError {
+                    message: "only `Fn` takes a parameter list in a bound".to_owned(),
+                    range: bound.syntax().text_range(),
+                    fix: None,
+                });
+            }
+            ast::Type::FnType(fn_type) => {
+                let keyword = fn_type
+                    .syntax()
+                    .children_with_tokens()
+                    .filter_map(|it| it.into_token())
+                    .find(|token| token.kind() == SyntaxKind::FN_KW);
+                errors.push(SyntaxError {
+                    message: "a fn type is not a bound: the fn bound is written `Fn(..) -> ..`"
+                        .to_owned(),
+                    range: bound.syntax().text_range(),
+                    fix: keyword.map(|token| Fix {
+                        label: "Write `Fn`".to_owned(),
+                        edits: vec![TextEdit {
+                            range: token.text_range(),
+                            insert: "Fn".to_owned(),
+                        }],
+                    }),
+                });
+            }
             ast::Type::PathType(path) if path.generic_arg_list().is_some() => {
                 errors.push(SyntaxError {
                     message: "generic traits are not supported yet; \
@@ -1338,7 +1404,7 @@ fn validate_type_param_bounds(type_param: &ast::TypeParam, errors: &mut Vec<Synt
             }
             _ => {
                 errors.push(SyntaxError {
-                    message: "only a trait name can be a bound".to_owned(),
+                    message: "only a trait name or `Fn(..) -> ..` can be a bound".to_owned(),
                     range: bound.syntax().text_range(),
                     fix: None,
                 });
@@ -1548,6 +1614,7 @@ fn reject_prefix_borrow_expr(borrow: &ast::BorrowExpr, errors: &mut Vec<SyntaxEr
 fn postfix_binds_to_whole_type(ty: &ast::Type) -> bool {
     match ty {
         ast::Type::FnType(it) => it.ret_type().is_none(),
+        ast::Type::FnBound(it) => it.ret_type().is_none(),
         ast::Type::RawPtrType(it) => !is_prefix_spelling(it.syntax()),
         ast::Type::BorrowType(it) => !is_prefix_spelling(it.syntax()),
         // Each ends in a token or a closing bracket of its own.

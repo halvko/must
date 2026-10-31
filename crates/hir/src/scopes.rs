@@ -787,6 +787,7 @@ fn type_param(name: &str) -> GenericParamData {
         bounds: Vec::new(),
         outlives: Vec::new(),
         forget: false,
+        fn_bound: None,
     }
 }
 

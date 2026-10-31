@@ -151,10 +151,15 @@ impl CheckCtx<'_> {
     /// be quiet — demanding `unsafe` around every call whose callee failed
     /// to infer would bury the real diagnostic under advice.
     fn calls_an_unsafe_fn_value(&self, callee: ExprId) -> bool {
-        matches!(
-            self.infer.type_of_expr.get(callee),
-            Some(crate::ty::Ty::Fn(f)) if f.unsafe_to_call()
-        )
+        match self.infer.type_of_expr.get(callee) {
+            Some(crate::ty::Ty::Fn(f)) => f.unsafe_to_call(),
+            // A parameter is called as its fn bound (#223).
+            Some(crate::ty::Ty::Param(param)) => matches!(
+                crate::ty::param_fn_bound(self.db, param.item.to_id(self.db), param.index),
+                Some(crate::ty::Ty::Fn(f)) if f.unsafe_to_call()
+            ),
+            _ => false,
+        }
     }
 
     fn check_expr(&mut self, expr: ExprId, in_unsafe: bool) {

@@ -108,6 +108,7 @@ pub enum SyntaxKind {
     LITERAL,
     PATH_EXPR,
     FN_TYPE,
+    FN_BOUND,
     UNIT_TYPE,
     NEVER_TYPE,
     PATH_TYPE,

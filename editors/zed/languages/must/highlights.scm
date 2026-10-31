@@ -41,6 +41,7 @@
 (record_pat_field rename: (param_name) @variable.parameter)
 (path_type head: (identifier) @type)
 (path_type variant: (identifier) @variant)
+(fn_bound name: (identifier) @keyword)
 (with_clause name: (identifier) @type)
 (requires_clause name: (identifier) @type)
 (named_arg name: (identifier) @type)

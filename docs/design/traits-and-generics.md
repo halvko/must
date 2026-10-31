@@ -76,7 +76,11 @@
   fenced, with one crack: asm-jump-compilable effects maybe; runtime continuation capture
   never. Fn items and capture-free fn values keep structural fn types; a blanket "every
   `fn(A) -> B` satisfies `Fn(A) -> B`" is needed when traits land, or the two families split
-  the ecosystem.
+  the ecosystem. #223 revisits the v1 closures of #176 along these lines: one type per closure
+  literal. Its first step is live: a FN BOUND, `F: Fn(A) -> R`, whose arguments and return are
+  determined by `F`, makes a param callable, copyable and forgettable (TR11),
+  is satisfied by the fn type itself, and needs no dictionary. A callable satisfies it only if
+  what it holds is copyable and forgettable; the bound for other callables is open (TR11).
 - **TR09** Send-ness is derived from structure: a value fails to cross iff its type
   transitively contains a fn value with captures at non-portable, a raw pointer to shared
   mutable state (every raw pointer counts as mutable, M23), or a field of a type that opted
@@ -105,10 +109,15 @@
   the data side's per-declaration summary bottoms out on (T22). The bound grants discard, never
   duplication; the language's own witness that they differ is `T.&mut`, which has `forget`
   (losing a borrow loses no obligation) and is refused copying anyway, since a copy would be
-  two exclusive borrows of one place. Every rigid parameter is non-copyable and tracked by the
-  must-consume walk, which asks the copy rule's own question rather than a narrower one of its
-  own — so the exclusive borrow a bounded `T` may be instantiated with is tracked wherever it is
-  held; the bound waives exactly the obligation to consume before scope end.
+  two exclusive borrows of one place. Every rigid parameter without a fn bound is non-copyable
+  and tracked by the must-consume walk, which asks the copy rule's own question rather than a
+  narrower one of its own — so the exclusive borrow a bounded `T` may be instantiated with is
+  tracked wherever it is held; the bound waives exactly the obligation to consume before scope
+  end. A FN BOUND (TR08) grants copying and discard, because what satisfies a plain
+  `F: Fn(A) -> R` holds nothing that costs either. Bounds that imply others in general
+  (`affine: forget + copy`) are open (#223). A callable that holds values, linear ones
+  included, answers copy and discard from what it holds; its bound, and whether a call
+  consumes `F`, are open (#223).
   Capability names are the language's: a trait of the same name changes nothing. A capability
   bound takes no dictionary slot but is part of a requirement's contract. Consequence: with no
   trait bounds, a generic body can only hand an unbounded parameter back or pass it on, which
@@ -193,8 +202,9 @@
   grammar) — and REPLACE a payload: writing over a slot that may still hold a value loses it,
   so a container wants equality over borrows plus a primitive that hands the old value back.
   **TR11**
-- **A bound is asked to grant duplication** — copy-soundness is closed strict: no bound grants
-  it, every rigid parameter is non-copyable, and generic code borrows for a second read.
+- **A bound is asked to grant duplication** — copy-soundness is closed strict: no capability
+  bound grants it, every rigid parameter but a fn-bounded one is non-copyable, and generic
+  code borrows for a second read.
   Duplication is orthogonal to the disposal ladder (as `send` is), so granting it means a
   capability of its own rather than a rung of that one — and such a capability is what would
   let `T.&mut`'s refusal to copy be stated as a missing one instead of a rule of its own.

@@ -34,6 +34,8 @@ const SUPPORTED: &[(&str, &str)] = &[
     ("generics.must", "cube_val"),
     ("generics.must", "braced_val"),
     ("generics.must", "pair_first"),
+    ("generics.must", "apply_twice(fn (n) { n * 3 }, 2)"),
+    ("generics.must", "four_times(fn (n) { n + 1 }, 0)"),
     ("hello.must", "main()"),
     ("loops.must", "sum_to(10)"),
     ("loops.must", "sum_odds_below(10)"),

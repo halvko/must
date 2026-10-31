@@ -9848,6 +9848,124 @@ fn a_range_pattern_does_not_parse() {
     );
 }
 
+#[test]
+fn fn_bound_parses_as_its_own_node() {
+    check(
+        "static f = fn::<F: unsafe Fn(usize) -> u8>() -> () { () };",
+        expect![[r#"
+            SOURCE_FILE@0..58
+              STATIC_ITEM@0..58
+                ITEM_HEAD@0..6
+                  STATIC_KW@0..6 "static"
+                WHITESPACE@6..7 " "
+                NAME@7..8
+                  IDENT@7..8 "f"
+                WHITESPACE@8..9 " "
+                EQ@9..10 "="
+                WHITESPACE@10..11 " "
+                FN_LITERAL@11..57
+                  FN_KW@11..13 "fn"
+                  GENERIC_PARAM_LIST@13..42
+                    COLON2@13..15 "::"
+                    L_ANGLE@15..16 "<"
+                    TYPE_PARAM@16..41
+                      NAME@16..17
+                        IDENT@16..17 "F"
+                      COLON@17..18 ":"
+                      WHITESPACE@18..19 " "
+                      FN_BOUND@19..41
+                        UNSAFE_KW@19..25 "unsafe"
+                        WHITESPACE@25..26 " "
+                        NAME_REF@26..28
+                          IDENT@26..28 "Fn"
+                        PARAM_LIST@28..35
+                          L_PAREN@28..29 "("
+                          PARAM@29..34
+                            PATH_TYPE@29..34
+                              NAME_REF@29..34
+                                IDENT@29..34 "usize"
+                          R_PAREN@34..35 ")"
+                        WHITESPACE@35..36 " "
+                        RET_TYPE@36..41
+                          THIN_ARROW@36..38 "->"
+                          WHITESPACE@38..39 " "
+                          PATH_TYPE@39..41
+                            NAME_REF@39..41
+                              IDENT@39..41 "u8"
+                    R_ANGLE@41..42 ">"
+                  PARAM_LIST@42..44
+                    L_PAREN@42..43 "("
+                    R_PAREN@43..44 ")"
+                  WHITESPACE@44..45 " "
+                  RET_TYPE@45..50
+                    THIN_ARROW@45..47 "->"
+                    WHITESPACE@47..48 " "
+                    UNIT_TYPE@48..50
+                      L_PAREN@48..49 "("
+                      R_PAREN@49..50 ")"
+                  WHITESPACE@50..51 " "
+                  BLOCK_EXPR@51..57
+                    L_BRACE@51..52 "{"
+                    WHITESPACE@52..53 " "
+                    UNIT_EXPR@53..55
+                      L_PAREN@53..54 "("
+                      R_PAREN@54..55 ")"
+                    WHITESPACE@55..56 " "
+                    R_BRACE@56..57 "}"
+                SEMICOLON@57..58 ";"
+        "#]],
+    );
+}
+
+#[test]
+fn a_parameter_list_on_a_non_fn_bound_is_rejected() {
+    let parse = crate::parse("static f = fn::<G: Wrap(usize)>() -> () { () };");
+    let messages: Vec<_> = parse.errors().iter().map(|e| e.message.as_str()).collect();
+    assert_eq!(messages, ["only `Fn` takes a parameter list in a bound"]);
+}
+
+#[test]
+fn bare_fn_bound_is_fixed_to_take_a_parameter_list() {
+    let text = "static f = fn::<F: Fn>(f: F) -> () { () };";
+    let parse = crate::parse(text);
+    let error = &parse.errors()[0];
+    assert_eq!(
+        error.message,
+        "a fn bound writes its parameters and return type: `Fn(A) -> R`"
+    );
+    let fix = error.fix.as_ref().expect("expected a fix");
+    assert_eq!(
+        apply_fix(text, fix),
+        "static f = fn::<F: Fn() -> ()>(f: F) -> () { () };"
+    );
+}
+
+#[test]
+fn a_trait_named_fn_is_rejected() {
+    let parse = crate::parse("trait Fn = requires { };");
+    let messages: Vec<_> = parse.errors().iter().map(|e| e.message.as_str()).collect();
+    assert_eq!(
+        messages,
+        ["`Fn` is the language's fn bound, so no trait can take its name"]
+    );
+}
+
+#[test]
+fn fn_type_as_a_bound_is_fixed_to_fn_bound() {
+    let text = "static f = fn::<F: fn(usize) -> usize>(f: F) -> usize { f(1) };";
+    let parse = crate::parse(text);
+    let fix = parse
+        .errors()
+        .iter()
+        .find_map(|e| e.fix.as_ref())
+        .expect("expected the fn-type-as-bound fix");
+    assert_eq!(fix.label, "Write `Fn`");
+    assert_eq!(
+        apply_fix(text, fix),
+        "static f = fn::<F: Fn(usize) -> usize>(f: F) -> usize { f(1) };"
+    );
+}
+
 /// Applies every edit in `fix` to `text` (rightmost-first, so earlier
 /// offsets stay valid) and returns the result — the plainest way to pin
 /// what a multi-edit `Fix` actually produces.
@@ -13116,13 +13234,14 @@ fn type_decl_binder_bounds_reserved() {
 
 #[test]
 fn bound_shape_rules() {
-    // A turbofished bound reserves (generic traits); a non-path bound is
-    // rejected outright.
+    // A turbofished bound reserves (generic traits); a bound that is
+    // neither a trait name nor `Fn(..)` is rejected outright, and a fn
+    // type gets the message naming the bound it was meant as.
     check(
-        "static f = fn::<T: Alloc::<usize>, U: fn() -> usize>(x: T) -> usize { 1 };",
+        "static f = fn::<T: Alloc::<usize>, U: [usize; 2], V: fn() -> usize>(x: T) -> usize { 1 };",
         expect![[r#"
-            SOURCE_FILE@0..74
-              STATIC_ITEM@0..74
+            SOURCE_FILE@0..89
+              STATIC_ITEM@0..89
                 ITEM_HEAD@0..6
                   STATIC_KW@0..6 "static"
                 WHITESPACE@6..7 " "
@@ -13131,9 +13250,9 @@ fn bound_shape_rules() {
                 WHITESPACE@8..9 " "
                 EQ@9..10 "="
                 WHITESPACE@10..11 " "
-                FN_LITERAL@11..73
+                FN_LITERAL@11..88
                   FN_KW@11..13 "fn"
-                  GENERIC_PARAM_LIST@13..52
+                  GENERIC_PARAM_LIST@13..67
                     COLON2@13..15 "::"
                     L_ANGLE@15..16 "<"
                     TYPE_PARAM@16..33
@@ -13154,54 +13273,73 @@ fn bound_shape_rules() {
                           R_ANGLE@32..33 ">"
                     COMMA@33..34 ","
                     WHITESPACE@34..35 " "
-                    TYPE_PARAM@35..51
+                    TYPE_PARAM@35..48
                       NAME@35..36
                         IDENT@35..36 "U"
                       COLON@36..37 ":"
                       WHITESPACE@37..38 " "
-                      FN_TYPE@38..51
-                        FN_KW@38..40 "fn"
-                        PARAM_LIST@40..42
-                          L_PAREN@40..41 "("
-                          R_PAREN@41..42 ")"
-                        WHITESPACE@42..43 " "
-                        RET_TYPE@43..51
-                          THIN_ARROW@43..45 "->"
-                          WHITESPACE@45..46 " "
-                          PATH_TYPE@46..51
-                            NAME_REF@46..51
-                              IDENT@46..51 "usize"
-                    R_ANGLE@51..52 ">"
-                  PARAM_LIST@52..58
-                    L_PAREN@52..53 "("
-                    PARAM@53..57
-                      BIND_PAT@53..54
-                        NAME@53..54
-                          IDENT@53..54 "x"
-                      COLON@54..55 ":"
-                      WHITESPACE@55..56 " "
-                      PATH_TYPE@56..57
-                        NAME_REF@56..57
-                          IDENT@56..57 "T"
-                    R_PAREN@57..58 ")"
-                  WHITESPACE@58..59 " "
-                  RET_TYPE@59..67
-                    THIN_ARROW@59..61 "->"
-                    WHITESPACE@61..62 " "
-                    PATH_TYPE@62..67
-                      NAME_REF@62..67
-                        IDENT@62..67 "usize"
-                  WHITESPACE@67..68 " "
-                  BLOCK_EXPR@68..73
-                    L_BRACE@68..69 "{"
-                    WHITESPACE@69..70 " "
-                    LITERAL@70..71
-                      INT_NUMBER@70..71 "1"
-                    WHITESPACE@71..72 " "
-                    R_BRACE@72..73 "}"
-                SEMICOLON@73..74 ";"
+                      ARRAY_TYPE@38..48
+                        L_BRACKET@38..39 "["
+                        PATH_TYPE@39..44
+                          NAME_REF@39..44
+                            IDENT@39..44 "usize"
+                        SEMICOLON@44..45 ";"
+                        WHITESPACE@45..46 " "
+                        CONST_ARG@46..47
+                          LITERAL@46..47
+                            INT_NUMBER@46..47 "2"
+                        R_BRACKET@47..48 "]"
+                    COMMA@48..49 ","
+                    WHITESPACE@49..50 " "
+                    TYPE_PARAM@50..66
+                      NAME@50..51
+                        IDENT@50..51 "V"
+                      COLON@51..52 ":"
+                      WHITESPACE@52..53 " "
+                      FN_TYPE@53..66
+                        FN_KW@53..55 "fn"
+                        PARAM_LIST@55..57
+                          L_PAREN@55..56 "("
+                          R_PAREN@56..57 ")"
+                        WHITESPACE@57..58 " "
+                        RET_TYPE@58..66
+                          THIN_ARROW@58..60 "->"
+                          WHITESPACE@60..61 " "
+                          PATH_TYPE@61..66
+                            NAME_REF@61..66
+                              IDENT@61..66 "usize"
+                    R_ANGLE@66..67 ">"
+                  PARAM_LIST@67..73
+                    L_PAREN@67..68 "("
+                    PARAM@68..72
+                      BIND_PAT@68..69
+                        NAME@68..69
+                          IDENT@68..69 "x"
+                      COLON@69..70 ":"
+                      WHITESPACE@70..71 " "
+                      PATH_TYPE@71..72
+                        NAME_REF@71..72
+                          IDENT@71..72 "T"
+                    R_PAREN@72..73 ")"
+                  WHITESPACE@73..74 " "
+                  RET_TYPE@74..82
+                    THIN_ARROW@74..76 "->"
+                    WHITESPACE@76..77 " "
+                    PATH_TYPE@77..82
+                      NAME_REF@77..82
+                        IDENT@77..82 "usize"
+                  WHITESPACE@82..83 " "
+                  BLOCK_EXPR@83..88
+                    L_BRACE@83..84 "{"
+                    WHITESPACE@84..85 " "
+                    LITERAL@85..86
+                      INT_NUMBER@85..86 "1"
+                    WHITESPACE@86..87 " "
+                    R_BRACE@87..88 "}"
+                SEMICOLON@88..89 ";"
             error 19..33: generic traits are not supported yet; a bound is a bare trait name
-            error 38..51: only a trait name can be a bound
+            error 38..48: only a trait name or `Fn(..) -> ..` can be a bound
+            error 53..66: a fn type is not a bound: the fn bound is written `Fn(..) -> ..`
         "#]],
     );
 }

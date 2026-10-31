@@ -243,8 +243,16 @@ module.exports = grammar({
 
     type_param: $ => seq(
       field('name', $._name),
-      optional(seq(':', plusSep($._type))),
+      optional(seq(':', plusSep(choice($.fn_bound, $._type)))),
     ),
+
+    // `F: Fn(A) -> R`: any name before `(` parses, as in the compiler.
+    fn_bound: $ => prec.right(seq(
+      optional('unsafe'),
+      field('name', $.identifier),
+      alias($.fn_type_param_list, $.param_list),
+      optional($.ret_type),
+    )),
 
     _turbofish: $ => seq('::', $.generic_arg_list),
 

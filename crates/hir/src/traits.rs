@@ -580,6 +580,12 @@ pub(crate) fn binders_match(
         if r.forget != m.forget {
             return false;
         }
+        // TODO: halvko/must#223: compare the fn bounds themselves. Only
+        // presence is compared, so a requirement's refused fn bound is not
+        // also reported as a binder mismatch.
+        if r.fn_bound.is_some() != m.fn_bound.is_some() {
+            return false;
+        }
         // Each binder's bounds name traits in the file that declares it, and
         // compare in written order: the order of the dictionaries
         // [`bound_slots`] passes, which the caller pushes by the requirement

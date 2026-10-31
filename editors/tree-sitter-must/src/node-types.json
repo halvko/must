@@ -2092,6 +2092,36 @@
     }
   },
   {
+    "type": "fn_bound",
+    "named": true,
+    "fields": {
+      "name": {
+        "multiple": false,
+        "required": true,
+        "types": [
+          {
+            "type": "identifier",
+            "named": true
+          }
+        ]
+      }
+    },
+    "children": {
+      "multiple": true,
+      "required": true,
+      "types": [
+        {
+          "type": "param_list",
+          "named": true
+        },
+        {
+          "type": "ret_type",
+          "named": true
+        }
+      ]
+    }
+  },
+  {
     "type": "fn_literal",
     "named": true,
     "fields": {
@@ -5127,6 +5157,10 @@
         },
         {
           "type": "borrow_type",
+          "named": true
+        },
+        {
+          "type": "fn_bound",
           "named": true
         },
         {
