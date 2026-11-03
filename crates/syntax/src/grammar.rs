@@ -1513,9 +1513,9 @@ fn generic_param(p: &mut Parser<'_>) {
         // where requirements are written, and the grammar needs no clause
         // of its own for it.
         if p.eat(COLON) {
-            type_(p);
+            bound(p);
             while p.eat(PLUS) {
-                type_(p);
+                bound(p);
             }
         }
         // A capability clause in the parameter home, in EITHER spelling,
@@ -1533,9 +1533,9 @@ fn generic_param(p: &mut Parser<'_>) {
         if at_param_capability_clause(p) {
             param_capability_clause(p, TYPE_PARAM);
             if p.eat(COLON) {
-                type_(p);
+                bound(p);
                 while p.eat(PLUS) {
-                    type_(p);
+                    bound(p);
                 }
             }
         }
@@ -2597,6 +2597,25 @@ fn borrow_op_generic_args(p: &mut Parser<'_>) {
 /// `unsafe fn(u8.&raw, usize) -> isize`.
 fn anon_fn_type(p: &mut Parser<'_>) -> CompletedMarker {
     anon_fn_type_deferring(p, None)
+}
+
+/// One bound of a type parameter: a trait name, or the fn bound
+/// `Fn(A) -> R` (#223), a name taking a parameter list as a fn type does.
+/// Any name before `(` parses as one so validation can refuse the others.
+fn bound(p: &mut Parser<'_>) {
+    let unsafe_marked = p.at(UNSAFE_KW) && p.nth(1) == IDENT && p.nth(2) == L_PAREN;
+    if !unsafe_marked && !(p.at(IDENT) && p.nth(1) == L_PAREN) {
+        type_(p);
+        return;
+    }
+    let m = p.start();
+    p.eat(UNSAFE_KW);
+    name_ref(p);
+    fn_type_param_list(p, None);
+    if p.at(THIN_ARROW) {
+        ret_type(p);
+    }
+    m.complete(p, FN_BOUND);
 }
 
 /// [`anon_fn_type`], holding the errors only a type has (a missing `(`, a

@@ -13,7 +13,7 @@ repository = "https://github.com/halvko/must-lsp-server"
 # local checkout (`file:///abs/path/to/must`) and `rev` at a commit in it.
 [grammars.must]
 repository = "https://github.com/halvko/must"
-rev = "48dd75a3c10cd6d699e361ca3e33e3a3ad8580d5"
+rev = "8e528117ed7ec53f6ed50d8109d6533d1ddfd43a"
 path = "editors/tree-sitter-must"
 
 [language_servers.must-lsp]

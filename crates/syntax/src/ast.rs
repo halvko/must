@@ -124,6 +124,12 @@ ast_node!(
     ElidedVariantExpr: ELIDED_VARIANT_EXPR
 );
 ast_node!(FnType: FN_TYPE);
+ast_node!(
+    /// `Fn(A) -> R` in a bound (#223): the parameters a value of the bounded
+    /// type is called with and what the call returns. Parsed for any name
+    /// before `(`; validation refuses every name but `Fn`.
+    FnBound: FN_BOUND
+);
 ast_node!(UnitType: UNIT_TYPE);
 ast_node!(NeverType: NEVER_TYPE);
 ast_node!(PathType: PATH_TYPE);
@@ -458,6 +464,7 @@ ast_enum!(
 );
 ast_enum!(
     Type: FnType,
+    FnBound,
     UnitType,
     NeverType,
     PathType,
@@ -1494,10 +1501,7 @@ impl FnType {
     /// The parameter types in order. `None` for a parameter with no type
     /// written (a mistake with its own diagnostic).
     pub fn params_types(&self) -> Vec<Option<Type>> {
-        match self.param_list() {
-            Some(list) => list.params().map(|p| p.ty()).collect(),
-            None => Vec::new(),
-        }
+        param_types(&self.syntax)
     }
     /// The `::<...>` binder — meaningful only on a colon-declared member's
     /// signature (a requirement may be a generic fn); superset-parsed and
@@ -1516,6 +1520,38 @@ impl FnType {
     /// Whether calling a value of this type needs an `unsafe { ... }` block.
     pub fn is_unsafe(&self) -> bool {
         self.unsafe_token().is_some()
+    }
+}
+
+impl FnBound {
+    pub fn name_ref(&self) -> Option<NameRef> {
+        child(&self.syntax)
+    }
+    /// Whether the name is the language's `Fn` (validation refuses others).
+    pub fn is_fn(&self) -> bool {
+        self.name_ref()
+            .is_some_and(|name| name.text() == crate::FN_BOUND_NAME)
+    }
+    pub fn ret_type(&self) -> Option<RetType> {
+        child(&self.syntax)
+    }
+    /// The parameter types in order. `None` for a parameter with no type
+    /// written (a mistake with its own diagnostic).
+    pub fn params_types(&self) -> Vec<Option<Type>> {
+        param_types(&self.syntax)
+    }
+    /// `unsafe Fn(A) -> R`: calls through the bounded parameter need an
+    /// `unsafe { ... }` block.
+    pub fn is_unsafe(&self) -> bool {
+        token(&self.syntax, UNSAFE_KW).is_some()
+    }
+}
+
+/// The types of the `PARAM_LIST` under `node`, in order.
+fn param_types(node: &SyntaxNode) -> Vec<Option<Type>> {
+    match child::<ParamList>(node) {
+        Some(list) => list.params().map(|p| p.ty()).collect(),
+        None => Vec::new(),
     }
 }
 

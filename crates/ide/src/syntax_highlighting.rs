@@ -245,6 +245,9 @@ fn classify_ident(
             }
             Some(classify_type_position(db, file, &parent))
         }
+        // `Fn` in a fn bound (`F: Fn(usize) -> ()`) highlights as a keyword,
+        // matching its completion kind.
+        (NAME_REF, FN_BOUND) => Some((HlTag::Keyword, HlMods::NONE)),
         // A named generic argument's name (`Self` in
         // `Display::<Self = Foo>::fmt`): it names the trait's `Self`
         // parameter, so it reads like the type name it stands for.

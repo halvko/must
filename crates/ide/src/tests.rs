@@ -2728,6 +2728,7 @@ static f = fn::<T: $0>(x: T) -> usize { 1 };
 "#,
         expect_test::expect![[r#"
             Show Trait
+            Fn Keyword
             forget Keyword
         "#]],
     );
@@ -2742,6 +2743,7 @@ static f = fn::<T: Sh$0>(x: T) -> usize { 1 };
 "#,
         expect_test::expect![[r#"
             Show Trait
+            Fn Keyword
             forget Keyword
         "#]],
     );
@@ -2757,6 +2759,7 @@ static f = fn::<T: Show + forget + $0>(x: T) -> usize { 1 };
 "#,
         expect_test::expect![[r#"
             Eq Trait
+            Fn Keyword
         "#]],
     );
 }
@@ -2770,6 +2773,7 @@ static f = fn::<T: Show, U: $0>(x: T, y: U) -> usize { 1 };
 "#,
         expect_test::expect![[r#"
             Show Trait
+            Fn Keyword
             forget Keyword
         "#]],
     );

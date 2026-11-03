@@ -80,9 +80,15 @@ fn no_forget_leaf(db: &dyn Db, ty: &Ty) -> Option<()> {
         Ty::Named(named) if decl_only_move(db, &named.decl) => Some(()),
         // A rigid parameter is whatever its binder ASKED FOR. `T: forget`
         // makes every caller supply a forgettable type, so the body may
-        // forget it; no bound assumes nothing, so the body is checked as
-        // if the parameter were linear.
-        Ty::Param(param) if !param_has_forget_bound(db, &param.item, param.index) => Some(()),
+        // forget it; a fn bound asks for a fn value, which holds no
+        // obligation (TR11). Without either, the body is checked
+        // as if the parameter were linear.
+        Ty::Param(param)
+            if !param_has_forget_bound(db, &param.item, param.index)
+                && !param_has_fn_bound(db, &param.item, param.index) =>
+        {
+            Some(())
+        }
         _ => None,
     }
 }
@@ -133,7 +139,12 @@ pub enum Affine {
 
 fn affine_leaf(db: &dyn Db, ty: &Ty) -> Option<Affine> {
     match ty {
-        Ty::Param(param) => Some(Affine::Param(param.name.clone())),
+        // A fn bound grants copying: what satisfies one is a fn value,
+        // and both copies call the same code.
+        Ty::Param(param) if !param_has_fn_bound(db, &param.item, param.index) => {
+            Some(Affine::Param(param.name.clone()))
+        }
+        Ty::Param(_) => None,
         Ty::Borrow { mutable: true, .. } => Some(Affine::MutBorrow),
         // Everything a value must be consumed FOR, it must also not be
         // duplicated for. The leaves are the disposal walk's own.
@@ -544,6 +555,15 @@ pub fn param_has_forget_bound(db: &dyn Db, item: &ItemLoc, index: u32) -> bool {
         .is_some_and(|param| param.forget)
 }
 
+/// Whether the binder gives the type parameter at `index` of `item` a fn
+/// bound (`F: Fn(usize) -> ()`, #223).
+pub fn param_has_fn_bound(db: &dyn Db, item: &ItemLoc, index: u32) -> bool {
+    crate::item_data(db, item.to_id(db))
+        .as_ref()
+        .and_then(|data| data.generics.get(index as usize))
+        .is_some_and(|param| param.fn_bound.is_some())
+}
+
 /// What the walk found to blame: the phrased root clause, and — when the
 /// root is a rigid PARAMETER rather than a declaration — its name.
 struct Blame {
@@ -615,7 +635,10 @@ fn blame(
             path.push("through the array's element type".to_owned());
             Some(root)
         }
-        Ty::Param(param) if !param_has_forget_bound(db, &param.item, param.index) => {
+        Ty::Param(param)
+            if !param_has_forget_bound(db, &param.item, param.index)
+                && !param_has_fn_bound(db, &param.item, param.index) =>
+        {
             Some(Blame::param(&param.name))
         }
         Ty::RawPtr { .. } | Ty::Borrow { .. } | Ty::Fn(_) | Ty::Param(_) => None,

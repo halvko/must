@@ -732,6 +732,30 @@ fn generics_runs() {
             "left"
         "#]],
     );
+    assert_run(
+        &[
+            "run",
+            "examples/generics.must",
+            "-e",
+            "apply_twice(fn (n) { n * 3 }, 2)",
+        ],
+        0,
+        expect![[r#"
+            18
+        "#]],
+    );
+    assert_run(
+        &[
+            "run",
+            "examples/generics.must",
+            "-e",
+            "four_times(fn (n) { n + 1 }, 0)",
+        ],
+        0,
+        expect![[r#"
+            4
+        "#]],
+    );
 }
 
 #[test]

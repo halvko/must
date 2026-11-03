@@ -1074,6 +1074,38 @@ A binder names each parameter once, across kinds: `fn::<T, T>` and
 `fn::<T, const T: usize>` are both a *duplicate generic parameter* error,
 reported at the second occurrence.
 
+=== Fn bounds
+
+A type param may take a fn bound: `F: Fn(usize) -> usize` says a value of
+`F` is called as the fn type `fn(usize) -> usize`, so `f(x)` type-checks in
+the body. `Fn` is the language's name for this bound, like `forget`, not a
+trait a file declares. It is the one bound that grants copying and
+forgetting: a fn value holds no obligation, so the body may call `f` again,
+pass it on twice and drop it.
+
+```
+static apply_twice = fn::<F: Fn(usize) -> usize>(f: F, x: usize) -> usize {
+    f(f(x))
+};
+static four_times = fn::<G: Fn(usize) -> usize>(g: G, x: usize) -> usize {
+    apply_twice(g, apply_twice(g, x))     // a fn-bounded param passes through
+};
+
+static main = fn() -> usize {
+    apply_twice(fn (n) { n * 3 }, 2)      // `n: usize`, from the bound
+};
+```
+
+A call site passes for `F` a value callable as the bound: a fn value of
+that type, or the caller's own param with the same fn bound. A fn literal
+passed for it takes its parameter types from the bound. A fn bound adds no
+dictionary parameter, because the value it bounds is the code to call.
+
+A fn bound is written in full: it writes its return type (`-> ()` for
+none) and has no holes. A param takes at most one fn bound.
+An `unsafe Fn` bound makes every call through the param need an
+`unsafe { ... }` block, exactly as calling an `unsafe fn` value does.
+
 == Generic type declarations
 
 A `type` item may bind its own type and const params, with

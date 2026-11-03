@@ -702,6 +702,28 @@ static hand_back = fn::<T>(t: T) -> T { t };
 }
 
 #[test]
+fn a_fn_bound_lets_a_generic_body_copy_and_discard_its_parameter() {
+    // `four` passes `g` on twice and `unused` never consumes its `g`.
+    // Without a fn bound the same bodies are refused, and in `mixed` the
+    // leak is `T`'s, not the fn-bounded `F`'s.
+    check_linear(
+        r#"
+static twice = fn::<F: Fn(usize) -> usize>(f: F, x: usize) -> usize { f(f(x)) };
+static four = fn::<G: Fn(usize) -> usize>(g: G, x: usize) -> usize { twice(g, twice(g, x)) };
+static unused = fn::<G: Fn() -> ()>(g: G) -> () { () };
+static dropped = fn::<G>(g: G) -> () { () };
+static copied = fn::<G: forget>(g: G) -> () { let r = struct { a = g, b = g }; () };
+static mixed = fn::<F: Fn() -> (), T>(f: F, t: T) -> () { let r = struct { a = f, b = t }; () };
+"#,
+        expect![[r#"
+            604..610: `g` is not consumed on this path, and `G` may be a type that must be consumed; consume it, or write `G: forget` to require one that can be discarded (`g` is born here and must be consumed at 592..593)
+            686..687: `g` was already consumed: a value of `G` may not be duplicated, and no bound grants copying — borrow it at the first use (`g` is born here, and there is only one of it at 644..645) (first consumed here at 679..680)
+            753..792: `r` is not consumed on this path, and `T` may be a type that must be consumed; consume it, or write `T: forget` to require one that can be discarded (`r` is born here and must be consumed at 759..760)
+        "#]],
+    );
+}
+
+#[test]
 fn the_forget_bound_lets_a_generic_body_discard_its_parameter() {
     // The body-side dual, written: `T: forget` is what a body says when it
     // genuinely drops a `T` on the floor. Its price is at the call — the

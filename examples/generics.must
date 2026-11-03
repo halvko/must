@@ -10,6 +10,8 @@
 // Run: must run examples/generics.must -e 'cube_val'       (=> 27)
 // Run: must run examples/generics.must -e 'braced_val'     (=> 49)
 // Run: must run examples/generics.must -e 'pair_first'     (=> "left")
+// Run: must run examples/generics.must -e 'apply_twice(fn (n) { n * 3 }, 2)'  (=> 18)
+// Run: must run examples/generics.must -e 'four_times(fn (n) { n + 1 }, 0)'   (=> 4)
 
 // A type-param generic, fully annotated: `x: T` and `-> T` are mandatory,
 // not stylistic. With no inference group to lean on, there is no argument
@@ -66,14 +68,23 @@ static pair_first = labeled.a;
 // `Option::<usize>::Some(3)`. See `arrays.must` for a generic const-length
 // buffer end to end.
 
+// A fn bound: `F: Fn(usize) -> usize` makes `f(x)` callable in the body,
+// and the body may call, pass on or drop `f` freely. A fn literal takes its
+// parameter types from the bound (`fn (n) { n * 3 }` needs no `n: usize`);
+// a fn-bounded parameter passes straight through.
+static apply_twice = fn::<F: Fn(usize) -> usize>(f: F, x: usize) -> usize { f(f(x)) };
+static four_times = fn::<G: Fn(usize) -> usize>(g: G, x: usize) -> usize {
+    apply_twice(g, apply_twice(g, x))
+};
+
 // What a rigid `T` cannot do, and why that's the feature: inside
 // `fn::<T>(x: T) -> T { ... }`, writing `x + 1` is a check-time error —
 // "type mismatch: expected `usize`, found `T`" — because `T` unifies only
 // with itself; it never widens into `usize` or anything else just because
 // some caller happens to pass one. Field access and calling `x` are
 // rejected the same way ("no field ... on `T`", "expression of type `T`
-// is not callable"). If any of those were allowed, the one shared body
-// check above would be unsound for whichever instantiation didn't actually
-// support the operation — rigidity is what makes checking once, before
-// instantiation, correct at all. See `errors.must` for the trapped
-// diagnostic verbatim.
+// is not callable"), unless a bound says otherwise. If any of those were
+// allowed, the one shared body check above would be unsound for whichever
+// instantiation didn't actually support the operation — rigidity is what
+// makes checking once, before instantiation, correct at all. See
+// `errors.must` for the trapped diagnostic verbatim.
