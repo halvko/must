@@ -568,6 +568,15 @@ impl ItemHead {
     pub fn unsafe_token(&self) -> Option<SyntaxToken> {
         token(&self.syntax, UNSAFE_KW)
     }
+    /// Whether the `unsafe` is misplaced: it follows the `extern`, or there is
+    /// no `extern`. `false` without an `unsafe`.
+    pub fn vouch_misordered(&self) -> bool {
+        let Some(vouch) = self.unsafe_token() else {
+            return false;
+        };
+        self.extern_token()
+            .is_none_or(|marker| marker.text_range().start() < vouch.text_range().start())
+    }
     /// Every marker, in source order, duplicates included.
     pub fn markers(&self) -> impl Iterator<Item = SyntaxToken> + use<> {
         self.tokens()
