@@ -1879,16 +1879,12 @@ impl InferenceDiagnostic {
             }
             InferenceDiagnostic::NonExhaustiveMatch {
                 missing, scrutinee, ..
-            } => {
-                if missing.len() == 1 && missing[0] == "_" {
-                    format!(
-                        "this `match` does not cover every possible `{}`; add a `_` arm",
-                        scrutinee.display()
-                    )
-                } else {
-                    format!("this `match` does not cover {}", backtick_list(missing))
+            } => match uncovered(missing, scrutinee) {
+                Uncovered::Everything(all) => {
+                    format!("this `match` does not cover {all}; add a `_` arm")
                 }
-            }
+                Uncovered::Patterns(list) => format!("this `match` does not cover {list}"),
+            },
             InferenceDiagnostic::UnreachableArm { .. } => {
                 "unreachable arm: the arms above match every value it matches".to_owned()
             }
@@ -2006,17 +2002,9 @@ impl InferenceDiagnostic {
                 len.display()
             ),
             InferenceDiagnostic::RefutablePattern { missing, ty, .. } => {
-                if missing.len() == 1 && missing[0] == "_" {
-                    format!(
-                        "this pattern does not cover every possible `{}`; use `match`",
-                        ty.display()
-                    )
-                } else {
-                    format!(
-                        "this pattern does not cover {}; use `match`",
-                        backtick_list(missing)
-                    )
-                }
+                let (Uncovered::Everything(what) | Uncovered::Patterns(what)) =
+                    uncovered(missing, ty);
+                format!("this pattern does not cover {what}; use `match`")
             }
             InferenceDiagnostic::PatUnknownType { name, variant, .. } => match variant {
                 Some(variant) => {
@@ -10312,6 +10300,24 @@ struct PatSite {
     arm: Option<PatId>,
 }
 
+/// What a refutable pattern or a non-exhaustive `match` misses, as the
+/// message names it.
+enum Uncovered {
+    /// The only witness is `_`: "every possible `T`".
+    Everything(String),
+    /// The witnesses, each in backticks.
+    Patterns(String),
+}
+
+fn uncovered(missing: &[String], ty: &Ty) -> Uncovered {
+    match missing {
+        [only] if only == "_" => {
+            Uncovered::Everything(format!("every possible `{}`", ty.display()))
+        }
+        _ => Uncovered::Patterns(backtick_list(missing)),
+    }
+}
+
 impl usefulness::Columns for InferCtx<'_> {
     type Ty = Ty;
     type Decl = ItemLoc;
@@ -10321,6 +10327,11 @@ impl usefulness::Columns for InferCtx<'_> {
             Ty::Named(named) => Some(named.decl),
             _ => None,
         }
+    }
+
+    fn within(&mut self, inner: &Ty, outer: &Ty) -> bool {
+        let inner = self.pat_shape(inner);
+        self.pat_shape(outer).strictly_contains(&inner)
     }
 
     fn ctors(&mut self, ty: &Ty) -> Option<Vec<usefulness::Ctor>> {

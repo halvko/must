@@ -44,6 +44,9 @@ pub(crate) trait Columns {
     /// The declaration `ty` names, if any: two types with one declaration
     /// differ only in their arguments.
     fn decl(&mut self, ty: &Self::Ty) -> Option<Self::Decl>;
+    /// Whether `inner` is written somewhere inside `outer`, not `outer`
+    /// itself (`One::<Void>` inside `One::<One::<Void>>`).
+    fn within(&mut self, inner: &Self::Ty, outer: &Self::Ty) -> bool;
 }
 
 /// The most witnesses [`missing`] reports.
@@ -184,6 +187,10 @@ fn complete_signature<C: Columns>(cx: &mut C, rows: &[Vec<Pat>], ty: &C::Ty) -> 
 /// a type without values. Such a shape needs no arm, and an arm for it
 /// never runs.
 fn holds_a_value<C: Columns>(cx: &mut C, ty: &C::Ty, ctor: &Ctor) -> bool {
+    // Not with `ty` on the stack: that would assume `ty` has no value,
+    // which is right for asking whether it has one (some other shape may
+    // give it one) but wrong for asking about one shape (`L::Cons` holds
+    // an `L`, and `L::Nil` is one).
     holds_a_value_in(cx, ty, ctor, &mut Vec::new())
 }
 
@@ -196,10 +203,14 @@ fn inhabited<C: Columns>(cx: &mut C, ty: &C::Ty) -> bool {
 
 /// [`inhabited`], with the types whose answer is being worked out on
 /// `stack`. A type met again inside itself has no value along that path:
-/// a value of it would have to contain itself. Its declaration met again
-/// with other arguments (`Nest::<Pair::<T>>` inside `Nest::<T>`) could go
-/// on growing forever, so that path counts as holding a value: at worst
-/// an arm is asked for that never runs.
+/// a value of it would have to contain itself.
+///
+/// A declaration met again with other arguments is followed when the new
+/// type is written inside the first one of that declaration on the stack
+/// (`One::<Void>` inside `One::<One::<Void>>`): there are only so many
+/// such types, so the walk ends. Otherwise the type grows
+/// (`Nest::<Pair::<T>>` inside `Nest::<T>`) and could go on forever, so
+/// that path counts as holding a value.
 fn inhabited_in<C: Columns>(cx: &mut C, ty: &C::Ty, stack: &mut Vec<C::Ty>) -> bool {
     let Some(all) = cx.ctors(ty) else {
         return true;
@@ -208,10 +219,14 @@ fn inhabited_in<C: Columns>(cx: &mut C, ty: &C::Ty, stack: &mut Vec<C::Ty>) -> b
         return false;
     }
     if let Some(decl) = cx.decl(ty) {
-        for outer in stack.clone() {
-            if cx.decl(&outer).as_ref() == Some(&decl) {
-                return true;
-            }
+        let first = stack
+            .iter()
+            .find(|outer| cx.decl(outer).as_ref() == Some(&decl))
+            .cloned();
+        if let Some(first) = first
+            && !cx.within(ty, &first)
+        {
+            return true;
         }
     }
     stack.push(ty.clone());

@@ -115,6 +115,11 @@ pub struct LocalData {
     /// values from the scrutinee itself, so the move check does not track
     /// it.
     pub test_only: bool,
+    /// A compiler pointer a pattern reaches deep into a borrowed value
+    /// through: the place it borrows. The loan check reads a place rooted
+    /// at its deref as that place, so a binder below it holds its loan on
+    /// the scrutinee.
+    pub points_into: Option<Place>,
 }
 
 /// Why a local is read-only to writes through a pointer
@@ -627,6 +632,7 @@ fn plant_trap(body: &mut MirBody, trap: &CheckTrap) {
         addressable: false,
         read_only: None,
         test_only: false,
+        points_into: None,
     });
     let data = &mut body.blocks[trap.block];
     let origin = data

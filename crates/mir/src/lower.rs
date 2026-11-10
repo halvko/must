@@ -472,10 +472,10 @@ impl LowerCtx<'_> {
             }
         }
         // A broken pattern in a match arm: the arm still lowers, nothing
-        // dispatches to it, and the match's value is refused.
-        // TODO: halvko/must#255: trap only the values that reach the arm. Any other
+        // dispatches to it, and the match's value is refused. Any other
         // pattern is a `let`'s or a parameter's: its destructure must not
         // run.
+        // TODO: halvko/must#255: trap only the values that reach the arm.
         let mut arm_of_pat = None; // built on the first error that needs it
         if !pat_errors.is_empty() {
             let arm_of_pat = arm_of_pat.get_or_insert_with(|| arm_owners(self.body));
@@ -2214,6 +2214,7 @@ impl LowerCtx<'_> {
             hir::Region::Erased,
             held.erase_regions(),
         ));
+        b.locals[pointer].points_into = Some(place.clone());
         b.push_assign(pointer, ValueExpr::Borrow { mutable, place }, origin);
         Place {
             local: pointer,
@@ -2416,6 +2417,7 @@ impl LowerCtx<'_> {
             addressable: false,
             read_only: (!data.mutable).then_some(crate::ReadOnly::Binding),
             test_only: false,
+            points_into: None,
         });
         b.local_for_binding.insert(binding, local);
         b.declare(local);
@@ -2451,6 +2453,7 @@ impl LowerCtx<'_> {
                     addressable: false,
                     read_only: None,
                     test_only: false,
+                    points_into: None,
                 });
                 let val = PatVal::Owned(Box::new(ValueExpr::Use(Operand::Copy(local.into()))));
                 self.bind_pat(b, pat, val, origin);
@@ -2472,6 +2475,7 @@ impl LowerCtx<'_> {
                     addressable: false,
                     read_only: None,
                     test_only: false,
+                    points_into: None,
                 })
             }
         }
@@ -3395,6 +3399,7 @@ impl LowerCtx<'_> {
                 addressable: false,
                 read_only: None,
                 test_only: false,
+                points_into: None,
             });
             b.params.push(local);
         }
@@ -3951,6 +3956,7 @@ impl BodyBuilder {
             addressable: false,
             read_only: None,
             test_only: false,
+            points_into: None,
         });
         let mut blocks = Arena::default();
         let entry = blocks.alloc(BlockData {
@@ -4023,6 +4029,7 @@ impl BodyBuilder {
             addressable: false,
             read_only: None,
             test_only: false,
+            points_into: None,
         })
     }
 

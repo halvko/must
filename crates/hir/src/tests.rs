@@ -19673,40 +19673,115 @@ static k = fn (v: Void) -> usize { match v {} };
     );
 }
 
-// A type has no values when every shape of it has a field without values,
-// at any depth: in another enum's only variant, a record, an array, or
-// itself. Its variant needs no arm and an arm for it never runs; a
-// recursive type with a way out (`L::Nil`) still has values.
+// A type has no values when every value of it would have to hold a value
+// of a type without values, at any depth: in an enum's every variant, a
+// record, an array, or itself. A variant of such a payload needs no arm,
+// and an arm for it never runs.
 #[test]
-fn a_payload_without_values_at_any_depth_needs_no_arm() {
+fn a_payload_enum_whose_variants_all_hold_no_value_needs_no_arm() {
+    // `W`'s only variant holds a `Void`.
     check_diagnostics(
         r#"
 type Void = enum {};
 type W = enum { X(Void) };
-type N = struct { v: Void };
-type Loop = enum { Again(Loop) };
-type E = enum { A(usize), B(W), C(N), D([Void; 1]), F(Loop) };
+type E = enum { A(usize), B(W) };
 static f = fn (e: E) -> usize { match e { ::A(n) => n } };
 static g = fn (e: E) -> usize { match e { ::A(n) => n, ::B(_) => 0 } };
-static h = fn (e: E) -> usize { match e { ::A(n) => n, ::C(_) => 0, ::D(_) => 0 } };
+"#,
+        expect![[r#"
+            197..203: unreachable arm: the arms above match every value it matches
+        "#]],
+    );
+}
+
+#[test]
+fn a_payload_record_with_a_field_without_values_needs_no_arm() {
+    // `N`'s field `v` holds no value.
+    check_diagnostics(
+        r#"
+type Void = enum {};
+type N = struct { v: Void };
+type E = enum { A(usize), B(N) };
+static f = fn (e: E) -> usize { match e { ::A(n) => n } };
+static g = fn (e: E) -> usize { match e { ::A(n) => n, ::B(_) => 0 } };
+"#,
+        expect![[r#"
+            199..205: unreachable arm: the arms above match every value it matches
+        "#]],
+    );
+}
+
+#[test]
+fn a_payload_array_of_a_type_without_values_needs_no_arm() {
+    // A `[Void; 1]` has an element, and no element has a value.
+    check_diagnostics(
+        r#"
+type Void = enum {};
+type E = enum { A(usize), B([Void; 1]) };
+static f = fn (e: E) -> usize { match e { ::A(n) => n } };
+static g = fn (e: E) -> usize { match e { ::A(n) => n, ::B(_) => 0 } };
+"#,
+        expect![[r#"
+            178..184: unreachable arm: the arms above match every value it matches
+        "#]],
+    );
+}
+
+#[test]
+fn a_payload_type_that_only_holds_itself_needs_no_arm() {
+    // Every `Loop` holds another `Loop`, so none is finite.
+    check_diagnostics(
+        r#"
+type Void = enum {};
+type Loop = enum { Again(Loop) };
+type E = enum { A(usize), B(Loop) };
+static f = fn (e: E) -> usize { match e { ::A(n) => n } };
+static g = fn (e: E) -> usize { match e { ::A(n) => n, ::B(_) => 0 } };
+"#,
+        expect![[r#"
+            207..213: unreachable arm: the arms above match every value it matches
+        "#]],
+    );
+}
+
+#[test]
+fn a_recursive_type_with_a_way_out_needs_its_arms() {
+    // `L::Nil` ends a list, so `L::Cons` holds values.
+    check_diagnostics(
+        r#"
+type Void = enum {};
 type L = enum { Cons(usize, L), Nil };
 static k = fn (l: L) -> usize { match l { ::Nil => 0 } };
 "#,
         expect![[r#"
-            289..295: unreachable arm: the arms above match every value it matches
-            361..367: unreachable arm: the arms above match every value it matches
-            374..380: unreachable arm: the arms above match every value it matches
-            462..467: this `match` does not cover `L::Cons(_, _)`
+            93..98: this `match` does not cover `L::Cons(_, _)`
+        "#]],
+    );
+}
+
+#[test]
+fn a_generic_payload_without_values_at_any_depth_needs_no_arm() {
+    // `One::<One::<Void>>` holds a `One::<Void>`, which holds a `Void`; `Either::<Either::<Void, Void>, Void>` the same on each side.
+    check_diagnostics(
+        r#"
+type Void = enum {};
+type One = enum::<T> { X(T) };
+type Either = enum::<L, R> { Left(L), Right(R) };
+type E = enum { A(usize), B(One::<One::<Void>>), C(Either::<Either::<Void, Void>, Void>) };
+static f = fn (e: E) -> usize { match e { ::A(n) => n } };
+static g = fn (e: E) -> usize { match e { ::A(n) => n, ::B(::X(_)) => 0, ::C(_) => 0 } };
+"#,
+        expect![[r#"
+            309..320: unreachable arm: the arms above match every value it matches
+            327..333: unreachable arm: the arms above match every value it matches
         "#]],
     );
 }
 
 #[test]
 fn a_type_that_names_itself_with_larger_arguments_still_needs_its_arms() {
-    // `Nest::<usize>` holds a `Nest::<Pair::<usize>>`, which holds a
-    // `Nest::<Pair::<Pair::<usize>>>`, and so on: asking whether each holds
-    // a value would never end. `B`'s payload counts as one, so its arm is
-    // asked for.
+    // Asking whether `Nest::<usize>` has values must end, though it holds
+    // a `Nest::<Pair::<usize>>`, which holds a bigger one still.
     check_diagnostics(
         r#"
 type Pair = struct::<T> { l: T, r: T };

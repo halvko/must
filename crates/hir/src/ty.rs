@@ -1008,6 +1008,29 @@ impl Ty {
         }
     }
 
+    /// Whether `inner` is written somewhere inside this type, not as the
+    /// type itself.
+    pub(crate) fn strictly_contains(&self, inner: &Ty) -> bool {
+        let parts: Vec<&Ty> = match self {
+            Ty::Fn(f) => f.params.iter().chain(std::iter::once(&f.ret)).collect(),
+            Ty::RawPtr { pointee: part, .. }
+            | Ty::Borrow { referent: part, .. }
+            | Ty::Array { elem: part, .. } => vec![part],
+            Ty::Record(rec) => rec.fields.iter().map(|(_, ty)| ty).collect(),
+            Ty::Named(NamedTy { args, .. }) => args
+                .iter()
+                .filter_map(|arg| match arg {
+                    GenericArg::Ty(ty) => Some(ty),
+                    GenericArg::Region(_) | GenericArg::Const(_) => None,
+                })
+                .collect(),
+            _ => Vec::new(),
+        };
+        parts
+            .into_iter()
+            .any(|part| part == inner || part.strictly_contains(inner))
+    }
+
     pub fn contains_error(&self) -> bool {
         match self {
             Ty::Error => true,
