@@ -44,9 +44,8 @@ pub(crate) trait Columns {
     /// The declaration `ty` names, if any: two types with one declaration
     /// differ only in their arguments.
     fn decl(&mut self, ty: &Self::Ty) -> Option<Self::Decl>;
-    /// Whether `inner` is written somewhere inside `outer`, not `outer`
-    /// itself (`One::<Void>` inside `One::<One::<Void>>`).
-    fn within(&mut self, inner: &Self::Ty, outer: &Self::Ty) -> bool;
+    /// How many types are written in `ty`, itself included.
+    fn size(&mut self, ty: &Self::Ty) -> usize;
 }
 
 /// The most witnesses [`missing`] reports.
@@ -205,12 +204,13 @@ fn inhabited<C: Columns>(cx: &mut C, ty: &C::Ty) -> bool {
 /// `stack`. A type met again inside itself has no value along that path:
 /// a value of it would have to contain itself.
 ///
-/// A declaration met again with other arguments is followed when the new
-/// type is written inside the first one of that declaration on the stack
-/// (`One::<Void>` inside `One::<One::<Void>>`): there are only so many
-/// such types, so the walk ends. Otherwise the type grows
-/// (`Nest::<Pair::<T>>` inside `Nest::<T>`) and could go on forever, so
-/// that path counts as holding a value.
+/// A declaration met again with other arguments is followed while the new
+/// type is no larger than the first one of that declaration on the stack
+/// (`One::<Void>` inside `One::<One::<Void>>`, `Flip::<B, A>` inside
+/// `Flip::<A, B>`): there are only so many such types, and a repeat ends
+/// the path, so the walk ends. A larger one (`Nest::<Pair::<T>>` inside
+/// `Nest::<T>`) could keep growing, so that path counts as holding a
+/// value.
 fn inhabited_in<C: Columns>(cx: &mut C, ty: &C::Ty, stack: &mut Vec<C::Ty>) -> bool {
     let Some(all) = cx.ctors(ty) else {
         return true;
@@ -224,7 +224,7 @@ fn inhabited_in<C: Columns>(cx: &mut C, ty: &C::Ty, stack: &mut Vec<C::Ty>) -> b
             .find(|outer| cx.decl(outer).as_ref() == Some(&decl))
             .cloned();
         if let Some(first) = first
-            && !cx.within(ty, &first)
+            && cx.size(ty) > cx.size(&first)
         {
             return true;
         }

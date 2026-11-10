@@ -6535,6 +6535,27 @@ static f = fn::<@a>(c: bool) -> usize.&::<@a> {
     );
 }
 
+/// A nested pattern under a written `.&mut` scrutinee reads through the
+/// pointers it reaches in with: they hold no loan of their own, so the
+/// reads do not conflict with them.
+#[test]
+fn a_nested_pattern_under_a_written_borrow_is_accepted() {
+    check_loans(
+        r#"
+type In = enum { A(usize), B };
+type E = enum { W(In), Z };
+static f = fn () -> usize {
+    let mut o = E::W(In::A(1));
+    match o.&mut {
+        ::W(::A(x)) => x.*,
+        _ => 0,
+    }
+};
+"#,
+        expect![""],
+    );
+}
+
 /// A binder at any depth under a borrowed scrutinee holds a loan of its
 /// part of the scrutinee: overwriting the scrutinee while the binder is
 /// live is refused two levels down exactly as one level down.

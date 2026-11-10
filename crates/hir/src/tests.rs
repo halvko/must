@@ -19675,8 +19675,8 @@ static k = fn (v: Void) -> usize { match v {} };
 
 // A type has no values when every value of it would have to hold a value
 // of a type without values, at any depth: in an enum's every variant, a
-// record, an array, or itself. A variant of such a payload needs no arm,
-// and an arm for it never runs.
+// record, an array, or itself. A variant whose payload has such a type
+// needs no arm, and an arm for it never runs.
 #[test]
 fn a_payload_enum_whose_variants_all_hold_no_value_needs_no_arm() {
     // `W`'s only variant holds a `Void`.
@@ -19761,7 +19761,8 @@ static k = fn (l: L) -> usize { match l { ::Nil => 0 } };
 
 #[test]
 fn a_generic_payload_without_values_at_any_depth_needs_no_arm() {
-    // `One::<One::<Void>>` holds a `One::<Void>`, which holds a `Void`; `Either::<Either::<Void, Void>, Void>` the same on each side.
+    // Both payloads bottom out in a `Void`, through `One` twice and
+    // through each side of `Either`.
     check_diagnostics(
         r#"
 type Void = enum {};
@@ -19774,6 +19775,26 @@ static g = fn (e: E) -> usize { match e { ::A(n) => n, ::B(::X(_)) => 0, ::C(_) 
         expect![[r#"
             309..320: unreachable arm: the arms above match every value it matches
             327..333: unreachable arm: the arms above match every value it matches
+        "#]],
+    );
+}
+
+#[test]
+fn a_generic_payload_that_only_holds_itself_needs_no_arm() {
+    // Every `K` holds a `K::<Void>`, every `Flip::<A, B>` a `Flip::<B, A>`:
+    // neither grows, and neither has a finite value.
+    check_diagnostics(
+        r#"
+type Void = enum {};
+type K = enum::<T> { X(T, K::<Void>) };
+type Flip = enum::<A, B> { Y(Flip::<B, A>) };
+type E = enum { A(usize), B(K::<usize>), C(Flip::<usize, bool>) };
+static f = fn (e: E) -> usize { match e { ::A(n) => n } };
+static g = fn (e: E) -> usize { match e { ::A(n) => n, ::B(::X(_, _)) => 0, ::C(_) => 0 } };
+"#,
+        expect![[r#"
+            289..303: unreachable arm: the arms above match every value it matches
+            310..316: unreachable arm: the arms above match every value it matches
         "#]],
     );
 }

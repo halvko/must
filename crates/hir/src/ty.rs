@@ -1008,27 +1008,37 @@ impl Ty {
         }
     }
 
-    /// Whether `inner` is written somewhere inside this type, not as the
-    /// type itself.
-    pub(crate) fn strictly_contains(&self, inner: &Ty) -> bool {
-        let parts: Vec<&Ty> = match self {
-            Ty::Fn(f) => f.params.iter().chain(std::iter::once(&f.ret)).collect(),
+    /// Calls `f` on each type written directly inside this one: a
+    /// function's parameters and return type, a pointer's, borrow's or
+    /// array's inner type, a record's fields, a named type's type
+    /// arguments.
+    pub(crate) fn for_each_part(&self, mut f: impl FnMut(&Ty)) {
+        match self {
+            Ty::Fn(fun) => {
+                fun.params.iter().for_each(&mut f);
+                f(&fun.ret);
+            }
             Ty::RawPtr { pointee: part, .. }
             | Ty::Borrow { referent: part, .. }
-            | Ty::Array { elem: part, .. } => vec![part],
-            Ty::Record(rec) => rec.fields.iter().map(|(_, ty)| ty).collect(),
-            Ty::Named(NamedTy { args, .. }) => args
-                .iter()
-                .filter_map(|arg| match arg {
-                    GenericArg::Ty(ty) => Some(ty),
-                    GenericArg::Region(_) | GenericArg::Const(_) => None,
-                })
-                .collect(),
-            _ => Vec::new(),
-        };
-        parts
-            .into_iter()
-            .any(|part| part == inner || part.strictly_contains(inner))
+            | Ty::Array { elem: part, .. } => f(part),
+            Ty::Record(rec) => rec.fields.iter().for_each(|(_, ty)| f(ty)),
+            Ty::Named(NamedTy { args, .. }) => {
+                for arg in args {
+                    match arg {
+                        GenericArg::Ty(ty) => f(ty),
+                        GenericArg::Region(_) | GenericArg::Const(_) => {}
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
+    /// How many types are written in this one, itself included.
+    pub(crate) fn size(&self) -> usize {
+        let mut size = 1;
+        self.for_each_part(|part| size += part.size());
+        size
     }
 
     pub fn contains_error(&self) -> bool {

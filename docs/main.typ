@@ -836,8 +836,9 @@ patterns for what it misses (`` this `match` does not cover
 `Shape::Wrap(Inner::B)` ``). Integers and characters are never listed
 value by value, so a match on them needs a `_` (or a binding) somewhere.
 A type has no values when it is an `enum {}`, or when every value of it
-would have to hold a value of a type without values (an enum each of whose
-variants does, a record or array that does). A variant whose payload has
+would have to hold a value of a type without values: an enum each of whose
+variants has such a payload, a record with a field of such a type, an
+array of one or more elements of such a type. A variant whose payload has
 such a type holds no value itself, so it needs no arm, and an arm for it
 never runs.
 Like every deferred error, running code that actually reaches a missed

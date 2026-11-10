@@ -864,12 +864,19 @@ impl<'a> BodyCheck<'a> {
         for (block, data) in self.body.blocks.iter() {
             for (index, stmt) in data.statements.iter().enumerate() {
                 let StatementKind::Assign {
+                    dest,
                     value: ValueExpr::Borrow { mutable, place },
-                    ..
                 } = &stmt.kind
                 else {
                     continue;
                 };
+                // A pattern pointer is no loan of its own: every access
+                // through it stands for the place it points into, and is
+                // judged there.
+                if dest.projection.is_empty() && self.body.locals[dest.local].points_into.is_some()
+                {
+                    continue;
+                }
                 // A loan whose region nothing recorded cannot be judged
                 // live anywhere; inference records one for every borrow
                 // the language produces, so this is the broken-program

@@ -10329,9 +10329,8 @@ impl usefulness::Columns for InferCtx<'_> {
         }
     }
 
-    fn within(&mut self, inner: &Ty, outer: &Ty) -> bool {
-        let inner = self.pat_shape(inner);
-        self.pat_shape(outer).strictly_contains(&inner)
+    fn size(&mut self, ty: &Ty) -> usize {
+        self.pat_shape(ty).size()
     }
 
     fn ctors(&mut self, ty: &Ty) -> Option<Vec<usefulness::Ctor>> {
