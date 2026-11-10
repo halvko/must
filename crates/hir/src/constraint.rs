@@ -103,6 +103,17 @@ pub enum Cause {
         /// The argument's position in the MEMBER's own list.
         index: u32,
     },
+    /// Axiom: a callee's fn bound (`F: Fn(usize) -> usize`, #223) requires
+    /// the type of what is passed for its parameter. Rendered at the callee
+    /// with the bound spelled out, since the mismatch itself shows only the
+    /// bound's fn type.
+    FnBound {
+        /// The callee's mention: a path, a turbofish, or a dot-call's
+        /// callee.
+        callee: ExprId,
+        /// The BINDER index of the fn-bounded parameter.
+        param: u32,
+    },
     /// Conclusion: this sibling branch of a join produced the type.
     Branch(ExprId),
     /// Conclusion: in an equality, the first operand's type is what the
@@ -1106,6 +1117,28 @@ impl Constraints {
     /// settled before any later join consumes the binding. Joins are
     /// independent of each other beyond that: nesting was already flattened
     /// into single joins during traversal.
+    /// Whether `var` is a pending join's result that an axiom may decide
+    /// before the join solves: none of its witnesses is a rigid type
+    /// parameter. A fn bound (#223) holds a join's result to its fn type
+    /// this way, so a disagreeing branch is blamed instead of the vote's
+    /// loser being the whole join; a witness that is the caller's own
+    /// fn-bounded parameter never unifies with a fn type, so that join
+    /// votes first.
+    pub(crate) fn join_takes_axiom(
+        &self,
+        table: &mut InPlaceUnificationTable<TyVar>,
+        var: TyVar,
+    ) -> bool {
+        let root = table.find(var);
+        self.joins.iter().any(|join| {
+            matches!(resolve_shallow(table, &join.result), Ty::Infer(result) if table.find(result) == root)
+                && join
+                    .witnesses
+                    .iter()
+                    .all(|witness| !matches!(resolve_shallow(table, &witness.ty), Ty::Param(_)))
+        })
+    }
+
     pub(crate) fn solve(
         &mut self,
         table: &mut InPlaceUnificationTable<TyVar>,

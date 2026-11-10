@@ -1158,6 +1158,38 @@ pub fn file_diagnostics(db: &dyn Db, file: SourceFile) -> Vec<Diagnostic> {
                                     ),
                                 }]
                             }
+                            // The callee whose fn bound the argument must
+                            // satisfy, with the bound spelled as written.
+                            Cause::FnBound { callee, param } => {
+                                let Some(callee_node) = ast_for_expr(*callee) else {
+                                    return Vec::new();
+                                };
+                                // A dot-call's callee spans its receiver:
+                                // point at the member's name.
+                                let range = ast::FieldExpr::cast(callee_node.clone())
+                                    .and_then(|field| field.name_ref())
+                                    .map(|name| name.syntax().text_range())
+                                    .unwrap_or_else(|| callee_node.text_range());
+                                let bound = fn_bound_display(expected);
+                                let named = infer::infer(db, item)
+                                    .fn_bound_item_of_expr
+                                    .get(*callee)
+                                    .and_then(|loc| {
+                                        let data = item_data(db, loc.to_id(db)).as_ref()?;
+                                        let name = &data.generics.get(*param as usize)?.name;
+                                        Some(format!(
+                                            "required by the bound `{name}: {bound}` on `{}`",
+                                            loc.display_name()
+                                        ))
+                                    });
+                                vec![RelatedInfo {
+                                    file,
+                                    range,
+                                    message: named.unwrap_or_else(|| {
+                                        format!("required by this call's bound `{bound}`")
+                                    }),
+                                }]
+                            }
                             // The MEMBER's own list. Deliberately NOT folded
                             // into the arm above: that one reads the OWNER's
                             // list off the same node, so a shared arm would
@@ -2677,16 +2709,14 @@ fn trait_definition_diagnostics(db: &dyn Db, file: SourceFile, diagnostics: &mut
                 // TODO: halvko/must#223: a requirement's fn bound needs its
                 // call sites to relate the instantiation to it.
                 let refusal = if owner_kind.is_some_and(ast::FnType::can_cast) {
-                    Some("a fn bound on a requirement's parameter is not supported yet")
+                    Some(simple_error(
+                        bound.syntax().text_range(),
+                        "a fn bound on a requirement's parameter is not supported yet".to_owned(),
+                    ))
                 } else {
                     fn_bound_refusal(fn_bound, fn_bounds)
                 };
-                if let Some(message) = refusal {
-                    diagnostics.push(simple_error(
-                        bound.syntax().text_range(),
-                        message.to_owned(),
-                    ));
-                }
+                diagnostics.extend(refusal);
                 continue;
             }
             let ast::Type::PathType(path) = &bound else {
@@ -4171,22 +4201,67 @@ fn region_param_on_type_declaration(node: &syntax::SyntaxNode) -> bool {
         .unwrap_or(false)
 }
 
+/// A fn bound's fn type spelled as the bound is written: `fn(usize) ->
+/// usize` reads `Fn(usize) -> usize`.
+fn fn_bound_display(ty: &Ty) -> String {
+    let shown = ty.display().to_string();
+    if let Some(rest) = shown.strip_prefix("unsafe fn") {
+        format!("unsafe {}{rest}", syntax::FN_BOUND_NAME)
+    } else if let Some(rest) = shown.strip_prefix("fn") {
+        format!("{}{rest}", syntax::FN_BOUND_NAME)
+    } else {
+        shown
+    }
+}
+
 /// Why a fn bound (`F: Fn(usize) -> ()`, #223) is refused, if it is.
 /// `nth` counts the fn bounds on its parameter so far, this one included.
-fn fn_bound_refusal(fn_bound: &ast::FnBound, nth: usize) -> Option<&'static str> {
+fn fn_bound_refusal(fn_bound: &ast::FnBound, nth: usize) -> Option<Diagnostic> {
+    let range = fn_bound.syntax().text_range();
     if nth > 1 {
-        return Some("a parameter takes at most one fn bound: a value is called one way");
+        return Some(simple_error(
+            range,
+            "a parameter takes at most one fn bound: a value is called one way".to_owned(),
+        ));
+    }
+    // An omitted return is not inferred: `-> ()` is written, like every
+    // other type in the bound.
+    if fn_bound.ret_type().is_none() {
+        let params_end = fn_bound
+            .syntax()
+            .children()
+            .find(|node| ast::ParamList::can_cast(node.kind()))
+            .map(|list| list.text_range().end());
+        return Some(Diagnostic {
+            fix: params_end.map(|end| syntax::Fix {
+                label: "Write `-> ()`".to_owned(),
+                edits: vec![syntax::TextEdit {
+                    range: TextRange::empty(end),
+                    insert: " -> ()".to_owned(),
+                }],
+            }),
+            ..simple_error(
+                range,
+                "a fn bound writes its return type: `-> ()` for none".to_owned(),
+            )
+        });
     }
     // TODO: halvko/must#144: a hole in a bound waits for generic signatures
     // with holes, which fill it from the body.
     if !TypeRef::from_ast(ast::Type::FnBound(fn_bound.clone())).is_fully_typed() {
-        return Some("a fn bound writes every type, its return type included (`-> ()` for none)");
+        return Some(simple_error(
+            range,
+            "a fn bound writes every type: a hole in a bound is not supported yet".to_owned(),
+        ));
     }
     // TODO: halvko/must#223: a borrow in a fn bound needs the call site's
     // region substitution carried into the bound.
     let mut nodes = fn_bound.syntax().descendants();
     if nodes.any(|node| ast::BorrowType::can_cast(node.kind())) {
-        return Some("a fn bound that mentions a borrow is not supported yet");
+        return Some(simple_error(
+            range,
+            "a fn bound that mentions a borrow is not supported yet".to_owned(),
+        ));
     }
     None
 }

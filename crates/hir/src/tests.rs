@@ -5390,16 +5390,17 @@ static b = fn::<G: Fn(u8) -> u8>(g: G) -> usize { call(g) };
 static c = fn::<G>(g: G) -> usize { call(g) };
 "#,
         expect![[r#"
-            136..140: type mismatch: expected `fn(usize) -> usize`, found `fn(u8) -> u8`
-            202..206: type mismatch: expected `fn(usize) -> usize`, found `fn(u8) -> u8`
-            249..253: type mismatch: expected `fn(usize) -> usize`, found `G`
+            141..147: type mismatch: expected `fn(usize) -> usize`, found `fn(u8) -> u8` (required by the bound `F: Fn(usize) -> usize` on `call` at 136..140)
+            207..208: type mismatch: expected `fn(usize) -> usize`, found `fn(u8) -> u8` (required by the bound `F: Fn(usize) -> usize` on `call` at 202..206)
+            254..255: type mismatch: expected `fn(usize) -> usize`, found `G` (required by the bound `F: Fn(usize) -> usize` on `call` at 249..253)
         "#]],
     );
 }
 
 #[test]
 fn fn_bound_on_a_member() {
-    // An inherent member's fn bound holds its dot-call to the bound.
+    // An inherent member's fn bound holds its dot-call and its path call to
+    // the bound; the hint names the bound at the member.
     check_diagnostics(
         r#"
 type Counter = struct { n: usize } with {
@@ -5409,9 +5410,12 @@ type Counter = struct { n: usize } with {
 };
 static ok = fn (c: Counter) -> usize { c.apply(fn (x) { x * 10 }) };
 static bad = fn (c: Counter) -> usize { c.apply(fn (x: u8) -> u8 { x }) };
+static narrow = fn (n: u8) -> u8 { n };
+static by_path = fn (c: Counter) -> usize { Counter::apply(narrow, c) };
 "#,
         expect![[r#"
-            265..287: type mismatch: expected `fn(usize) -> usize`, found `fn(u8) -> u8`
+            265..287: type mismatch: expected `fn(usize) -> usize`, found `fn(u8) -> u8` (required by the bound `F: Fn(usize) -> usize` on `apply` at 259..264)
+            391..397: type mismatch: expected `fn(usize) -> usize`, found `fn(u8) -> u8` (required by the bound `F: Fn(usize) -> usize` on `apply` at 376..390)
         "#]],
     );
 }
@@ -5507,8 +5511,8 @@ static c = fn::<@r, F: Fn(usize.&::<@r>) -> usize>(x: usize.&::<@r>, f: F) -> us
 static d = fn::<F: Fn(usize) -> usize + Fn(u8) -> u8>(f: F) -> usize { f(1) };
 "#,
         expect![[r#"
-            20..29: a fn bound writes every type, its return type included (`-> ()` for none)
-            72..86: a fn bound writes every type, its return type included (`-> ()` for none)
+            20..29: a fn bound writes its return type: `-> ()` for none
+            72..86: a fn bound writes every type: a hole in a bound is not supported yet
             136..162: a fn bound that mentions a borrow is not supported yet
             247..259: a parameter takes at most one fn bound: a value is called one way
         "#]],
@@ -19456,4 +19460,44 @@ static y = fn () { x(2) };
             73..74: `x` and `y` disagree on each other's types; add type annotations to their definitions (defined here at 25..26) (`y` is defined here at 61..62)
         "#]],
     );
+}
+
+#[test]
+fn fn_bound_holds_a_join_argument_to_the_bound() {
+    // The bound decides a join passed for its parameter, like an
+    // annotation would: the branch that disagrees is blamed, not the vote's
+    // loser and not the whole `if`.
+    check_diagnostics(
+        r#"
+static call = fn::<F: Fn(usize) -> usize>(f: F) -> usize { f(1) };
+static narrow = fn (n: u8) -> u8 { n };
+static double = fn (n: usize) -> usize { n * 2 };
+static named = fn (c: bool) -> usize { let h = if c { narrow } else { double }; call(h) };
+static inline = fn (c: bool) -> usize { call(if c { double } else { narrow }) };
+"#,
+        expect![[r#"
+            212..218: type mismatch: expected `fn(usize) -> usize`, found `fn(u8) -> u8` (required by the bound `F: Fn(usize) -> usize` on `call` at 238..242)
+            317..323: type mismatch: expected `fn(usize) -> usize`, found `fn(u8) -> u8` (required by the bound `F: Fn(usize) -> usize` on `call` at 289..293)
+        "#]],
+    );
+}
+
+#[test]
+fn fn_bound_missing_return_offers_a_fix() {
+    let text = "static a = fn::<F: Fn(usize)>(f: F) -> () { f(1) };";
+    let db = RootDatabase::default();
+    let file = SourceFile::new(&db, "test.must".to_owned(), text.to_owned());
+    let diagnostics = crate::file_diagnostics(&db, file);
+    assert_eq!(diagnostics.len(), 1, "diagnostics: {diagnostics:?}");
+    let fix = diagnostics[0].fix.as_ref().expect("diagnostic has a fix");
+    assert_eq!(fix.label, "Write `-> ()`");
+    assert_eq!(fix.edits.len(), 1);
+    assert_eq!(fix.edits[0].insert, " -> ()");
+    assert!(fix.edits[0].range.is_empty());
+    // Right after `Fn(usize)`, so the bound reads `Fn(usize) -> ()`.
+    assert_eq!(u32::from(fix.edits[0].range.start()), 28);
+    let mut fixed = text.to_owned();
+    fixed.insert_str(28, " -> ()");
+    let file = SourceFile::new(&db, "test.must".to_owned(), fixed);
+    assert_eq!(crate::file_diagnostics(&db, file), Vec::new());
 }

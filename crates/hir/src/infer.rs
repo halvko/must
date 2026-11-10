@@ -99,6 +99,10 @@ pub struct InferenceResult {
     /// arguments are passed exactly as written (Self is an ordinary
     /// parameter here — no receiver is appended).
     pub qualified_member_of_expr: ArenaMap<ExprId, ItemLoc>,
+    /// The item whose fn bound (#223) a call site relates its argument to,
+    /// keyed by the callee's MENTION (a path, or a dot-call's callee):
+    /// what [`Cause::FnBound`] names when a mismatch renders.
+    pub fn_bound_item_of_expr: ArenaMap<ExprId, ItemLoc>,
     /// Qualified member PATHS that name one member's fn value, keyed by the
     /// PATH expression: `Point::len` (an inherent member — an ordinary fn,
     /// no dictionary) and `Display::<Self = Foo>::fmt` (a named-Self impl
@@ -2672,12 +2676,11 @@ pub(crate) struct InferCtx<'db> {
     /// canonical slot order (push order — see
     /// [`crate::traits::bound_slots`]).
     pending_obligations: Vec<PendingObligation>,
-    /// Fn bounds from instantiation edges (#223), as (key, instantiation,
-    /// instantiated bound): settled once the call's arguments are checked
+    /// Fn bounds from instantiation edges (#223): settled once the call's arguments are checked
     /// (see [`Self::settle_known_fn_bounds`]), or earlier by a fn literal the
     /// instantiation is the expected type of (see
     /// [`Self::take_fn_bound_hint`]).
-    pending_fn_bounds: Vec<(ExprId, Ty, Ty)>,
+    pending_fn_bounds: Vec<PendingFnBound>,
     /// `const { ... }` nesting depth: a const block lowers to a separate
     /// MIR body, so — like a nested fn literal — it cannot reach the root
     /// body's dictionary parameters (see [`Self::in_nested_body`]).
@@ -2742,6 +2745,20 @@ struct TraitCallCandidate {
     /// Whether the impl member's signature is broken (its definition site
     /// carries the diagnostic; the call refuses silently).
     broken: bool,
+}
+
+/// A fn bound (#223) waiting for its instantiation to be known.
+struct PendingFnBound {
+    /// Where a mismatch squiggles: the argument passed for the bounded
+    /// parameter once the call's arguments are seen (see
+    /// [`InferCtx::blame_fn_bounds_on_args`]), else the callee.
+    blame: ExprId,
+    /// The bounded parameter's instantiation.
+    var: Ty,
+    /// The bound's fn type, instantiated.
+    bound: Ty,
+    /// [`Cause::FnBound`] naming the callee and the parameter.
+    cause: Cause,
 }
 
 /// One `T: Trait` obligation at an instantiation edge, awaiting its
@@ -3518,6 +3535,7 @@ impl<'db> InferCtx<'db> {
     /// body's traversal, so a body's joins are settled by the body alone,
     /// before its copies of other members' signatures are merged.
     pub(crate) fn solve(&mut self) {
+        self.settle_fn_bounds_on_joins();
         let diagnostics = self.constraints.solve(&mut self.table);
         self.result.diagnostics.extend(diagnostics);
         // A fn bound whose argument was a join waits for it to solve, and
@@ -5290,7 +5308,7 @@ impl<'db> InferCtx<'db> {
                 // nothing and its body is checked on its own. `Ty::Error` is
                 // infectious and silent there for the same reason.
                 let own_sig = Ty::fn_type(param_tys.clone(), ret.clone());
-                self.take_fn_bound_hint(expected);
+                let cause = self.take_fn_bound_hint(expected).or(cause);
                 let reported = self.result.diagnostics.len();
                 let fn_ty = self.check(expr, own_sig.clone(), expected, cause);
                 // `check` poisons the unresolved numbers in what it was
@@ -5778,6 +5796,7 @@ impl<'db> InferCtx<'db> {
                             found: args.len(),
                         });
                 }
+                self.blame_fn_bounds_on_args(args, &f.params);
                 for (i, &arg) in args.iter().enumerate() {
                     // The parameter type is an axiom: the cause is
                     // recorded when it binds a variable (blaming a
@@ -6349,6 +6368,7 @@ impl<'db> InferCtx<'db> {
                     found: args.len(),
                 });
         }
+        self.blame_fn_bounds_on_args(args, &f.params);
         for (i, &arg) in args.iter().enumerate() {
             let param = f.params.get(i).cloned().unwrap_or(Ty::Error);
             self.infer_expr_with(arg, &param, Some(Cause::CallSite { call: expr, arg }));
@@ -6730,7 +6750,7 @@ impl<'db> InferCtx<'db> {
         // and are skipped — an owner's bounds are the type declaration's
         // business, checked where the receiver was built.
         self.push_bound_obligations(key, &site.path, &subst);
-        self.relate_fn_bounds(key, &site.path, &subst, &FxHashMap::default());
+        self.relate_fn_bounds(key, mention, &site.path, &subst, &FxHashMap::default());
         subst
     }
 
@@ -6739,9 +6759,14 @@ impl<'db> InferCtx<'db> {
     /// on the spot: an argument may be the caller's OWN fn-bounded parameter
     /// (`apply_twice(g, 1)` inside `fn::<G: Fn(usize) -> usize>`), and a
     /// rigid `G` never unifies with a fn type.
+    ///
+    /// `key` is blamed until an argument takes over (see
+    /// [`Self::blame_fn_bounds_on_args`]); `mention` is where the hint
+    /// naming the bound points.
     fn relate_fn_bounds(
         &mut self,
         key: ExprId,
+        mention: ExprId,
         binder: &SiteName,
         subst: &FxHashMap<u32, Ty>,
         const_subst: &FxHashMap<u32, ConstArgValue>,
@@ -6753,6 +6778,9 @@ impl<'db> InferCtx<'db> {
         if !has_fn_bound {
             return;
         }
+        self.result
+            .fn_bound_item_of_expr
+            .insert(mention, item.clone());
         let mut indices: Vec<u32> = subst.keys().copied().collect();
         indices.sort_unstable();
         for index in indices {
@@ -6760,8 +6788,15 @@ impl<'db> InferCtx<'db> {
                 continue;
             };
             let bound = instantiate_scheme(&bound, &item, subst, const_subst);
-            self.pending_fn_bounds
-                .push((key, subst[&index].clone(), bound));
+            self.pending_fn_bounds.push(PendingFnBound {
+                blame: key,
+                var: subst[&index].clone(),
+                bound,
+                cause: Cause::FnBound {
+                    callee: mention,
+                    param: index,
+                },
+            });
         }
     }
 
@@ -6769,18 +6804,50 @@ impl<'db> InferCtx<'db> {
     /// its fn bound takes the bound as its signature now, so `fn (x) { x +
     /// 1 }` passed for `F: Fn(usize) -> usize` learns `x: usize` before its
     /// body runs.
-    fn take_fn_bound_hint(&mut self, expected: &Ty) {
+    ///
+    /// Returns the bound's [`Cause::FnBound`], for the literal's own check
+    /// to cite: a literal that disagrees with the bound is blamed there,
+    /// against the type the bound just gave its slot.
+    fn take_fn_bound_hint(&mut self, expected: &Ty) -> Option<Cause> {
         let Ty::Infer(want) = self.resolve_shallow(expected) else {
-            return;
+            return None;
         };
-        let Some(at) = (0..self.pending_fn_bounds.len()).find(|&at| {
-            let var = self.pending_fn_bounds[at].1.clone();
+        let at = self.pending_fn_bound_of(want)?;
+        let pending = self.pending_fn_bounds.remove(at);
+        self.check(
+            pending.blame,
+            pending.var,
+            &pending.bound,
+            Some(pending.cause),
+        );
+        Some(pending.cause)
+    }
+
+    /// The pending fn bound whose instantiation is the variable `want`.
+    fn pending_fn_bound_of(&mut self, want: TyVar) -> Option<usize> {
+        (0..self.pending_fn_bounds.len()).find(|&at| {
+            let var = self.pending_fn_bounds[at].var.clone();
             matches!(self.resolve_shallow(&var), Ty::Infer(var) if self.table.find(var) == self.table.find(want))
-        }) else {
+        })
+    }
+
+    /// Blame each pending fn bound on the argument passed for its parameter
+    /// (`call(narrow)` squiggles `narrow`, not `call`), when the parameter's
+    /// type is the bounded instantiation itself. Must run before the
+    /// arguments are checked: checking one binds the variable this matches
+    /// on. A bounded parameter nested in another type (`Option<F>`) keeps
+    /// the callee as the blame.
+    fn blame_fn_bounds_on_args(&mut self, args: &[ExprId], params: &[Ty]) {
+        if self.pending_fn_bounds.is_empty() {
             return;
-        };
-        let (key, var, bound) = self.pending_fn_bounds.remove(at);
-        self.check(key, var, &bound, None);
+        }
+        for (&arg, param) in args.iter().zip(params) {
+            if let Ty::Infer(want) = self.resolve_shallow(param)
+                && let Some(at) = self.pending_fn_bound_of(want)
+            {
+                self.pending_fn_bounds[at].blame = arg;
+            }
+        }
     }
 
     /// Settle every pending fn bound whose instantiation is known, once a
@@ -6790,33 +6857,57 @@ impl<'db> InferCtx<'db> {
         if self.pending_fn_bounds.is_empty() {
             return;
         }
-        for (key, var, bound) in std::mem::take(&mut self.pending_fn_bounds) {
-            if matches!(self.resolve_shallow(&var), Ty::Infer(_)) {
-                self.pending_fn_bounds.push((key, var, bound));
+        for pending in std::mem::take(&mut self.pending_fn_bounds) {
+            if matches!(self.resolve_shallow(&pending.var), Ty::Infer(_)) {
+                self.pending_fn_bounds.push(pending);
             } else {
-                self.settle_fn_bound(key, var, &bound);
+                self.settle_fn_bound(pending);
+            }
+        }
+    }
+
+    /// Settle each pending fn bound whose argument is a join that takes the
+    /// bound as an axiom (see [`Constraints::join_takes_axiom`]) before the
+    /// joins solve, so a branch that disagrees with the bound is the one
+    /// blamed.
+    fn settle_fn_bounds_on_joins(&mut self) {
+        for pending in std::mem::take(&mut self.pending_fn_bounds) {
+            let takes_axiom = match self.resolve_shallow(&pending.var) {
+                Ty::Infer(var) => self.constraints.join_takes_axiom(&mut self.table, var),
+                _ => false,
+            };
+            if takes_axiom {
+                self.settle_fn_bound(pending);
+            } else {
+                self.pending_fn_bounds.push(pending);
             }
         }
     }
 
     /// Settle every fn bound still pending, after the joins have solved.
     fn settle_fn_bounds(&mut self) {
-        for (key, var, bound) in std::mem::take(&mut self.pending_fn_bounds) {
-            self.settle_fn_bound(key, var, &bound);
+        for pending in std::mem::take(&mut self.pending_fn_bounds) {
+            self.settle_fn_bound(pending);
         }
     }
 
     /// An instantiation that is itself a fn-bounded parameter satisfies
     /// `bound` when the two bounds agree; anything else is checked as a
     /// value of the bound's fn type.
-    fn settle_fn_bound(&mut self, key: ExprId, var: Ty, bound: &Ty) {
+    fn settle_fn_bound(&mut self, pending: PendingFnBound) {
+        let PendingFnBound {
+            blame,
+            var,
+            bound,
+            cause,
+        } = pending;
         let own = match self.resolve_shallow(&var) {
             Ty::Param(param) => {
                 crate::ty::param_fn_bound(self.db, param.item.to_id(self.db), param.index)
             }
             _ => None,
         };
-        self.check(key, own.unwrap_or(var), bound, None);
+        self.check(blame, own.unwrap_or(var), &bound, Some(cause));
     }
 
     /// Mint one fresh EXISTENTIAL per member-own REGION binder, and relate
@@ -8606,7 +8697,7 @@ impl<'db> InferCtx<'db> {
         // would need a captured dictionary — reserved; the reservation is
         // the WHOLE story for such a mention (no cannot-infer noise on
         // params the reserved value was never going to determine).
-        self.relate_fn_bounds(expr, &owner, &subst, &const_subst);
+        self.relate_fn_bounds(expr, expr, &owner, &subst, &const_subst);
         let mut reserved_as_value = false;
         if !crate::traits::bound_slots(self.db, loc.file, generics).is_empty() {
             if self.direct_callees.contains(&expr) {
