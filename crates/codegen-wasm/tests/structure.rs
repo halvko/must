@@ -528,23 +528,69 @@ static main = fn () -> usize { apply(twice, 21) };
     assert_eq!(priced.instances, plain.instances);
 }
 
-/// TODO: references in wasm (halvko/must#16). Until then a borrow of a
-/// temporary is refused like a borrow of a named local.
+/// A borrowing function nothing calls costs the module nothing: no frame,
+/// no stack pointer, the same bytes as the program without it.
 #[test]
-fn borrowing_a_temporary_is_refused_like_any_other_safe_borrow() {
-    let db = RootDatabase::default();
-    let source = r#"
-static get = fn::<@a>(r: i64.&::<@a>) -> i64 { r.* };
-static mk = fn () -> i64 { 7 };
-static main = fn () -> i64 { get(mk().&) };
+fn an_unreached_borrow_costs_the_module_nothing() {
+    const PROGRAM: &str = r#"
+static add = fn (a: usize, b: usize) -> usize { a + b };
+static main = fn () -> usize { add(2, 3) };
 "#;
-    let loc = harness::prepare(&db, source, "main()");
-    let Err(codegen_wasm::CompileError::Unsupported(refusal)) = codegen_wasm::compile(&db, &loc)
-    else {
-        panic!("the backend must refuse a borrow it cannot lay out");
-    };
+    const NEVER: &str = r#"
+static never = fn (n: usize) -> usize { let r = n.&; r.* };
+"#;
+    let with_borrow = format!("{PROGRAM}{NEVER}");
+    let plain = compile(PROGRAM, "main()");
+    let borrowing = compile(&with_borrow, "main()");
     assert_eq!(
-        refusal.message(),
-        "a safe borrow (`.&` / `.&mut`) is not supported by the wasm backend yet"
+        plain.wasm, borrowing.wasm,
+        "a borrow nothing reaches must not change the module"
     );
+}
+
+#[test]
+fn a_shadow_stack_the_engine_will_not_grow_traps_as_a_stack_overflow() {
+    // The interpreter gives up on a frame count; compiled code gives up
+    // when the engine refuses `memory.grow`. The two limits are different
+    // numbers (the harness's known gaps), so this does not compare the
+    // two sides: it caps memory at two pages and pins that compiled code
+    // reports a stack overflow instead of writing out of bounds.
+    let source = r#"
+static first = fn::<@a>(r: [u64; 64].&::<@a>) -> u64 { r.*[63] };
+static deep = fn(n: u64) -> u64 {
+    let big: [u64; 64] = [n; 64];
+    let mine = first(big.&);
+    if n == 0 { mine } else { mine + deep(n - 1) }
+};
+"#;
+    let artifact = compile(source, "deep(1000)");
+    let engine = wasmi::Engine::default();
+    let module = wasmi::Module::new(&engine, &artifact.wasm[..]).expect("validates");
+    let limits = wasmi::StoreLimitsBuilder::new()
+        .memory_size(2 * 65536)
+        .build();
+    let mut store = wasmi::Store::new(&engine, limits);
+    store.limiter(|limits| limits);
+    let mut linker = wasmi::Linker::new(&engine);
+    linker
+        .func_wrap("must", "print", |_: i32, _: i32| {})
+        .expect("print");
+    let instance = linker
+        .instantiate_and_start(&mut store, &module)
+        .expect("instantiates");
+    let entry = instance
+        .get_typed_func::<(), i64>(&store, codegen_wasm::ENTRY_EXPORT)
+        .expect("entry");
+    entry
+        .call(&mut store, ())
+        .expect_err("1000 frames of 64 slots do not fit in two pages");
+    let code = instance
+        .get_global(&store, "trap_code")
+        .expect("the module exports `trap_code`")
+        .get(&store)
+        .i32()
+        .expect("`trap_code` is an i32");
+    let info = &artifact.traps[usize::try_from(code).expect("the module recorded a trap")];
+    assert_eq!(info.kind, codegen_wasm::TrapKind::StackOverflow);
+    assert_eq!(info.message, "stack overflow");
 }
