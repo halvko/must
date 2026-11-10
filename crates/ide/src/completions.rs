@@ -168,6 +168,9 @@ pub struct CompletionItem {
     /// variant), not the head of a longer one: [`space_before_block`] ends
     /// it in a space when it heads a `match` or `if`.
     pub(crate) whole_expr: bool,
+    /// Edits elsewhere in the file that come with the candidate: a fresh
+    /// region's declaration in its binder ([`borrow_region_items`]).
+    pub additional_edits: Vec<crate::TextEdit>,
 }
 
 /// A completion's replacement range plus what to insert there. Same shape
@@ -223,6 +226,8 @@ pub enum CompletionItemKind {
     /// insertion, and an editor that renders kind icons should say so
     /// rather than dressing it up as a keyword.
     Snippet,
+    /// A region in a borrow type's turbofish (`::<@a>`).
+    Region,
 }
 
 /// Where a candidate comes from — the sort tier, low to high. See the
@@ -345,6 +350,7 @@ fn completion_item_at_tier(
         kind,
         detail,
         whole_expr: false,
+        additional_edits: Vec::new(),
     }
 }
 
@@ -574,6 +580,20 @@ pub(crate) fn completions(
         return Vec::new();
     }
 
+    // A borrow's head and region slots read their own text: the marker
+    // splice would land inside the head or turbofish being written.
+    if let Some(mut items) = borrow_head_items(&real_root, real_text, offset).or_else(|| {
+        borrow_region_slot(&real_root, real_text, offset).map(|slot| borrow_region_items(&slot))
+    }) {
+        items.sort_by(|a, b| a.sort_text.cmp(&b.sort_text));
+        return items;
+    }
+    // `&` is a trigger character for the borrow heads; anywhere else it is
+    // the binary operator, after which a list would only get in the way.
+    if real_text[..usize::from(offset)].ends_with('&') {
+        return Vec::new();
+    }
+
     let edit_range = prefix_range(real_text, offset);
 
     let mut spliced = real_text.clone();
@@ -628,7 +648,10 @@ pub(crate) fn completions(
         )],
         Some(Context::WithElement) => keyword_items(&[SyntaxKind::IMPL_KW], edit_range),
         Some(Context::TypePosition) => {
-            let mut items = type_scope_items(db, file, |_| true, edit_range);
+            let rest = real_text[usize::from(offset)..]
+                .trim_start_matches(|c: char| c.is_alphanumeric() || c == '_');
+            let mut items =
+                type_scope_items(db, file, |_| true, !rest.starts_with("::"), edit_range);
             items.extend(builtin_type_items(|_| true, edit_range));
             items.extend(keyword_items(TYPE_KEYWORDS, edit_range));
             items
@@ -1147,6 +1170,7 @@ fn impl_head_items(
             db,
             file,
             |loc| hir::type_item_can_implement(db, loc),
+            false,
             edit_range,
         );
         items.extend(builtin_type_items(hir::builtin_can_implement, edit_range));
@@ -1660,11 +1684,13 @@ fn payload_stops(payload: &[hir::Ty]) -> String {
 }
 
 /// Type-position candidates: only the file's declared types, those `keep`
-/// accepts.
+/// accepts. With `open_args`, a generic one writes `Name::<` and leaves its
+/// arguments and `>` to the user (P17).
 fn type_scope_items(
     db: &RootDatabase,
     file: SourceFile,
     keep: impl Fn(&hir::ItemLoc) -> bool,
+    open_args: bool,
     edit_range: TextRange,
 ) -> Vec<CompletionItem> {
     hir::type_scope(db, file)
@@ -1672,16 +1698,30 @@ fn type_scope_items(
         .filter(|(_, loc)| keep(loc))
         .map(|(name, loc)| {
             let item = loc.to_id(db);
-            completion_item(
+            let mut candidate = completion_item(
                 name,
                 type_item_kind(db, item),
                 Provenance::Item,
                 TYPE_TIER_NONE,
                 type_item_detail(db, item),
                 edit_range,
-            )
+            );
+            if open_args && takes_written_args(db, item) {
+                candidate.text_edit.insert = InsertText::Plain(format!("{name}::<"));
+            }
+            candidate
         })
         .collect()
+}
+
+/// Whether a type's binder declares a type or const parameter, which every
+/// mention writes.
+fn takes_written_args(db: &RootDatabase, item: hir::ItemId<'_>) -> bool {
+    hir::item_data(db, item).as_ref().is_some_and(|data| {
+        data.generics
+            .iter()
+            .any(|param| param.kind != hir::item_tree::GenericParamKind::Region)
+    })
 }
 
 /// Expression/statement-position candidates: file items, builtins,
@@ -2850,6 +2890,449 @@ fn locals_in_block(
         }
     }
     current
+}
+
+/// A borrow type's region turbofish being written: `T.˽`, `T.&m˽`,
+/// `T.&mut:˽`, `T.&::<@˽`, or a further member of a join, `T.&::<@a + @˽`.
+/// Every borrow type needs a region (`hir`'s `BORROW_NEEDS_REGION`).
+struct BorrowRegionSlot {
+    /// What the candidates replace: from the end of `&`/`mut` to the cursor
+    /// (and over a `>` an editor already closed), from the type's `.`, or a
+    /// join member's name.
+    replace: TextRange,
+    shape: SlotShape,
+    regions: hir::BorrowRegions,
+    /// Regions the signature's other parameters name.
+    mentioned: Vec<String>,
+}
+
+/// Where in a borrow type a [`BorrowRegionSlot`] sits, which decides what
+/// its candidates write.
+enum SlotShape {
+    /// After the type's `.`: the region heads (`&`, `&mut`) the typed text
+    /// is a prefix of, each written with its whole turbofish, and `&raw`,
+    /// which takes no region, when it is also a prefix of that.
+    Head {
+        heads: Vec<&'static str>,
+        raw: Option<BorrowHead>,
+    },
+    /// Inside the turbofish: candidates are a whole `::<@b>`.
+    Turbofish,
+    /// A join member, with the regions the join already lists: candidates
+    /// are a bare `@b`.
+    Join(Vec<String>),
+}
+
+/// Detect a [`BorrowRegionSlot`] at `offset`, on the REAL tree: the typed
+/// tail after the borrow's `&`/`mut` must be a prefix of `::<@name`, or
+/// after a join's `+` a prefix of `@name`.
+fn borrow_region_slot(
+    real_root: &SyntaxNode,
+    real_text: &str,
+    offset: TextSize,
+) -> Option<BorrowRegionSlot> {
+    let bytes = real_text.as_bytes();
+    let is_ident = |b: u8| b.is_ascii_alphanumeric() || b == b'_';
+    let mut start = usize::from(offset);
+    while start > 0 && is_ident(bytes[start - 1]) {
+        start -= 1;
+    }
+    let at = start > 0 && bytes[start - 1] == b'@';
+    if at {
+        start -= 1;
+    } else {
+        start = usize::from(offset);
+    }
+
+    let member_start = TextSize::new(start as u32);
+    if let Some(slot) = join_member_slot(real_text, member_start, offset) {
+        return Some(slot);
+    }
+
+    let angle = start > 0 && bytes[start - 1] == b'<';
+    if angle {
+        start -= 1;
+    }
+    let colons = bytes[..start]
+        .iter()
+        .rev()
+        .take(2)
+        .take_while(|&&b| b == b':')
+        .count();
+    if (at && !angle) || (angle && colons < 2) {
+        return None;
+    }
+    start -= colons;
+    let head = real_root
+        .token_at_offset(TextSize::new(start as u32))
+        .left_biased()?;
+    if head.text_range().end() != TextSize::new(start as u32) {
+        return None;
+    }
+    let borrow = ast::BorrowType::cast(head.parent()?)?;
+    let head_end = borrow
+        .mut_token()
+        .or_else(|| borrow.amp_token())?
+        .text_range()
+        .end();
+    if head_end != head.text_range().end() {
+        return None;
+    }
+    let after = &real_text[usize::from(offset)..];
+    // Past a typed `<`, a `>` right at the cursor is the turbofish's own.
+    let closed = angle && after.starts_with('>');
+    let end = offset + TextSize::new(u32::from(closed));
+    let replace = TextRange::new(head_end, end);
+    Some(borrow_region_slot_at(
+        &borrow,
+        replace,
+        SlotShape::Turbofish,
+    ))
+}
+
+/// The slot when the region being typed (from `member_start`) is one member
+/// of a join. A lone `@` is no region token, so the question is put to a
+/// copy with a whole region name spliced in, where the join parses.
+fn join_member_slot(
+    real_text: &str,
+    member_start: TextSize,
+    offset: TextSize,
+) -> Option<BorrowRegionSlot> {
+    // Only a `+` beside the member makes a join; anything else skips the
+    // reparse.
+    let before = real_text[..usize::from(member_start)].trim_end();
+    let after = real_text[usize::from(offset)..]
+        .trim_start_matches(|c: char| c.is_alphanumeric() || c == '_')
+        .trim_start();
+    if !before.ends_with('+') && !after.starts_with('+') {
+        return None;
+    }
+    let marker = splice_marker_region(real_text, TextRange::new(member_start, offset), "", "")?;
+    let region = ast::RegionArg::cast(marker.parent()?)?;
+    let join: Vec<String> = region
+        .regions()
+        .filter(|token| token != &marker)
+        .map(|token| token.text().to_owned())
+        .collect();
+    if join.is_empty() {
+        return None;
+    }
+    let borrow = region
+        .syntax()
+        .ancestors()
+        .find_map(ast::BorrowType::cast)?;
+    let replace = TextRange::new(member_start, offset);
+    Some(borrow_region_slot_at(
+        &borrow,
+        replace,
+        SlotShape::Join(join),
+    ))
+}
+
+/// The region token of a copy of `real_text` with `range` replaced by
+/// `before`, a marker region and `after`: a slot the real tree does not
+/// parse as a region is read off that copy.
+fn splice_marker_region(
+    real_text: &str,
+    range: TextRange,
+    before: &str,
+    after: &str,
+) -> Option<syntax::SyntaxToken> {
+    let mut spliced = real_text[..usize::from(range.start())].to_owned();
+    spliced.push_str(before);
+    spliced.push('@');
+    spliced.push_str(MARKER);
+    spliced.push_str(after);
+    spliced.push_str(&real_text[usize::from(range.end())..]);
+    let root = syntax::parse(&spliced).syntax_node();
+    root.token_at_offset(range.start() + TextSize::of(before))
+        .find(|t| t.kind() == SyntaxKind::REGION_IDENT && t.text().contains(MARKER))
+}
+
+fn borrow_region_slot_at(
+    borrow: &ast::BorrowType,
+    replace: TextRange,
+    shape: SlotShape,
+) -> BorrowRegionSlot {
+    let regions = hir::borrow_regions(borrow.syntax());
+    let mut mentioned: Vec<String> = Vec::new();
+    let params = regions
+        .signature
+        .iter()
+        .flat_map(|(owner, _)| owner.children())
+        .filter(|c| c.kind() == SyntaxKind::PARAM_LIST);
+    for other in params
+        .flat_map(|c| c.descendants())
+        .filter_map(ast::BorrowType::cast)
+        .filter(|other| other != borrow)
+    {
+        let names = other
+            .generic_arg_list()
+            .into_iter()
+            .flat_map(|list| list.args())
+            .filter_map(|arg| match arg {
+                ast::GenericArg::RegionArg(region) => Some(region),
+                _ => None,
+            })
+            .flat_map(|region| region.regions());
+        for name in names {
+            let name = name.text().to_owned();
+            if !mentioned.contains(&name) {
+                mentioned.push(name);
+            }
+        }
+    }
+    BorrowRegionSlot {
+        replace,
+        shape,
+        regions,
+        mentioned,
+    }
+}
+
+/// A head a `.` can start.
+#[derive(Clone, Copy)]
+struct BorrowHead {
+    text: &'static str,
+    detail: &'static str,
+    /// Whether its type form takes a region turbofish.
+    takes_region: bool,
+}
+
+const BORROW_HEADS: [BorrowHead; 3] = [
+    BorrowHead {
+        text: "&",
+        detail: "shared borrow",
+        takes_region: true,
+    },
+    BorrowHead {
+        text: "&mut",
+        detail: "mutable borrow",
+        takes_region: true,
+    },
+    BorrowHead {
+        text: "&raw",
+        detail: "raw pointer",
+        takes_region: false,
+    },
+];
+
+/// The candidates right after a `.`, where the typed text is a prefix of a
+/// head in [`BORROW_HEADS`]. In an expression (`n.&m`) the heads are written
+/// bare, since an operation never carries a region (G11); in a type each
+/// region head is written with its whole turbofish.
+fn borrow_head_items(
+    real_root: &SyntaxNode,
+    real_text: &str,
+    offset: TextSize,
+) -> Option<Vec<CompletionItem>> {
+    let before = &real_text[..usize::from(offset)];
+    let start = TextSize::new(before.rfind('.')? as u32 + 1);
+    let typed = &before[usize::from(start)..];
+    let heads: Vec<BorrowHead> = BORROW_HEADS
+        .into_iter()
+        .filter(|head| head.text.starts_with(typed))
+        .collect();
+    if heads.is_empty() {
+        return None;
+    }
+    let replace = TextRange::new(start, offset);
+    // A written `&` says on the real tree which it is.
+    let in_expression = real_root
+        .token_at_offset(start)
+        .find(|t| t.kind() == SyntaxKind::AMP && t.text_range().start() == start)
+        .and_then(|amp| amp.parent())
+        .is_some_and(|parent| parent.kind() == SyntaxKind::BORROW_EXPR);
+    if in_expression {
+        let items = heads
+            .into_iter()
+            .map(|head| head_item(head.text, head.detail.to_owned(), replace))
+            .collect();
+        return Some(items);
+    }
+    let slot = borrow_type_head_slot(real_text, replace, &heads)?;
+    Some(borrow_region_items(&slot))
+}
+
+/// The slot of a type's `.` head, found by parsing a copy with a complete
+/// borrow written after the `.`, since `T.` alone is not a borrow type.
+fn borrow_type_head_slot(
+    real_text: &str,
+    replace: TextRange,
+    heads: &[BorrowHead],
+) -> Option<BorrowRegionSlot> {
+    let marker = splice_marker_region(real_text, replace, "&::<", ">")?;
+    let borrow = marker
+        .parent()?
+        .ancestors()
+        .find_map(ast::BorrowType::cast)?;
+    if borrow.amp_token()?.text_range().start() != replace.start() {
+        return None;
+    }
+    let raw = heads.iter().copied().find(|head| !head.takes_region);
+    let heads = heads
+        .iter()
+        .filter(|head| head.takes_region)
+        .map(|head| head.text)
+        .collect();
+    Some(borrow_region_slot_at(
+        &borrow,
+        replace,
+        SlotShape::Head { heads, raw },
+    ))
+}
+
+fn head_item(head: &str, detail: String, replace: TextRange) -> CompletionItem {
+    completion_item_at_tier(
+        head,
+        CompletionItemKind::Keyword,
+        Provenance::Keyword as u8,
+        TYPE_TIER_NONE,
+        Some(detail),
+        replace,
+    )
+}
+
+/// The candidates for a [`BorrowRegionSlot`]: each region in the form its
+/// shape writes, and `&raw` where it is a head.
+fn borrow_region_items(slot: &BorrowRegionSlot) -> Vec<CompletionItem> {
+    let mut items = Vec::new();
+    // After `.&r`, only `&raw` fits: no region to look for.
+    if !matches!(&slot.shape, SlotShape::Head { heads, .. } if heads.is_empty()) {
+        for (name, tier, detail, edit) in region_candidates(slot) {
+            let texts = match &slot.shape {
+                SlotShape::Head { heads, .. } => heads
+                    .iter()
+                    .map(|head| format!("{head}::<{name}>"))
+                    .collect(),
+                SlotShape::Turbofish => vec![format!("::<{name}>")],
+                SlotShape::Join(_) => vec![name],
+            };
+            for text in texts {
+                let mut item = completion_item_at_tier(
+                    text,
+                    CompletionItemKind::Region,
+                    tier,
+                    TYPE_TIER_NONE,
+                    Some(detail.clone()),
+                    slot.replace,
+                );
+                item.additional_edits.extend(edit.clone());
+                items.push(item);
+            }
+        }
+    }
+    if let SlotShape::Head { raw: Some(raw), .. } = slot.shape {
+        let detail = format!("{}, which takes no region", raw.detail);
+        items.push(head_item(raw.text, detail, slot.replace));
+    }
+    items
+}
+
+/// The regions a [`BorrowRegionSlot`] can name, each with its tier, detail
+/// and any declaring edit, most likely first (P17). Where the region is
+/// inferred, `@_` leads the declared regions. In a signature a fresh region
+/// is offered too; a parameter ranks a region no other parameter names
+/// first, a return type one a parameter names.
+fn region_candidates(
+    slot: &BorrowRegionSlot,
+) -> Vec<(String, u8, String, Option<crate::TextEdit>)> {
+    let joined: &[String] = match &slot.shape {
+        SlotShape::Join(join) => join,
+        _ => &[],
+    };
+    let declared = slot
+        .regions
+        .declared
+        .iter()
+        .filter(|name| !joined.contains(name));
+    let Some((owner, in_return)) = &slot.regions.signature else {
+        let mut candidates = Vec::new();
+        if slot.regions.inferred && !matches!(slot.shape, SlotShape::Join(_)) {
+            candidates.push((
+                "@_".to_owned(),
+                Provenance::Gold as u8,
+                "infer the region".to_owned(),
+                None,
+            ));
+        }
+        candidates.extend(declared.map(|name| {
+            (
+                name.clone(),
+                Provenance::Local as u8,
+                format!("region declared in the binder `{name}`"),
+                None,
+            )
+        }));
+        return candidates;
+    };
+    let (unused_tier, fresh_tier, mentioned_tier) = if *in_return { (1, 2, 0) } else { (0, 1, 2) };
+    let mut candidates: Vec<_> = declared
+        .map(|name| {
+            let tier = if slot.mentioned.contains(name) {
+                mentioned_tier
+            } else {
+                unused_tier
+            };
+            (
+                name.clone(),
+                tier,
+                format!("region declared in the binder `{name}`"),
+                None,
+            )
+        })
+        .collect();
+    let fresh = ('a'..='z')
+        .map(|c| format!("@{c}"))
+        .find(|name| !slot.regions.declared.contains(name) && !slot.mentioned.contains(name));
+    if let Some(fresh) = fresh
+        && let Some(edit) = declare_region(owner, &fresh)
+    {
+        let detail = format!("new region, declared in the binder `{fresh}`");
+        candidates.push((fresh, fresh_tier, detail, Some(edit)));
+    }
+    candidates
+}
+
+/// The edit declaring `region` in the binder of `owner` (a fn literal or fn
+/// type): after its last region (regions come first, G10), at the front of
+/// a binder with none, or a whole `::<@a>` after a `fn` with no binder.
+fn declare_region(owner: &SyntaxNode, region: &str) -> Option<crate::TextEdit> {
+    let list = ast::FnLiteral::cast(owner.clone())
+        .and_then(|it| it.generic_param_list())
+        .or_else(|| ast::FnType::cast(owner.clone()).and_then(|it| it.generic_param_list()));
+    let Some(list) = list else {
+        let fn_kw = owner
+            .children_with_tokens()
+            .find(|t| t.kind() == SyntaxKind::FN_KW)?;
+        return Some(crate::TextEdit {
+            range: TextRange::empty(fn_kw.text_range().end()),
+            insert: format!("::<{region}>"),
+        });
+    };
+    if let Some(last) = list
+        .params()
+        .filter(|param| matches!(param, ast::GenericParam::RegionParam(_)))
+        .last()
+    {
+        return Some(crate::TextEdit {
+            range: TextRange::empty(last.syntax().text_range().end()),
+            insert: format!(", {region}"),
+        });
+    }
+    let l_angle = list
+        .syntax()
+        .children_with_tokens()
+        .find(|t| t.kind() == SyntaxKind::L_ANGLE)?;
+    let separator = if list.params().next().is_some() {
+        ", "
+    } else {
+        ""
+    };
+    Some(crate::TextEdit {
+        range: TextRange::empty(l_angle.text_range().end()),
+        insert: format!("{region}{separator}"),
+    })
 }
 
 #[cfg(test)]

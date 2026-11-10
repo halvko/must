@@ -57,8 +57,8 @@ pub fn server_capabilities() -> lsp_types::ServerCapabilities {
         code_lens_provider: Some(lsp_types::CodeLensOptions {
             resolve_provider: Some(false),
         }),
-        // Trigger chars registered for `.`/`::` — member/variant
-        // candidates classify both.
+        // Trigger chars: `.` and `:` (member and variant candidates
+        // classify both `.` and `::`), and `&`, a borrow type's head (P17).
         //
         // `{` is deliberately not one of them: opening any `{` — a
         // function body chief among them — is the least-wanted prediction
@@ -69,7 +69,7 @@ pub fn server_capabilities() -> lsp_types::ServerCapabilities {
         // `NoBraces` shape always has been.
         completion_provider: Some(lsp_types::CompletionOptions {
             resolve_provider: Some(false),
-            trigger_characters: Some(vec![".".to_owned(), ":".to_owned()]),
+            trigger_characters: Some(vec![".".to_owned(), ":".to_owned(), "&".to_owned()]),
             ..Default::default()
         }),
         execute_command_provider: Some(lsp_types::ExecuteCommandOptions {
