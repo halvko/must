@@ -206,10 +206,10 @@ fn inhabited<C: Columns>(cx: &mut C, ty: &C::Ty) -> bool {
 ///
 /// Whether a generic type has values depends on its type arguments only
 /// through whether each of them has values, so each argument is replaced
-/// by `()` or `!` first. A declaration then comes in only so many
-/// versions, and a type that holds itself with other arguments
-/// (`Nest::<Pair::<T>>` inside `Nest::<T>`, `Flip::<B, A>` inside
-/// `Flip::<A, B>`) meets one of them again.
+/// by `()` or `!` first. A declaration then has finitely many versions
+/// (each argument is `()` or `!`), so a type that holds itself with other
+/// arguments (`Nest::<Pair::<T>>` inside `Nest::<T>`, `Flip::<B, A>`
+/// inside `Flip::<A, B>`) meets one of them again.
 fn inhabited_in<C: Columns>(cx: &mut C, ty: &C::Ty, stack: &mut Vec<C::Ty>) -> bool {
     let args = cx.type_args(ty);
     let ty = if args.is_empty() {
