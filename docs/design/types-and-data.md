@@ -94,14 +94,16 @@
   share with it (halvko/must#233). Bodies have no order, so a tie is never broken by one, and the
   vote counts exact shapes (but for a literal's number), not T12's families (whose arguments come
   from the first branch): the result never depends on the order of the items.
-  After each round of fills, a field access or index waiting for its receiver (T03) is retried
-  against what the group decided, until none moves, and what it determines fills like any use.
+  A field access or index waiting for its receiver (T03) projects as soon as the group
+  determines the receiver, while it votes too: a use votes with the signature it makes the
+  member, its projections included, so plurality decides as if the receiver were written. A
+  member with a use that waits on another body's projection is decided after the members that
+  may determine that receiver, the same whether or not it is written.
   No body's own error decides a type: a variable that meets an erroneous type stays unbound
   while the group decides, and becomes `{error}` in its own body only after. A body's mentions
   of a member all vote with its one copy, though, so a mention that errors in its own body still
   counts for the type the body gives the member; the program has an error there already, and the
-  count only moves where the others are reported. A variable a member's body met an error on
-  that is
+  count only moves where the others are reported. A variable a member's body met an error on that is
   still open in what the member produces (its value, or what its functions return) after the
   members' uses becomes `{error}`, so no fully typed body decides what the body got wrong;
   every signature sharing the variable gets `{error}` too. A variable only in a function's

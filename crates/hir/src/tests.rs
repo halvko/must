@@ -19539,3 +19539,154 @@ static f = fn::<@a, @b>(o: Out, r: Out.&mut::<@a>.&mut::<@b>) -> usize {
         "#]],
     );
 }
+
+/// A use whose member waits on a projection votes with what the
+/// projection gives, so callers' plurality decides: two callers make
+/// `f` take an `A`, one a `B`, and the `B` one is outvoted.
+#[test]
+fn uses_vote_with_what_the_member_projects() {
+    let src = r#"
+type A = struct { x: usize };
+type B = struct { x: bool };
+static a = A(struct { x = 1 });
+static b = B(struct { x = true });
+static f = fn (p) { p.x };
+static m1 = fn () { f(a); };
+static m2 = fn () { f(a); };
+static m3 = fn () { f(b); };
+"#;
+    check_signatures(
+        src,
+        expect![[r#"
+        a: A
+        b: B
+        f: fn(A) -> usize
+        m1: fn()
+        m2: fn()
+        m3: fn()
+    "#]],
+    );
+    check_diagnostics(
+        src,
+        expect![[r#"
+            232..233: `f` is `fn(A) -> usize` here, as `m1` and `m2` make it, but this use makes it `fn(B) -> bool` (`m1` is defined here at 161..163) (`m2` is defined here at 190..192)
+        "#]],
+    );
+}
+
+/// One caller each: a tie, which asks for the annotation at the uses; the
+/// projection in `f` doesn't ask again.
+#[test]
+fn a_tie_on_a_member_with_a_waiting_projection_reports_once() {
+    let src = r#"
+type A = struct { x: usize };
+type B = struct { x: bool };
+static a = A(struct { x = 1 });
+static b = B(struct { x = true });
+static f = fn (p) { p.x };
+static g = fn () -> usize { f(a) };
+static h = fn () -> bool { f(b) };
+"#;
+    check_signatures(
+        src,
+        expect![[r#"
+            a: A
+            b: B
+            f: {error}
+            g: fn() -> usize
+            h: fn() -> bool
+        "#]],
+    );
+    check_diagnostics(
+        src,
+        expect![[r#"
+            182..183: callers disagree on the type of `f`: `g` makes it `fn(A) -> usize`, `h` makes it `fn(B) -> bool`; add a type annotation to its definition (defined here at 134..135) (`g` is defined here at 161..162) (`h` is defined here at 197..198)
+            217..218: callers disagree on the type of `f`: `g` makes it `fn(A) -> usize`, `h` makes it `fn(B) -> bool`; add a type annotation to its definition (defined here at 134..135) (`g` is defined here at 161..162) (`h` is defined here at 197..198)
+        "#]],
+    );
+}
+
+/// `f`'s use of `k` waits for `f`'s receiver, which `g` determines: `k` is
+/// decided after `f`, so the use votes as `fn(bool) -> bool` and ties
+/// with `u`'s, exactly as with `p: B` written.
+#[test]
+fn a_use_through_a_waiting_projection_votes_as_if_annotated() {
+    let src = |param: &str| {
+        format!(
+            r#"
+type B = struct {{ x: bool }};
+static b = B(struct {{ x = true }});
+static k = fn (y) {{ y }};
+static u = fn () {{ let _: usize = k(1); }};
+static f = fn ({param}) {{ k(p.x) }};
+static g = fn () {{ f(b); }};
+"#
+        )
+    };
+    check_signatures(
+        &src("p"),
+        expect![[r#"
+        b: B
+        k: {error}
+        u: fn()
+        f: fn(B) -> bool
+        g: fn()
+    "#]],
+    );
+    check_signatures(
+        &src("p: B"),
+        expect![[r#"
+        b: B
+        k: {error}
+        u: fn()
+        f: fn(B) -> bool
+        g: fn()
+    "#]],
+    );
+    check_diagnostics(
+        &src("p"),
+        expect![[r#"
+            124..125: callers disagree on the type of `k`: `u` makes it `fn(usize) -> usize`, `f` makes it `fn(bool) -> bool`; add a type annotation to its definition (defined here at 72..73) (`u` is defined here at 97..98) (`f` is defined here at 140..141)
+            153..154: callers disagree on the type of `k`: `u` makes it `fn(usize) -> usize`, `f` makes it `fn(bool) -> bool`; add a type annotation to its definition (defined here at 72..73) (`u` is defined here at 97..98) (`f` is defined here at 140..141)
+        "#]],
+    );
+    check_diagnostics(
+        &src("p: B"),
+        expect![[r#"
+            124..125: callers disagree on the type of `k`: `u` makes it `fn(usize) -> usize`, `f` makes it `fn(bool) -> bool`; add a type annotation to its definition (defined here at 72..73) (`u` is defined here at 97..98) (`f` is defined here at 140..141)
+            156..157: callers disagree on the type of `k`: `u` makes it `fn(usize) -> usize`, `f` makes it `fn(bool) -> bool`; add a type annotation to its definition (defined here at 72..73) (`u` is defined here at 97..98) (`f` is defined here at 140..141)
+        "#]],
+    );
+}
+
+/// A body with a waiting projection and a use that lost: the group
+/// decides it like any other body (this used to panic).
+#[test]
+fn a_waiting_projection_beside_an_outvoted_use() {
+    let src = r#"
+type B = struct { x: bool };
+static b = B(struct { x = true });
+static k = fn (y) { y };
+static u1 = fn () { let _: usize = k(1); };
+static u2 = fn () { let _: usize = k(2); };
+static f = fn (p) { let _: bool = k(true); p.x };
+static g = fn () { f(b); };
+"#;
+    check_signatures(
+        src,
+        expect![[r#"
+            b: B
+            k: fn(usize) -> usize
+            u1: fn()
+            u2: fn()
+            f: fn(B) -> bool
+            g: fn()
+        "#]],
+    );
+    check_diagnostics(
+        src,
+        expect![[r#"
+            212..213: `k` is `fn(usize) -> usize` here, as `u1` and `u2` make it, but this use makes it `fn(bool) -> bool` (`u1` is defined here at 97..99) (`u2` is defined here at 141..143)
+        "#]],
+    );
+}

@@ -2778,10 +2778,27 @@ struct DeferredProjection {
 }
 
 #[derive(Debug, Clone)]
-enum ProjectionKind {
+pub(crate) enum ProjectionKind {
     Field(String),
     /// The index expression, for the compile-time bounds check.
     Index(ExprId),
+}
+
+/// The type `kind` projects out of `receiver` when that is a type the
+/// projection succeeds on: what [`InferCtx::field_access_ty`] and
+/// [`InferCtx::index_element_ty`] give without a diagnostic, but for a
+/// diverging receiver. `None` for everything else (an undetermined
+/// receiver included), which the body reports itself.
+pub(crate) fn projected_ty(db: &dyn Db, receiver: &Ty, kind: &ProjectionKind) -> Option<Ty> {
+    match (receiver, kind) {
+        (Ty::Record(rec), ProjectionKind::Field(name)) => rec.field_ty(name).cloned(),
+        (Ty::Named(named), ProjectionKind::Field(name)) => match type_underlying_for(db, named)? {
+            Ty::Record(rec) => rec.field_ty(name).cloned(),
+            _ => None,
+        },
+        (Ty::Array { elem, .. }, ProjectionKind::Index(_)) => Some((**elem).clone()),
+        _ => None,
+    }
 }
 
 /// One integer literal awaiting its post-traversal range/pinned check —
@@ -3539,30 +3556,41 @@ impl<'db> InferCtx<'db> {
     }
 
     /// Retry the projections whose receiver was undetermined, now that the
-    /// inference group may have determined it; whether any was projected.
-    pub(crate) fn retry_deferred_projections(&mut self) -> bool {
-        let before = self.deferred_projections.len();
+    /// inference group has decided the signatures this body mentions.
+    pub(crate) fn retry_deferred_projections(&mut self) {
         self.resolve_deferred_projections();
-        self.deferred_projections.len() < before
+    }
+
+    /// The projections still waiting for their receiver, as receiver,
+    /// projection and value, resolved: the inference group projects them
+    /// too while it votes ([`projected_ty`]).
+    pub(crate) fn waiting_projections(&mut self) -> Vec<(Ty, ProjectionKind, Ty)> {
+        let waiting = self.deferred_projections.clone();
+        waiting
+            .into_iter()
+            .map(|projection| {
+                let receiver = self.resolve(&projection.receiver_ty);
+                let value = self.resolve(&projection.value);
+                (receiver, projection.kind, value)
+            })
+            .collect()
     }
 
     /// Report each projection whose receiver nothing determined: the
-    /// annotation is the way out. Its value becomes `{error}`.
-    pub(crate) fn report_undetermined_projections(&mut self) {
+    /// annotation is the way out. Its value becomes `{error}`. `silent`:
+    /// a diagnostic elsewhere already asks for that annotation.
+    pub(crate) fn report_undetermined_projections(&mut self, silent: bool) {
         for projection in std::mem::take(&mut self.deferred_projections) {
-            self.result
-                .diagnostics
-                .push(InferenceDiagnostic::FieldOnUnknownType {
-                    expr: projection.expr,
-                    receiver: projection.receiver,
-                });
+            if !silent {
+                self.result
+                    .diagnostics
+                    .push(InferenceDiagnostic::FieldOnUnknownType {
+                        expr: projection.expr,
+                        receiver: projection.receiver,
+                    });
+            }
             self.adopt(&projection.value, &Ty::Error);
         }
-    }
-
-    /// Whether a projection still waits for its receiver.
-    pub(crate) fn has_deferred_projections(&self) -> bool {
-        !self.deferred_projections.is_empty()
     }
 
     /// Defer a projection of `receiver`, whose type is undetermined; its
@@ -3620,7 +3648,7 @@ impl<'db> InferCtx<'db> {
 
     pub(crate) fn finish(mut self) -> InferenceResult {
         self.solve();
-        self.report_undetermined_projections();
+        self.report_undetermined_projections(false);
         // Bound obligations, after every join and axiom has spoken: each
         // resolves into a dictionary entry — a concrete impl's member set,
         // a forward of the enclosing binder's own dictionary, or an error
