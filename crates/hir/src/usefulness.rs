@@ -35,17 +35,17 @@ pub(crate) enum Pat {
 /// What the algorithm needs to know about a column's type.
 pub(crate) trait Columns {
     type Ty: Clone + PartialEq;
-    type Decl: PartialEq;
     /// Every constructor a value of `ty` can have, or `None` when there are
     /// too many to list (integers, `char`, anything only `_` matches).
     fn ctors(&mut self, ty: &Self::Ty) -> Option<Vec<Ctor>>;
     /// The types of `ctor`'s fields in a value of `ty`.
     fn fields(&mut self, ty: &Self::Ty, ctor: &Ctor) -> Vec<Self::Ty>;
-    /// The declaration `ty` names, if any: two types with one declaration
-    /// differ only in their arguments.
-    fn decl(&mut self, ty: &Self::Ty) -> Option<Self::Decl>;
-    /// How many types are written in `ty`, itself included.
-    fn size(&mut self, ty: &Self::Ty) -> usize;
+    /// The type arguments `ty` names (`T` in `Option::<T>`), if any.
+    fn type_args(&mut self, ty: &Self::Ty) -> Vec<Self::Ty>;
+    /// `ty` with its type arguments replaced by `args`.
+    fn with_type_args(&mut self, ty: &Self::Ty, args: Vec<Self::Ty>) -> Self::Ty;
+    /// A type with values (`()`), or one without (`!`).
+    fn stand_in(&mut self, has_values: bool) -> Self::Ty;
 }
 
 /// The most witnesses [`missing`] reports.
@@ -204,33 +204,36 @@ fn inhabited<C: Columns>(cx: &mut C, ty: &C::Ty) -> bool {
 /// `stack`. A type met again inside itself has no value along that path:
 /// a value of it would have to contain itself.
 ///
-/// A declaration met again with other arguments is followed while the new
-/// type is no larger than the first one of that declaration on the stack
-/// (`One::<Void>` inside `One::<One::<Void>>`, `Flip::<B, A>` inside
-/// `Flip::<A, B>`): there are only so many such types, and a repeat ends
-/// the path, so the walk ends. A larger one (`Nest::<Pair::<T>>` inside
-/// `Nest::<T>`) could keep growing, so that path counts as holding a
-/// value.
+/// Whether a generic type has values depends on its type arguments only
+/// through whether each of them has values, so each argument is replaced
+/// by `()` or `!` first. A declaration then comes in only so many
+/// versions, and a type that holds itself with other arguments
+/// (`Nest::<Pair::<T>>` inside `Nest::<T>`, `Flip::<B, A>` inside
+/// `Flip::<A, B>`) meets one of them again.
 fn inhabited_in<C: Columns>(cx: &mut C, ty: &C::Ty, stack: &mut Vec<C::Ty>) -> bool {
-    let Some(all) = cx.ctors(ty) else {
+    let args = cx.type_args(ty);
+    let ty = if args.is_empty() {
+        ty.clone()
+    } else {
+        let args = args
+            .iter()
+            .map(|arg| {
+                let has_values = inhabited_in(cx, arg, stack);
+                cx.stand_in(has_values)
+            })
+            .collect();
+        cx.with_type_args(ty, args)
+    };
+    let Some(all) = cx.ctors(&ty) else {
         return true;
     };
-    if stack.contains(ty) {
+    if stack.contains(&ty) {
         return false;
     }
-    if let Some(decl) = cx.decl(ty) {
-        let first = stack
-            .iter()
-            .find(|outer| cx.decl(outer).as_ref() == Some(&decl))
-            .cloned();
-        if let Some(first) = first
-            && cx.size(ty) > cx.size(&first)
-        {
-            return true;
-        }
-    }
     stack.push(ty.clone());
-    let found = all.iter().any(|ctor| holds_a_value_in(cx, ty, ctor, stack));
+    let found = all
+        .iter()
+        .any(|ctor| holds_a_value_in(cx, &ty, ctor, stack));
     stack.pop();
     found
 }

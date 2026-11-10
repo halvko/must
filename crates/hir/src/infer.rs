@@ -10320,17 +10320,38 @@ fn uncovered(missing: &[String], ty: &Ty) -> Uncovered {
 
 impl usefulness::Columns for InferCtx<'_> {
     type Ty = Ty;
-    type Decl = ItemLoc;
 
-    fn decl(&mut self, ty: &Ty) -> Option<ItemLoc> {
+    fn type_args(&mut self, ty: &Ty) -> Vec<Ty> {
         match self.pat_shape(ty) {
-            Ty::Named(named) => Some(named.decl),
-            _ => None,
+            Ty::Named(named) => named
+                .args
+                .into_iter()
+                .filter_map(|arg| match arg {
+                    GenericArg::Ty(ty) => Some(ty),
+                    GenericArg::Region(_) | GenericArg::Const(_) => None,
+                })
+                .collect(),
+            _ => Vec::new(),
         }
     }
 
-    fn size(&mut self, ty: &Ty) -> usize {
-        self.pat_shape(ty).size()
+    fn with_type_args(&mut self, ty: &Ty, args: Vec<Ty>) -> Ty {
+        let Ty::Named(mut named) = self.pat_shape(ty) else {
+            return ty.clone();
+        };
+        let mut args = args.into_iter();
+        for arg in &mut named.args {
+            if let GenericArg::Ty(ty) = arg
+                && let Some(new) = args.next()
+            {
+                *ty = new;
+            }
+        }
+        Ty::Named(named)
+    }
+
+    fn stand_in(&mut self, has_values: bool) -> Ty {
+        if has_values { Ty::Unit } else { Ty::Never }
     }
 
     fn ctors(&mut self, ty: &Ty) -> Option<Vec<usefulness::Ctor>> {

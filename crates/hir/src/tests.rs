@@ -19800,9 +19800,27 @@ static g = fn (e: E) -> usize { match e { ::A(n) => n, ::B(::X(_, _)) => 0, ::C(
 }
 
 #[test]
+fn a_generic_payload_that_holds_a_larger_version_of_itself_needs_no_arm() {
+    // Every `K` holds a `K::<[Void; 1]>`, which holds a `[Void; 1]`.
+    check_diagnostics(
+        r#"
+type Void = enum {};
+type K = enum::<T> { X(T, K::<[Void; 1]>) };
+type E = enum { A(usize), B(K::<usize>) };
+static f = fn (e: E) -> usize { match e { ::A(n) => n } };
+static g = fn (e: E) -> usize { match e { ::A(n) => n, ::B(::X(_, _)) => 0 } };
+"#,
+        expect![[r#"
+            224..238: unreachable arm: the arms above match every value it matches
+        "#]],
+    );
+}
+
+#[test]
 fn a_type_that_names_itself_with_larger_arguments_still_needs_its_arms() {
     // Asking whether `Nest::<usize>` has values must end, though it holds
-    // a `Nest::<Pair::<usize>>`, which holds a bigger one still.
+    // a `Nest::<Pair::<usize>>`, which holds a bigger one still; `::Nil`
+    // is one.
     check_diagnostics(
         r#"
 type Pair = struct::<T> { l: T, r: T };

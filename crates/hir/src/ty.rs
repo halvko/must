@@ -1008,39 +1008,6 @@ impl Ty {
         }
     }
 
-    /// Calls `f` on each type written directly inside this one: a
-    /// function's parameters and return type, a pointer's, borrow's or
-    /// array's inner type, a record's fields, a named type's type
-    /// arguments.
-    pub(crate) fn for_each_part(&self, mut f: impl FnMut(&Ty)) {
-        match self {
-            Ty::Fn(fun) => {
-                fun.params.iter().for_each(&mut f);
-                f(&fun.ret);
-            }
-            Ty::RawPtr { pointee: part, .. }
-            | Ty::Borrow { referent: part, .. }
-            | Ty::Array { elem: part, .. } => f(part),
-            Ty::Record(rec) => rec.fields.iter().for_each(|(_, ty)| f(ty)),
-            Ty::Named(NamedTy { args, .. }) => {
-                for arg in args {
-                    match arg {
-                        GenericArg::Ty(ty) => f(ty),
-                        GenericArg::Region(_) | GenericArg::Const(_) => {}
-                    }
-                }
-            }
-            _ => {}
-        }
-    }
-
-    /// How many types are written in this one, itself included.
-    pub(crate) fn size(&self) -> usize {
-        let mut size = 1;
-        self.for_each_part(|part| size += part.size());
-        size
-    }
-
     pub fn contains_error(&self) -> bool {
         match self {
             Ty::Error => true,
