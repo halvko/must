@@ -1509,37 +1509,53 @@ pub fn file_diagnostics(db: &dyn Db, file: SourceFile) -> Vec<Diagnostic> {
                             edits,
                         }
                     }),
-                // `..` after the last field, when nothing it skips has to
-                // be consumed (then `..` is its own error).
-                InferenceDiagnostic::PatMissingFields { pat, fields, .. }
-                    if (fields.iter()).all(|(_, ty)| capability::has_forget(db, ty)) =>
-                {
-                    source_map
-                        .node_for_pat(*pat)
-                        .and_then(|ptr| {
-                            ptr.to_node(&syntax_root)
-                                .descendants()
-                                .find_map(ast::RecordPat::cast)
+                // The edit the message names: a field that must be consumed
+                // is bound by name (`..` may not skip it), and `..` after
+                // the last field ignores the rest.
+                InferenceDiagnostic::PatMissingFields {
+                    pat,
+                    fields,
+                    must_consume,
+                    ..
+                } => source_map
+                    .node_for_pat(*pat)
+                    .and_then(|ptr| {
+                        ptr.to_node(&syntax_root)
+                            .descendants()
+                            .find_map(ast::RecordPat::cast)
+                    })
+                    .and_then(|record| {
+                        let mut added: Vec<&str> =
+                            must_consume.iter().map(String::as_str).collect();
+                        let rest = must_consume.len() < fields.len();
+                        if rest {
+                            added.push("..");
+                        }
+                        let edit = match record.fields().last() {
+                            Some(last) => syntax::TextEdit {
+                                range: TextRange::empty(last.syntax().text_range().end()),
+                                insert: format!(", {}", added.join(", ")),
+                            },
+                            None => syntax::TextEdit {
+                                range: TextRange::empty(record.l_brace_token()?.text_range().end()),
+                                insert: format!(" {} ", added.join(", ")),
+                            },
+                        };
+                        let bound = must_consume
+                            .iter()
+                            .map(|name| format!("`{name}`"))
+                            .collect::<Vec<_>>()
+                            .join(", ");
+                        let label = match (bound.is_empty(), rest) {
+                            (true, _) => "Add `..`".to_owned(),
+                            (false, false) => format!("Bind {bound}"),
+                            (false, true) => format!("Bind {bound} and add `..`"),
+                        };
+                        Some(syntax::Fix {
+                            label,
+                            edits: vec![edit],
                         })
-                        .and_then(|record| {
-                            let edit = match record.fields().last() {
-                                Some(last) => syntax::TextEdit {
-                                    range: TextRange::empty(last.syntax().text_range().end()),
-                                    insert: ", ..".to_owned(),
-                                },
-                                None => syntax::TextEdit {
-                                    range: TextRange::empty(
-                                        record.l_brace_token()?.text_range().end(),
-                                    ),
-                                    insert: " .. ".to_owned(),
-                                },
-                            };
-                            Some(syntax::Fix {
-                                label: "Add `..`".to_owned(),
-                                edits: vec![edit],
-                            })
-                        })
-                }
+                    }),
                 // The arguments the message says belong to the owner, moved
                 // there: `Pair::first::<usize>` becomes
                 // `Pair::<usize>::first`.

@@ -674,6 +674,10 @@ pub enum InferenceDiagnostic {
         expr: ExprId,
         /// The unmentioned `(name, type)` pairs, sorted by name.
         fields: Vec<(String, Ty)>,
+        /// The unmentioned fields that must be consumed, which `..` may not
+        /// skip, so the message asks for them to be bound. Filled once the
+        /// field types are resolved.
+        must_consume: Vec<String>,
     },
     /// A `let`/parameter pattern destructures a value whose type isn't
     /// known here (an unannotated bare `struct { ... }` pattern, with
@@ -2057,17 +2061,39 @@ impl InferenceDiagnostic {
             } => {
                 format!("no field `{name}` on `{}`", record_ty.display())
             }
-            InferenceDiagnostic::PatMissingFields { fields, .. } => {
-                let list = fields
-                    .iter()
-                    .map(|(name, _)| format!("`{name}`"))
-                    .collect::<Vec<_>>()
-                    .join(", ");
-                if fields.len() == 1 {
-                    format!("pattern does not mention field {list}; add `..` to ignore it")
+            InferenceDiagnostic::PatMissingFields {
+                fields,
+                must_consume,
+                ..
+            } => {
+                let list = |names: &mut dyn Iterator<Item = &String>| {
+                    names
+                        .map(|name| format!("`{name}`"))
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                };
+                let all = list(&mut fields.iter().map(|(name, _)| name));
+                let s = if fields.len() == 1 { "" } else { "s" };
+                let advice = if must_consume.is_empty() {
+                    let them = if fields.len() == 1 { "it" } else { "them" };
+                    format!("add `..` to ignore {them}")
+                } else if must_consume.len() == fields.len() {
+                    let (them, it) = if fields.len() == 1 {
+                        ("it", "it")
+                    } else {
+                        ("them", "they")
+                    };
+                    format!("bind {them}: {it} must be consumed")
                 } else {
-                    format!("pattern does not mention fields {list}; add `..` to ignore them")
-                }
+                    let consumed = list(&mut must_consume.iter());
+                    let which = if must_consume.len() == 1 {
+                        "which must be consumed"
+                    } else {
+                        "which must all be consumed"
+                    };
+                    format!("bind {consumed}, {which}, and add `..` to ignore the rest")
+                };
+                format!("pattern does not mention field{s} {all}; {advice}")
             }
             InferenceDiagnostic::PatBindingNeedsAnnotation { .. } => {
                 "cannot destructure this pattern: its type is not known here; \
@@ -3824,10 +3850,18 @@ impl<'db> InferCtx<'db> {
                 InferenceDiagnostic::PatUnknownField { record_ty, .. } => {
                     *record_ty = resolve_finished(&mut self.table, record_ty);
                 }
-                InferenceDiagnostic::PatMissingFields { fields, .. } => {
+                InferenceDiagnostic::PatMissingFields {
+                    fields,
+                    must_consume,
+                    ..
+                } => {
                     for (_, ty) in fields.iter_mut() {
                         *ty = resolve_finished(&mut self.table, ty);
                     }
+                    *must_consume = (fields.iter())
+                        .filter(|(_, ty)| !crate::capability::has_forget(self.db, ty))
+                        .map(|(name, _)| name.clone())
+                        .collect();
                 }
                 InferenceDiagnostic::PatNotRecord { ty, .. }
                 | InferenceDiagnostic::PatNotArray { ty, .. }
@@ -9685,6 +9719,7 @@ impl<'db> InferCtx<'db> {
                                     pat,
                                     expr: anchor,
                                     fields: missing,
+                                    must_consume: Vec::new(),
                                 });
                         }
                     }

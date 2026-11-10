@@ -4624,14 +4624,29 @@ fn a_record_pattern_missing_fields_offers_the_rest_marker() {
 }
 
 #[test]
-fn a_record_pattern_missing_a_field_that_must_be_consumed_has_no_rest_fix() {
-    // `..` would lose the `T`, which is its own error.
-    assert_eq!(
-        fix_of(
-            "static f = fn::<T>(p: struct { x: usize, t: T }) -> usize { let struct { x } = p; x };"
-        ),
-        None
+fn a_record_pattern_missing_a_field_that_must_be_consumed_binds_it() {
+    // `..` may not skip a field that must be consumed, so the message asks
+    // for it to be bound, and the fix binds it by name.
+    check_diagnostics(
+        "static f = fn::<T>(p: struct { t: T, x: usize, y: usize }) -> usize { let struct { x } = p; x };",
+        expect![[r#"
+            74..86: pattern does not mention fields `t`, `y`; bind `t`, which must be consumed, and add `..` to ignore the rest
+        "#]],
     );
+    let fixed = apply_fix(
+        "static f = fn::<T>(p: struct { t: T, x: usize, y: usize }) -> usize { let struct { x } = p; x };",
+        "Bind `t` and add `..`",
+    );
+    assert!(
+        fixed.contains("let struct { x, t, .. } = p;"),
+        "fixed: {fixed}"
+    );
+    check_diagnostics(&fixed, expect![[r#""#]]);
+    let fixed = apply_fix(
+        "static f = fn::<T>(p: struct { t: T, x: usize }) -> usize { let struct { x } = p; x };",
+        "Bind `t`",
+    );
+    assert!(fixed.contains("let struct { x, t } = p;"), "fixed: {fixed}");
 }
 
 #[test]
