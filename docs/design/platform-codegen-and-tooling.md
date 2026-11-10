@@ -130,7 +130,11 @@
   only one candidate is shape-viable, so the call is a permanent refusal and completion
   suppresses the name rather than offering a merged or shape-picked row. Two recorded
   divergences from what a call there would resolve to: that suppression, and a nested body
-  still being offered its enclosing bounds.
+  still being offered its enclosing bounds. A CONCRETE receiver's dot follows the opposite,
+  impl-directed rule (TR01): it offers the inherent members and the members of every trait
+  implemented for the receiver's type, from either side of the impl, labeled by the
+  requirement's name, and counts candidates per receiver shape, so each row is offered
+  exactly when the call its spelling writes resolves to that member.
 - **P16** Completion writes the borrow the compiler will not (G14). On an owned receiver the
   dot also offers members and requirements taking `Self.&` / `Self.&mut`, and accepting one
   rewrites the dot as `.&.` / `.&mut.`, so the user lands on the licensed borrow-receiver call
@@ -144,7 +148,9 @@
   because of its type's borrow layers or the place it is read from (an immutable root, a
   `static`, a shared or raw step). Examples: `.&mut.add()` on an immutable root, `add()` on
   `Counter.&`, `*.add()` on `Counter.&mut.&`, and `s.*.c.add()` with `c: Counter.&mut` and
-  `s: S.&`.
+  `s: S.&`. The exception is a call that would not resolve to the row's member at all: a
+  concrete-receiver name another member or an fn-typed field also takes at that shape is
+  not offered (P15).
 - **P13** The examples smoke target checks and runs every example against recorded snapshots
   under a timeout, so a hang fails naming the file, and a coverage guard fails if an example
   ships untested.
