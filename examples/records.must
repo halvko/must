@@ -29,8 +29,10 @@ static origin = Point(struct { x = 0, y = 0 });
 
 // Field access projects straight through to the declared shape. Named-type
 // construction is pure, so it's legal in a const context — which every
-// item initializer is, hence the `const fn` marker here.
-static translate = const fn (p: Point, dx: usize) -> Point {
+// item initializer is, hence the `const fn` marker here. No annotations are
+// needed: the caller `moved` makes `p` a `Point`, the field access waits
+// for that, and `p.x + dx` then makes `dx` a `usize`.
+static translate = const fn (p, dx) {
     Point(struct { x = p.x + dx, y = p.y })
 };
 
