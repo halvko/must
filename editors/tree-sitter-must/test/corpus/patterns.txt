@@ -95,7 +95,7 @@ static f = fn () { match s { Shape::Circle(r, _) => r, ::Pair(a, b) => a, 0 => 1
                 (identifier)
                 (bind_pat
                   (identifier))
-                (bind_pat))
+                (wildcard_pat))
               (path_expr
                 (identifier)))
             (match_arm
@@ -152,7 +152,7 @@ static f = fn () { match s { ::Char(mut c, _) => c, mut other => other } };
                 (identifier)
                 (bind_pat
                   (identifier))
-                (bind_pat))
+                (wildcard_pat))
               (path_expr
                 (identifier)))
             (match_arm
@@ -201,7 +201,7 @@ static f = fn ([a, mut b]: [usize; 2]) { let [x, [mut y, _]] = v; let ::Char(c, 
             (identifier)
             (bind_pat
               (identifier))
-            (bind_pat))
+            (wildcard_pat))
           (path_expr
             (identifier)))
         (let_stmt
@@ -247,3 +247,87 @@ static f = fn () { match n { -1 => 0, 1 => 2, _ => 3 } };
             (match_arm
               (wildcard_pat)
               (integer))))))))
+
+================================================================================
+Nested payload patterns
+================================================================================
+
+static f = fn () { match s { ::Bar([a, _, mut c]) => a, ::Wrap(Point(p), struct { x, .. }) => p } };
+
+--------------------------------------------------------------------------------
+
+(source_file
+  (static_item
+    (identifier)
+    (fn_literal
+      (param_list)
+      (block_expr
+        (expr_stmt
+          (match_expr
+            (path_expr
+              (identifier))
+            (match_arm
+              (variant_pat
+                (identifier)
+                (array_pat
+                  (bind_pat
+                    (identifier))
+                  (wildcard_pat)
+                  (bind_pat
+                    (identifier))))
+              (path_expr
+                (identifier)))
+            (match_arm
+              (variant_pat
+                (identifier)
+                (newtype_pat
+                  (identifier)
+                  (bind_pat
+                    (identifier)))
+                (record_pat
+                  (record_pat_field
+                    (identifier))
+                  (rest_pat)))
+              (path_expr
+                (identifier)))))))))
+
+==================
+Arm patterns nest like let patterns
+==================
+
+static f = fn () { match s { ::Wrap([a, 'x', Name(b)]) => a, Name(c) => c } };
+
+---
+
+(source_file
+  (static_item
+    (identifier)
+    (fn_literal
+      (param_list)
+      (block_expr
+        (expr_stmt
+          (match_expr
+            (path_expr
+              (identifier))
+            (match_arm
+              (variant_pat
+                (identifier)
+                (array_pat
+                  (bind_pat
+                    (identifier))
+                  (literal_pat
+                    (char
+                      (char_content)))
+                  (newtype_pat
+                    (identifier)
+                    (bind_pat
+                      (identifier)))))
+              (path_expr
+                (identifier)))
+            (match_arm
+              (newtype_pat
+                (identifier)
+                (bind_pat
+                  (identifier)))
+              (path_expr
+                (identifier)))))))))

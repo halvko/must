@@ -3349,22 +3349,22 @@ static f = fn (c: char) -> usize {
               bb0:
                 _2 = _1
                 _4 = Eq(_2, '(')
-                if _4 -> [then: bb2, else: bb3]
+                if _4 -> [then: bb1, else: bb4]
               bb1:
+                _3 = 1
+                goto -> bb5
+              bb2:
+                _3 = 2
+                goto -> bb5
+              bb3:
+                _3 = 0
+                goto -> bb5
+              bb4:
+                _5 = Eq(_2, ')')
+                if _5 -> [then: bb2, else: bb3]
+              bb5:
                 _0 = _3
                 return
-              bb2:
-                _3 = 1
-                goto -> bb1
-              bb3:
-                _5 = Eq(_2, ')')
-                if _5 -> [then: bb4, else: bb5]
-              bb4:
-                _3 = 2
-                goto -> bb1
-              bb5:
-                _3 = 0
-                goto -> bb1
             }
             fn b1() -> fn(char) -> usize {
               _0: fn(char) -> usize  // return
@@ -3405,22 +3405,22 @@ static f = fn (b: u8) -> usize {
               bb0:
                 _2 = _1
                 _4 = Eq(_2, 0)
-                if _4 -> [then: bb2, else: bb3]
+                if _4 -> [then: bb1, else: bb4]
               bb1:
+                _3 = 1
+                goto -> bb5
+              bb2:
+                _3 = 2
+                goto -> bb5
+              bb3:
+                _3 = 0
+                goto -> bb5
+              bb4:
+                _5 = Eq(_2, 7)
+                if _5 -> [then: bb2, else: bb3]
+              bb5:
                 _0 = _3
                 return
-              bb2:
-                _3 = 1
-                goto -> bb1
-              bb3:
-                _5 = Eq(_2, 7)
-                if _5 -> [then: bb4, else: bb5]
-              bb4:
-                _3 = 2
-                goto -> bb1
-              bb5:
-                _3 = 0
-                goto -> bb1
             }
             fn b1() -> fn(u8) -> usize {
               _0: fn(u8) -> usize  // return
@@ -3462,15 +3462,15 @@ static g = fn (b: u8) -> usize {
               bb0:
                 _2 = _1
                 _4 = Eq(_2, 'a')
-                if _4 -> [then: bb2, else: bb3]
+                if _4 -> [then: bb1, else: bb2]
               bb1:
+                _3 = 1
+                goto -> bb3
+              bb2:
+                _3 = trap "this `match` does not cover every possible `char`; add a `_` arm" -> bb3
+              bb3:
                 _0 = _3
                 return
-              bb2:
-                _3 = 1
-                goto -> bb1
-              bb3:
-                _3 = trap "this `match` does not cover every possible `char`; add a `_` arm" -> bb1
             }
             fn b1() -> fn(char) -> usize {
               _0: fn(char) -> usize  // return
@@ -3488,15 +3488,15 @@ static g = fn (b: u8) -> usize {
               bb0:
                 _2 = _1
                 _4 = Eq(_2, 0)
-                if _4 -> [then: bb2, else: bb3]
+                if _4 -> [then: bb1, else: bb2]
               bb1:
+                _3 = 1
+                goto -> bb3
+              bb2:
+                _3 = trap "this `match` does not cover every possible `u8`; add a `_` arm" -> bb3
+              bb3:
                 _0 = _3
                 return
-              bb2:
-                _3 = 1
-                goto -> bb1
-              bb3:
-                _3 = trap "this `match` does not cover every possible `u8`; add a `_` arm" -> bb1
             }
             fn b1() -> fn(u8) -> usize {
               _0: fn(u8) -> usize  // return
@@ -3535,19 +3535,19 @@ static f = fn (c: char) -> usize {
               bb0:
                 _2 = _1
                 _4 = Eq(_2, 'a')
-                if _4 -> [then: bb2, else: bb3]
+                if _4 -> [then: bb1, else: bb2]
               bb1:
+                _3 = 1
+                goto -> bb4
+              bb2:
+                _3 = 2
+                goto -> bb4
+              bb3:
+                _3 = 3
+                goto -> bb4
+              bb4:
                 _0 = _3
                 return
-              bb2:
-                _3 = 1
-                goto -> bb1
-              bb3:
-                _3 = 2
-                goto -> bb1
-              bb4:
-                _3 = 3
-                goto -> bb1
             }
             fn b1() -> fn(char) -> usize {
               _0: fn(char) -> usize  // return
@@ -3595,18 +3595,18 @@ static g = fn::<@a>(d: usize.&::<@a>) -> usize {
               bb0:
                 _2 = _1
                 _4 = Eq(_2.*, 'a')
-                if _4 -> [then: bb2, else: bb3]
+                if _4 -> [then: bb1, else: bb2]
               bb1:
-                _0 = _3
-                return
-              bb2:
                 _3 = 1
-                goto -> bb1
-              bb3:
+                goto -> bb3
+              bb2:
                 _5 = _2
                 storage_dead _5
                 _3 = 0
-                goto -> bb1
+                goto -> bb3
+              bb3:
+                _0 = _3
+                return
             }
             fn b1() -> fn(char.&) -> usize {
               _0: fn(char.&) -> usize  // return
@@ -3625,18 +3625,18 @@ static g = fn::<@a>(d: usize.&::<@a>) -> usize {
               bb0:
                 _2 = _1
                 _4 = Eq(_2.*, 0)
-                if _4 -> [then: bb2, else: bb3]
+                if _4 -> [then: bb1, else: bb2]
               bb1:
-                _0 = _3
-                return
-              bb2:
                 _3 = 1
-                goto -> bb1
-              bb3:
+                goto -> bb3
+              bb2:
                 _5 = _2
                 storage_dead _5
                 _3 = 0
-                goto -> bb1
+                goto -> bb3
+              bb3:
+                _0 = _3
+                return
             }
             fn b1() -> fn(usize.&) -> usize {
               _0: fn(usize.&) -> usize  // return
@@ -5196,14 +5196,16 @@ static f = fn (d: usize) -> usize {
               _4: usize
               bb0:
                 _2 = _1
-                _3 = 0
-                goto -> bb1
+                goto -> bb2
               bb1:
-                _4 = trap "type mismatch: this `match` is on a `usize`, and `char` cannot match one" -> bb3
-              bb2:
                 _3 = 1
-                goto -> bb1
+                goto -> bb3
+              bb2:
+                _3 = 0
+                goto -> bb3
               bb3:
+                _4 = trap "type mismatch: this pattern is on a `usize`, and `char` cannot match one" -> bb4
+              bb4:
                 _0 = _4
                 return
             }
@@ -6529,6 +6531,60 @@ static f = fn::<@a>(c: bool) -> usize.&::<@a> {
         expect![[r#"
             85..88: borrowed value does not live long enough: this borrows a local, but the borrow has to last for `@a`, which outlives the body
               note at 78..88: the storage ends here, where the body returns
+        "#]],
+    );
+}
+
+/// A nested pattern under a written `.&mut` scrutinee reads through the
+/// pointers it reaches in with: they hold no loan of their own, so the
+/// reads do not conflict with them.
+#[test]
+fn a_nested_pattern_under_a_written_borrow_is_accepted() {
+    check_loans(
+        r#"
+type In = enum { A(usize), B };
+type E = enum { W(In), Z };
+static f = fn () -> usize {
+    let mut o = E::W(In::A(1));
+    match o.&mut {
+        ::W(::A(x)) => x.*,
+        _ => 0,
+    }
+};
+"#,
+        expect![""],
+    );
+}
+
+/// A binder at any depth under a borrowed scrutinee holds a loan of its
+/// part of the scrutinee: overwriting the scrutinee while the binder is
+/// live is refused two levels down exactly as one level down.
+#[test]
+fn a_nested_binder_under_a_borrow_holds_its_loan() {
+    check_loans(
+        r#"
+type In = enum { A(usize), B };
+type E = enum { W(In), Z };
+static one = fn::<@a>(e: E.&mut::<@a>) -> usize {
+    match e {
+        ::W(x) => { e.* = E::Z; match x { ::A(n) => n.*, ::B => 0 } },
+        _ => 0,
+    }
+};
+static two = fn::<@a>(e: E.&mut::<@a>) -> usize {
+    match e {
+        ::W(::A(x)) => { e.* = E::Z; x.* },
+        _ => 0,
+    }
+};
+"#,
+        expect![[r#"
+            151..155: writing to `e.*` here invalidates a borrow of it that is still live: the borrow is used after this point, and reading through it then would read through an invalidated borrow
+              note at 143..194: this borrow was created here
+              note at 163..164: and it is still used here
+            316..320: writing to `e.*` here invalidates a borrow of it that is still live: the borrow is used after this point, and reading through it then would read through an invalidated borrow
+              note at 308..327: this borrow was created here
+              note at 322..323: and it is still used here
         "#]],
     );
 }

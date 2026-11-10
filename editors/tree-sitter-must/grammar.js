@@ -23,7 +23,7 @@ function commaSep(rule) {
 }
 
 /**
- * The binding patterns under the rule names `names`, a bound name being
+ * The patterns under the rule names `names`, a bound name being
  * `bound` and a bare name pattern `named` (`bound` minus `_`, which is a
  * `wildcard_pat`). A parameter's patterns are a
  * second copy whose bound names are `param_name` nodes, so a query tells a
@@ -31,7 +31,7 @@ function commaSep(rule) {
  * `let` or parameter, so only a nested binding (`names.nested`) spells its
  * own.
  */
-function bindingPatterns(names, bound, named) {
+function patternRules(names, bound, named) {
   const node = ($, kind) =>
     names[kind] === kind ? $[kind] : alias($[names[kind]], $[kind]);
   return {
@@ -379,7 +379,7 @@ module.exports = grammar({
     let_stmt: $ => prec.right(seq(
       'let',
       optional('mut'),
-      field('pattern', $._binding_pattern),
+      field('pattern', $._pattern),
       optional(seq(':', field('type', $._type))),
       optional(seq('=', field('value', $._expr))),
       optional(';'),
@@ -396,18 +396,18 @@ module.exports = grammar({
 
     // ---- patterns -------------------------------------------------------
 
-    ...bindingPatterns({
-      pattern: '_binding_pattern',
+    ...patternRules({
+      pattern: '_pattern',
       bind_pat: 'bind_pat',
       record_pat: 'record_pat',
       record_pat_field: 'record_pat_field',
       newtype_pat: 'newtype_pat',
       array_pat: 'array_pat',
-      nested: '_nested_binding_pattern',
+      nested: '_nested_pattern',
       mut_bind_pat: '_mut_bind_pat',
     }, $ => $._name, $ => $.identifier),
 
-    ...bindingPatterns({
+    ...patternRules({
       pattern: '_param_pattern',
       bind_pat: '_param_bind_pat',
       record_pat: '_param_record_pat',
@@ -421,36 +421,21 @@ module.exports = grammar({
 
     rest_pat: _ => '..',
 
-    _match_pattern: $ => choice(
-      $.literal_pat,
-      $.wildcard_pat,
-      $.variant_pat,
-      alias($._match_bind_pat, $.bind_pat),
-    ),
-
     literal_pat: $ => choice($._literal, seq('-', $.integer)),
 
     wildcard_pat: _ => '_',
-
-    _match_bind_pat: $ => choice($.identifier, seq('mut', $._name)),
-
-    _payload_bind_pat: $ => seq(optional('mut'), $._name),
-
-    variant_pat: $ => choice(
-      $._qualified_variant_pat,
-      $._retired_unqualified_variant_pat,
-    ),
 
     _qualified_variant_pat: $ => prec.right(1, seq(
       optional(field('type', $.identifier)),
       '::',
       field('variant', $.identifier),
-      optional($._pattern_binding_list),
+      optional($._variant_payload),
     )),
 
-    _pattern_binding_list: $ => seq(
+    // One `let` pattern per payload, in an arm as in a `let`.
+    _variant_payload: $ => seq(
       '(',
-      commaSep(alias($._payload_bind_pat, $.bind_pat)),
+      commaSep($._nested_pattern),
       ')',
     ),
 
@@ -592,7 +577,7 @@ module.exports = grammar({
     ),
 
     match_arm: $ => prec.right(seq(
-      field('pattern', $._match_pattern),
+      field('pattern', $._nested_pattern),
       '=>',
       field('value', $._expr),
       optional(','),
@@ -697,12 +682,6 @@ module.exports = grammar({
 
     // `struct { x: 1 }`: now `struct { x = 1 }`.
     _retired_field_colon_value: $ => field('value', choice($._literal, $.neg_expr)),
-
-    // `Circle(r)` as a match pattern: now `::Circle(r)`.
-    _retired_unqualified_variant_pat: $ => seq(
-      field('variant', $.identifier),
-      $._pattern_binding_list,
-    ),
 
     // ---- tokens ---------------------------------------------------------
 
