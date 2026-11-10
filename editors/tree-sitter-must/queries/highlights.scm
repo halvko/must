@@ -57,12 +57,10 @@
 (bind_pat (identifier) @variable)
 (bind_pat (param_name) @variable.parameter)
 
-; With a rename the first name is the field, not a binding.
-(record_pat_field name: (identifier) @variable !rename)
+; With `= pattern` the name is the field, not a binding.
+(record_pat_field name: (identifier) @variable !pattern)
 (record_pat_field name: (param_name) @variable.parameter)
-(record_pat_field name: (identifier) @variable.other.member rename: (_))
-(record_pat_field rename: (identifier) @variable)
-(record_pat_field rename: (param_name) @variable.parameter)
+(record_pat_field name: (identifier) @variable.other.member pattern: (_))
 
 ; ---- names in type position -----------------------------------------------
 

@@ -169,12 +169,10 @@ fn classify_ident(
         // always a binding now (never reinterpreted as a variant), so it
         // always falls through to the binding/parameter coloring.
         (NAME, BIND_PAT) | (NAME, RECORD_PAT_FIELD) => {
-            // With a rename (`y as z`) the first name selects a field and
-            // binds nothing, so it stays plain like every other field name.
-            let selects_field = ast::RecordPatField::cast(owner.clone()).is_some_and(|field| {
-                field.rename().is_some()
-                    && field.field_name().is_some_and(|n| n.syntax() == &parent)
-            });
+            // With a pattern (`y = z`) the name selects a field and binds
+            // nothing, so it stays plain like every other field name.
+            let selects_field =
+                ast::RecordPatField::cast(owner.clone()).is_some_and(|field| !field.is_shorthand());
             if selects_field {
                 return None;
             }

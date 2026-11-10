@@ -479,10 +479,9 @@ pub enum PatData {
         /// Positional payload patterns, in source order.
         payload: Vec<PatId>,
     },
-    /// `struct { x, y as z, mut w, .. }` — destructures a structural
+    /// `struct { x, y = pattern, mut w, .. }` — destructures a structural
     /// record, construction's mirror image ([`crate::body::ExprData::RecordLit`]).
-    /// Field patterns are flat (no nested sub-patterns in v1: each field
-    /// binds directly, with an optional rename).
+    /// Each field meets a pattern of its own.
     Record {
         fields: Vec<RecordPatField>,
         /// A `..` rest marker was written: fields not named here are simply
@@ -508,12 +507,12 @@ pub enum PatData {
 }
 
 /// One field of a [`PatData::Record`] pattern: which field of the record is
-/// matched, and the binding it's bound to (the same one when there is no
-/// `as` rename — see [`crate::body::LowerCtx::lower_pat`]).
+/// matched, and the pattern it meets. The shorthand `x` is a
+/// [`PatData::Bind`] of the binding the field name declares.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RecordPatField {
     pub field: String,
-    pub binding: BindingId,
+    pub pat: PatId,
 }
 
 impl Body {
@@ -533,13 +532,16 @@ impl Body {
             .collect()
     }
 
-    /// The patterns directly nested in `pat`.
-    pub fn children(&self, pat: PatId) -> &[PatId] {
+    /// The patterns directly nested in `pat`, in written order; a record
+    /// pattern's are its fields' (see [`PatData::Record`] for which field
+    /// each meets).
+    pub fn children(&self, pat: PatId) -> Vec<PatId> {
         match &self.pats[pat] {
-            PatData::Variant { payload, .. } => payload,
-            PatData::Newtype { inner, .. } => std::slice::from_ref(inner),
-            PatData::Array { elements } => elements,
-            _ => &[],
+            PatData::Record { fields, .. } => fields.iter().map(|f| f.pat).collect(),
+            PatData::Variant { payload, .. } => payload.clone(),
+            PatData::Newtype { inner, .. } => vec![*inner],
+            PatData::Array { elements } => elements.clone(),
+            _ => Vec::new(),
         }
     }
 
@@ -547,7 +549,6 @@ impl Body {
     pub fn pat_binds(&self, pat: PatId) -> bool {
         match &self.pats[pat] {
             PatData::Bind(_) => true,
-            PatData::Record { fields, .. } => !fields.is_empty(),
             _ => self.children(pat).iter().any(|&sub| self.pat_binds(sub)),
         }
     }
@@ -562,7 +563,9 @@ impl Body {
                 }
             }
             PatData::Record { fields, .. } => {
-                out.extend(fields.iter().map(|f| f.binding));
+                for field in fields {
+                    self.collect_pat_bindings(field.pat, out);
+                }
             }
             PatData::Newtype { inner, .. } => self.collect_pat_bindings(*inner, out),
             PatData::Array { elements } => {
@@ -1221,16 +1224,22 @@ impl LowerCtx {
                     .fields()
                     .map(|field| {
                         let name = field.field_name().map(|n| n.text()).unwrap_or_default();
-                        let binding = self.alloc_binding(
-                            field.bound_name(),
-                            None,
-                            field.is_mut(),
-                            field.syntax(),
-                        );
-                        RecordPatField {
-                            field: name,
-                            binding,
-                        }
+                        let pat = if field.is_shorthand() {
+                            // `x`: the field name is also the binding's.
+                            let binding = self.alloc_binding(
+                                field.field_name(),
+                                None,
+                                field.is_mut(),
+                                field.syntax(),
+                            );
+                            self.alloc_pat(PatData::Bind(binding), field.syntax())
+                        } else {
+                            match field.pat() {
+                                Some(pat) => self.lower_pat(pat, None, false),
+                                None => self.pats.alloc(PatData::Missing),
+                            }
+                        };
+                        RecordPatField { field: name, pat }
                     })
                     .collect();
                 let rest = it.rest_pat().is_some();

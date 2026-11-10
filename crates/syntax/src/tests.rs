@@ -5347,10 +5347,10 @@ fn let_record_destructure() {
 #[test]
 fn let_record_destructure_rename() {
     check(
-        "static f = fn { let struct { x as a, y } = p; };",
+        "static f = fn { let struct { x = a, y } = p; };",
         expect![[r#"
-            SOURCE_FILE@0..48
-              STATIC_ITEM@0..48
+            SOURCE_FILE@0..47
+              STATIC_ITEM@0..47
                 ITEM_HEAD@0..6
                   STATIC_KW@0..6 "static"
                 WHITESPACE@6..7 " "
@@ -5359,45 +5359,46 @@ fn let_record_destructure_rename() {
                 WHITESPACE@8..9 " "
                 EQ@9..10 "="
                 WHITESPACE@10..11 " "
-                FN_LITERAL@11..47
+                FN_LITERAL@11..46
                   FN_KW@11..13 "fn"
                   WHITESPACE@13..14 " "
-                  BLOCK_EXPR@14..47
+                  BLOCK_EXPR@14..46
                     L_BRACE@14..15 "{"
                     WHITESPACE@15..16 " "
-                    LET_STMT@16..45
+                    LET_STMT@16..44
                       LET_KW@16..19 "let"
                       WHITESPACE@19..20 " "
-                      RECORD_PAT@20..40
+                      RECORD_PAT@20..39
                         STRUCT_KW@20..26 "struct"
                         WHITESPACE@26..27 " "
                         L_BRACE@27..28 "{"
                         WHITESPACE@28..29 " "
-                        RECORD_PAT_FIELD@29..35
+                        RECORD_PAT_FIELD@29..34
                           NAME@29..30
                             IDENT@29..30 "x"
                           WHITESPACE@30..31 " "
-                          AS_KW@31..33 "as"
-                          WHITESPACE@33..34 " "
-                          NAME@34..35
-                            IDENT@34..35 "a"
-                        COMMA@35..36 ","
-                        WHITESPACE@36..37 " "
-                        RECORD_PAT_FIELD@37..38
-                          NAME@37..38
-                            IDENT@37..38 "y"
-                        WHITESPACE@38..39 " "
-                        R_BRACE@39..40 "}"
-                      WHITESPACE@40..41 " "
-                      EQ@41..42 "="
-                      WHITESPACE@42..43 " "
-                      PATH_EXPR@43..44
-                        NAME_REF@43..44
-                          IDENT@43..44 "p"
-                      SEMICOLON@44..45 ";"
-                    WHITESPACE@45..46 " "
-                    R_BRACE@46..47 "}"
-                SEMICOLON@47..48 ";"
+                          EQ@31..32 "="
+                          WHITESPACE@32..33 " "
+                          BIND_PAT@33..34
+                            NAME@33..34
+                              IDENT@33..34 "a"
+                        COMMA@34..35 ","
+                        WHITESPACE@35..36 " "
+                        RECORD_PAT_FIELD@36..37
+                          NAME@36..37
+                            IDENT@36..37 "y"
+                        WHITESPACE@37..38 " "
+                        R_BRACE@38..39 "}"
+                      WHITESPACE@39..40 " "
+                      EQ@40..41 "="
+                      WHITESPACE@41..42 " "
+                      PATH_EXPR@42..43
+                        NAME_REF@42..43
+                          IDENT@42..43 "p"
+                      SEMICOLON@43..44 ";"
+                    WHITESPACE@44..45 " "
+                    R_BRACE@45..46 "}"
+                SEMICOLON@46..47 ";"
         "#]],
     );
 }

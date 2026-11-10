@@ -65,8 +65,8 @@ type Wrapper = struct::<T> { pub value: T, ... } with ::<U> T: Eq + Ord, U = usi
         r#"
 type Point = struct { x: usize, y: usize };
 type Meters = usize;
-static norm = fn (Point(struct { x, y as other, .. }): Point, Meters(m): Meters, _: usize) -> usize {
-    let struct { mut x, y as renamed } = struct { x = m, y = other };
+static norm = fn (Point(struct { x, y = other, .. }): Point, Meters(m): Meters, _: usize) -> usize {
+    let struct { mut x, y = renamed } = struct { x = m, y = other };
     let Meters(inner) = Meters(renamed);
     let _ = x;
     x = inner;
@@ -74,12 +74,12 @@ static norm = fn (Point(struct { x, y as other, .. }): Point, Meters(m): Meters,
 };
 type Feet = Meters;
 type Yards = Feet;
-static direct = fn (struct { x, y as other }: Point, mut Yards(Feet(Meters(deep))): Yards) -> usize {
+static direct = fn (struct { x, y = other }: Point, mut Yards(Feet(Meters(deep))): Yards) -> usize {
     x + other + deep
 };
 type Outer = Point;
 type Outermost = Outer;
-static nested = fn (Outermost(Outer(Point(struct { x as far, y }))): Outermost) -> usize {
+static nested = fn (Outermost(Outer(Point(struct { x = far, y }))): Outermost) -> usize {
     far + y
 };
 static alias = direct;

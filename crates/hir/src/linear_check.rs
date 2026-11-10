@@ -289,7 +289,14 @@ impl CheckCtx<'_> {
                     self.check_wildcard(pat, &ty);
                 }
             }
-            PatData::Record { fields, rest: true } => {
+            PatData::Record { fields, rest } => {
+                let (fields, rest) = (fields.clone(), *rest);
+                for field in &fields {
+                    self.check_skipping_patterns(field.pat);
+                }
+                if !rest {
+                    return;
+                }
                 let Some(ty) = self.infer.type_of_pat.get(pat) else {
                     return;
                 };
@@ -316,7 +323,7 @@ impl CheckCtx<'_> {
                 }
             }
             _ => {
-                for &sub in self.body.children(pat) {
+                for sub in self.body.children(pat) {
                     self.check_skipping_patterns(sub);
                 }
             }

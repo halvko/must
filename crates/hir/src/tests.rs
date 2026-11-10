@@ -4750,10 +4750,10 @@ fn let_record_destructure_binds_correct_types() {
 fn let_record_destructure_rename_binds_only_the_new_name() {
     // `x` is not bound under its own name; only the rename `a` is.
     check_diagnostics(
-        r#"static f = fn { let struct { x as a } = struct { x = 1 }; let b = a; let c = x; };"#,
+        r#"static f = fn { let struct { x = a } = struct { x = 1 }; let b = a; let c = x; };"#,
         expect![[r#"
-            53..54: cannot infer the type of this number: it has no defining use — add a type annotation
-            77..78: unresolved name `x`
+            52..53: cannot infer the type of this number: it has no defining use — add a type annotation
+            76..77: unresolved name `x`
         "#]],
     );
 }
@@ -4970,11 +4970,10 @@ fn record_pattern_field_offers_the_make_mut_fix() {
 }
 
 #[test]
-fn renamed_record_pattern_field_puts_mut_before_the_field_name() {
-    // `record_pat_field` is `mut? field (as rename)?`: the one `mut` goes
-    // before the FIELD name, not the bound rename, so the fix for `a`
-    // inserts before `x` — `struct { x as mut a }` would not parse.
-    let text = "static f = fn { let struct { x as a } = struct { x = 1 }; a = 2; };";
+fn a_record_field_pattern_takes_mut_on_its_own_binding() {
+    // `x = a`: the field name binds nothing, so the fix for `a` puts `mut`
+    // on `a` itself, `struct { x = mut a }`.
+    let text = "static f = fn { let struct { x = a } = struct { x = 1 }; a = 2; };";
     let db = RootDatabase::default();
     let file = SourceFile::new(&db, "test.must".to_owned(), text.to_owned());
     let diagnostics = crate::file_diagnostics(&db, file);
@@ -4986,11 +4985,10 @@ fn renamed_record_pattern_field_puts_mut_before_the_field_name() {
     assert_eq!(fix.label, "Make `a` mutable");
     assert_eq!(fix.edits.len(), 1);
     assert_eq!(fix.edits[0].insert, "mut ");
-    // Before `x` in `struct { x as a }` (offset 29): applying it yields
-    // `struct { mut x as a }`. The related note still points at `a`.
-    assert_eq!(u32::from(fix.edits[0].range.start()), 29);
+    // Before `a` (offset 33). The related note points at `a` too.
+    assert_eq!(u32::from(fix.edits[0].range.start()), 33);
     assert_eq!(diag.related.len(), 1, "related: {:?}", diag.related);
-    assert_eq!(u32::from(diag.related[0].range.start()), 34);
+    assert_eq!(u32::from(diag.related[0].range.start()), 33);
 }
 
 #[test]
@@ -18461,7 +18459,7 @@ fn every_binding_reports_its_kind_and_display_name() {
 static mk = fn() -> usize { 5 };
 static main = fn() -> () {
     let struct { mut } = struct { x = 2 };
-    let struct { y as _ } = struct { y = 1 };
+    let struct { y = _ } = struct { y = 1 };
     let p = mk().&raw;
     unsafe { p.*; }
 };
@@ -18481,7 +18479,6 @@ static main = fn() -> () {
     }
     expect![[r#"
         Missing shows as "<missing>", written None
-        Hole shows as "_", written None
         Temporary shows as "<temporary>", written None
         Named("p") shows as "p", written Some("p")
     "#]]
@@ -18742,12 +18739,12 @@ fn a_destructuring_let_without_an_initializer_is_refused() {
 type Point = struct { x: usize, y: usize };
 static main = fn () -> () {
     let struct { x, y };
-    let Point(struct { x as a, y as b }): Point;
+    let Point(struct { x = a, y = b }): Point;
 };
 "#,
         expect![[r#"
             81..96: a destructuring `let` needs a value: only a single name can be declared without one
-            106..138: a destructuring `let` needs a value: only a single name can be declared without one
+            106..136: a destructuring `let` needs a value: only a single name can be declared without one
         "#]],
     );
 }
@@ -19835,5 +19832,66 @@ static f = fn (e: E) -> usize {
         expect![[r#"
             182..187: this `match` does not cover `E::B(_)`
         "#]],
+    );
+}
+
+// A record field meets a pattern of its own (`a = ::Some(n)`), and
+// exhaustiveness and reachability look through it like any other part.
+#[test]
+fn record_field_patterns_narrow_their_arm() {
+    check_diagnostics(
+        r#"
+type Opt = enum { Some(usize), None };
+static f = fn (r: struct { a: Opt, b: usize }) -> usize {
+    match r {
+        struct { a = ::Some(n), b } => n + b,
+    }
+};
+static g = fn (r: struct { a: Opt, b: usize }) -> usize {
+    match r {
+        struct { a = ::Some(n), .. } => n,
+        struct { a = ::None, b = 0 } => 0,
+        struct { b, .. } => b,
+        struct { a, b } => b,
+    }
+};
+static h = fn (struct { a = ::Some(n), b }: struct { a: Opt, b: usize }) -> usize { n + b };
+static k = fn (r: struct { a: usize, b: usize }) -> usize {
+    let struct { a = mut x, b = _ } = r;
+    x = x + 1;
+    x
+};
+"#,
+        expect![[r#"
+            102..107: this `match` does not cover `struct { a = Opt::None, .. }`
+            364..379: unreachable arm: the arms above match every value it matches
+            410..437: this pattern does not cover `struct { a = Opt::None, .. }`; use `match`
+        "#]],
+    );
+}
+
+// `mut` marks a binding, and `x = pattern` binds nothing under `x`.
+#[test]
+fn mut_on_a_record_field_with_a_pattern_moves_to_its_binding() {
+    let text =
+        "static f = fn (r: struct { x: usize }) -> usize { let struct { mut x = y } = r; y };";
+    let db = RootDatabase::default();
+    let file = SourceFile::new(&db, "test.must".to_owned(), text.to_owned());
+    let diagnostics = crate::file_diagnostics(&db, file);
+    let diag = diagnostics
+        .iter()
+        .find(|d| d.message.starts_with("`mut` marks a binding"))
+        .unwrap_or_else(|| panic!("no `mut` diagnostic in {diagnostics:?}"));
+    let fix = diag.fix.as_ref().expect("diagnostic has a fix");
+    assert_eq!(fix.label, "Move `mut` to the binding");
+    let mut fixed = text.to_owned();
+    let mut edits = fix.edits.clone();
+    edits.sort_by_key(|e| std::cmp::Reverse(e.range.start()));
+    for edit in edits {
+        fixed.replace_range(std::ops::Range::<usize>::from(edit.range), &edit.insert);
+    }
+    assert_eq!(
+        fixed,
+        "static f = fn (r: struct { x: usize }) -> usize { let struct { x = mut y } = r; y };"
     );
 }

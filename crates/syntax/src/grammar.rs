@@ -643,13 +643,9 @@ fn array_pat(p: &mut Parser<'_>) {
     m.complete(p, ARRAY_PAT);
 }
 
-/// `struct { x, y as z, mut w, .. }` — a record-destructuring pattern. The
-/// caller has already confirmed `p.at(STRUCT_KW) && p.nth(1) == L_BRACE`.
-///
-/// Future note (pre-ruled with the equals-defines respell): when the
-/// patterns round enriches field patterns, the sub-pattern spelling is
-/// `field = pattern` — construction's mirror image under the global
-/// colon-annotates/equals-defines split (`as`-renames may then retire).
+/// `struct { x, y = pattern, mut w, .. }` — a record-destructuring
+/// pattern, construction's mirror image. The caller has already confirmed
+/// `p.at(STRUCT_KW) && p.nth(1) == L_BRACE`.
 fn record_pat(p: &mut Parser<'_>) -> CompletedMarker {
     let m = p.start();
     p.bump(STRUCT_KW);
@@ -666,16 +662,17 @@ fn record_pat(p: &mut Parser<'_>) -> CompletedMarker {
     m.complete(p, RECORD_PAT)
 }
 
-/// One field of a record pattern: `mut? name (as rename)?`. The field
-/// name is wrapped in `NAME` (a declaration, not a reference) because the
-/// shorthand spelling — no `as` — reuses the same token as the bound name's
-/// declaration site, exactly like a bare `BIND_PAT` does.
+/// One field of a record pattern: `mut? name` binds the field to a name of
+/// its own, `name = pattern` matches it against a pattern. The field name
+/// is wrapped in `NAME` (a declaration, not a reference) because the
+/// shorthand spelling reuses the same token as the bound name's declaration
+/// site, exactly like a bare `BIND_PAT` does.
 fn record_pat_field(p: &mut Parser<'_>) {
     let m = p.start();
     p.eat(MUT_KW);
     name_or_hole(p, "expected a field name");
-    if p.eat(AS_KW) {
-        name_or_hole(p, "expected a binding name");
+    if p.eat(EQ) {
+        pattern(p, "expected a pattern");
     }
     m.complete(p, RECORD_PAT_FIELD);
 }

@@ -81,4 +81,4 @@ args = { program = "{0}", stopOnEntry = true }
 
 [[grammar]]
 name = "must"
-source = { git = "https://github.com/halvko/must", rev = "9330eb7c33e9cc2dbe47c8bfc7dd9fb77f1aeda0", subpath = "editors/tree-sitter-must" }
+source = { git = "https://github.com/halvko/must", rev = "9e5a7c705f829b9b87d244f68494e555bac6919d", subpath = "editors/tree-sitter-must" }

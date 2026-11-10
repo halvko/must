@@ -126,8 +126,9 @@
   and saying to use `match`. Like any broken pattern it traps with the same message before
   reading the value: before its `let` runs, or on entry to its `fn`. Through a borrow every
   binder at every depth binds a borrow of its part, as in a match arm (M13).
-  Record fields are the one slot that only binds (`struct { a, b as c }`); a sub-pattern
-  in a field (`struct { a = 0 }`) is not accepted.
+  A record field is `mut? name`, binding the field under its own name, or `name = pattern`,
+  matching it against a pattern (`struct { a, b = c, d = ::Some(0) }`), construction's
+  mirror image.
 - **G21** `only` is the capability ceiling clause (T20). One production, one home:
 
   ```

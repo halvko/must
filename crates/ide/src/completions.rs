@@ -524,13 +524,12 @@ enum Context {
     /// A field-name slot inside a record-destructuring pattern
     /// (`struct { <cursor> }` in a `let`/parameter binding, or nested one
     /// level down inside a `Name(…)` newtype pattern). Completes the record
-    /// type's field names; the `..` rest, `mut`, and `as`-rename spellings
+    /// type's field names; the `..` rest, `mut`, and `= pattern` spellings
     /// are all still valid around the completed shorthand binding. Carries
     /// the record pattern's own start offset — its `struct` keyword sits
     /// before the cursor, so that start back-maps directly to the real tree
-    /// (the same trick `RecordLiteralField` uses). The `as`-rename slot
-    /// (`x as <cursor>`) is a *fresh* binding name and never classifies
-    /// here.
+    /// (the same trick `RecordLiteralField` uses). The slot after `=`
+    /// (`x = <cursor>`) is a pattern of its own and never classifies here.
     RecordPatternField { record_pat_start: TextSize },
     /// The whole RHS of a `type X = …` declaration: offers exactly
     /// the `struct`/`enum` keywords, not the general expression-position
@@ -925,8 +924,8 @@ fn classify(parent: &SyntaxNode) -> Option<Context> {
     }
 
     // A field-name slot inside a record-destructuring pattern: the marker's
-    // declaration `Name` is a `RECORD_PAT_FIELD`'s *field* name (the first
-    // `Name`; never its `as`-rename, the second — that's a brand-new binding
+    // declaration `Name` is a `RECORD_PAT_FIELD`'s *field* name (its own
+    // `Name`; never a binding inside its `= pattern`, which is a brand-new
     // name, nothing to complete, same as a bare `let`/param name). Checked
     // here (before the `NameRef` cast) for the same reason as the match-arm
     // bind above: a pattern field name is a `Name`, not a `NameRef`.
@@ -2521,7 +2520,7 @@ fn expected_record(
 /// initializer's type for a `let`, the parameter's annotation, the
 /// newtype's underlying record) — never reconstructed syntactically. A
 /// completed field inserts just its own name (the shorthand binding); the
-/// surrounding `mut`, `..` rest, and `as`-rename spellings all stay valid
+/// surrounding `mut`, `..` rest, and `= pattern` spellings all stay valid
 /// around it, so no snippet is needed. Detail is the field's own type,
 /// like every other field completion.
 ///
