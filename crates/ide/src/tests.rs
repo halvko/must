@@ -324,14 +324,14 @@ fn an_unused_binding_is_renamed_with_a_leading_underscore() {
 /// In `{ b }` one name both selects the field and binds it, so the
 /// rename keeps the field: `{ b as _b }`.
 #[test]
-fn an_unused_shorthand_field_binding_is_renamed_with_as() {
+fn an_unused_shorthand_field_binding_gets_a_pattern_of_its_own() {
     let (label, fixed) = apply_only_fix(
         "static f = fn (r: struct { a: usize, b: usize }) -> usize { let struct { a, mut b } = r; a };",
     );
     assert_eq!(label, "Rename to `_b`");
     assert_eq!(
         fixed,
-        "static f = fn (r: struct { a: usize, b: usize }) -> usize { let struct { a, mut b as _b } = r; a };"
+        "static f = fn (r: struct { a: usize, b: usize }) -> usize { let struct { a, b = mut _b } = r; a };"
     );
 }
 
@@ -1705,7 +1705,7 @@ fn hover_record_destructured_binding_use() {
 #[test]
 fn hover_record_destructure_rename_shows_the_new_name() {
     check_hover(
-        r#"static f = fn { let struct { x as alpha }: struct { x: usize } = struct { x = 1 }; let b = alpha$0; };"#,
+        r#"static f = fn { let struct { x = alpha }: struct { x: usize } = struct { x = 1 }; let b = alpha$0; };"#,
         "```must\nalpha: usize\n```",
     );
 }
@@ -1759,7 +1759,7 @@ fn goto_record_destructure_rename_use_lands_on_the_rename() {
     check_goto(
         r#"
 static f = fn {
-    let struct { x as alpha } = struct { x = 1 };
+    let struct { x = alpha } = struct { x = 1 };
     print(alpha$0);
 }
 "#,
@@ -3746,7 +3746,7 @@ fn completions_record_pattern_rename_slot_offers_nothing() {
     // The `as`-rename target (`x as <cursor>`) is a brand-new binding name,
     // not a field selector — nothing to complete there.
     check_no_completion(
-        r#"static f = fn { let struct { x as $0 } = struct { x = 1 }; };"#,
+        r#"static f = fn { let struct { x = $0 } = struct { x = 1 }; };"#,
         "x",
     );
 }
@@ -5668,8 +5668,8 @@ static rep = const fn::<const N: usize>(v: usize) -> [usize; N] { [v; N] };
 fn highlights_leave_a_renamed_pattern_field_name_plain() {
     check_highlights(
         r#"
-static f = fn (struct { y as z }: struct { y: usize }) -> usize {
-    let struct { y as w } = struct { y = z };
+static f = fn (struct { y = z }: struct { y: usize }) -> usize {
+    let struct { y = w } = struct { y = z };
     w
 };
 "#,
@@ -5679,21 +5679,21 @@ static f = fn (struct { y as z }: struct { y: usize }) -> usize {
             10..11 "=" Operator
             12..14 "fn" Keyword
             16..22 "struct" Keyword
-            27..29 "as" Keyword
-            30..31 "z" Parameter.declaration
-            35..41 "struct" Keyword
-            47..52 "usize" Type.defaultLibrary
-            56..58 "->" Operator
-            59..64 "usize" Type.defaultLibrary
-            71..74 "let" Keyword
-            75..81 "struct" Keyword
-            86..88 "as" Keyword
-            89..90 "w" Variable.declaration
-            93..94 "=" Operator
-            95..101 "struct" Keyword
-            106..107 "=" Operator
-            108..109 "z" Parameter
-            117..118 "w" Variable
+            27..28 "=" Operator
+            29..30 "z" Parameter.declaration
+            34..40 "struct" Keyword
+            46..51 "usize" Type.defaultLibrary
+            55..57 "->" Operator
+            58..63 "usize" Type.defaultLibrary
+            70..73 "let" Keyword
+            74..80 "struct" Keyword
+            85..86 "=" Operator
+            87..88 "w" Variable.declaration
+            91..92 "=" Operator
+            93..99 "struct" Keyword
+            104..105 "=" Operator
+            106..107 "z" Parameter
+            115..116 "w" Variable
         "#]],
     );
 }

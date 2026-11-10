@@ -2610,6 +2610,10 @@ pub(crate) struct InferCtx<'db> {
     /// exhaustiveness reads them as `_`, giving a broken arm the benefit
     /// of the doubt rather than a second diagnostic.
     broken_pats: rustc_hash::FxHashSet<PatId>,
+    /// Each checked record pattern's sub-patterns in its record type's
+    /// field order, `None` for a field it leaves to `..`: how
+    /// [`usefulness`] sees it.
+    record_pat_slots: rustc_hash::FxHashMap<PatId, Vec<Option<PatId>>>,
     /// Literals directly under a unary minus (`-5`): their range check
     /// applies the sign (`-128` fits `i8`; plain `128` does not). Filled by
     /// the [`crate::body::ExprData::Neg`] arm before its operand is
@@ -2844,6 +2848,7 @@ impl<'db> InferCtx<'db> {
             pending_number_literals: Vec::new(),
             unresolved_scrutinees: rustc_hash::FxHashSet::default(),
             broken_pats: rustc_hash::FxHashSet::default(),
+            record_pat_slots: rustc_hash::FxHashMap::default(),
             negated_literals: rustc_hash::FxHashSet::default(),
             number_expectations: rustc_hash::FxHashSet::default(),
             pending_obligations: Vec::new(),
@@ -9175,12 +9180,13 @@ impl<'db> InferCtx<'db> {
             PatData::Record { fields, rest } => match shape {
                 Ty::Record(rec) => {
                     let mut ok = true;
+                    let mut parts_ok = true;
                     let mut seen: Vec<&str> = Vec::new();
                     for f in &fields {
                         match rec.field_ty(&f.field) {
                             Some(field_ty) => {
                                 let ty = self.sub_pat_ty(field_ty.clone(), site, lens);
-                                self.result.type_of_binding.insert(f.binding, ty);
+                                parts_ok &= self.check_pat_in(f.pat, &ty, site);
                             }
                             None => {
                                 self.result.diagnostics.push(
@@ -9191,7 +9197,7 @@ impl<'db> InferCtx<'db> {
                                         record_ty: Ty::Record(rec.clone()),
                                     },
                                 );
-                                self.result.type_of_binding.insert(f.binding, Ty::Error);
+                                self.bind_pat_error(f.pat);
                                 ok = false;
                             }
                         }
@@ -9215,7 +9221,13 @@ impl<'db> InferCtx<'db> {
                             ok = false;
                         }
                     }
-                    PatVerdict::of(ok, true)
+                    // Each field's sub-pattern, in the record's own field
+                    // order, for the usefulness check.
+                    let slots = (rec.fields.iter())
+                        .map(|(name, _)| fields.iter().find(|f| f.field == *name).map(|f| f.pat))
+                        .collect();
+                    self.record_pat_slots.insert(pat, slots);
+                    PatVerdict::of(ok, parts_ok)
                 }
                 Ty::Infer(_) => {
                     self.result
@@ -9501,10 +9513,17 @@ impl<'db> InferCtx<'db> {
             return Pat::Wild;
         }
         match &self.body.pats[pat] {
-            // A record pattern's fields are all binders.
-            PatData::Missing | PatData::Wildcard | PatData::Bind(_) | PatData::Record { .. } => {
-                Pat::Wild
-            }
+            PatData::Missing | PatData::Wildcard | PatData::Bind(_) => Pat::Wild,
+            PatData::Record { .. } => match self.record_pat_slots.get(&pat) {
+                Some(slots) => Pat::Ctor(
+                    Ctor::Single,
+                    slots
+                        .iter()
+                        .map(|slot| slot.map_or(Pat::Wild, |p| self.deconstruct_pat(p)))
+                        .collect(),
+                ),
+                None => Pat::Wild,
+            },
             PatData::Char(c) => Pat::Ctor(Ctor::Char(*c), Vec::new()),
             PatData::Int {
                 value: Some(value),
@@ -9590,6 +9609,19 @@ impl<'db> InferCtx<'db> {
                 format!("{}{value}", if *negative { "-" } else { "" })
             }
             (Ctor::Single, Ty::Array { .. }) => format!("[{}]", fields.join(", ")),
+            // Only the fields that narrow the value are named; `..`
+            // stands for the rest.
+            (Ctor::Single, Ty::Record(rec)) => {
+                let mut parts: Vec<String> = (rec.fields.iter())
+                    .zip(&fields)
+                    .filter(|(_, field)| field.as_str() != "_")
+                    .map(|((name, _), field)| format!("{name} = {field}"))
+                    .collect();
+                if parts.len() < rec.fields.len() {
+                    parts.push("..".to_owned());
+                }
+                format!("struct {{ {} }}", parts.join(", "))
+            }
             (Ctor::Single, Ty::Named(named)) => {
                 format!("{}({})", named.decl.display_name(), fields.join(", "))
             }
@@ -9691,7 +9723,7 @@ impl<'db> InferCtx<'db> {
             PatData::Variant { payload, .. } => self.bind_payload_error(&payload),
             PatData::Record { fields, .. } => {
                 for f in &fields {
-                    self.result.type_of_binding.insert(f.binding, Ty::Error);
+                    self.bind_pat_error(f.pat);
                 }
             }
             PatData::Newtype { inner, .. } => self.bind_pat_error(inner),

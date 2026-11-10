@@ -114,6 +114,9 @@ pub(crate) fn validate(root: &SyntaxNode) -> Vec<SyntaxError> {
                 .fields()
                 .filter_map(|f| f.field_name()?.ident_token());
             report_duplicate_fields(names, &mut errors);
+            for field in record_pat.fields() {
+                reject_mut_on_field_with_pattern(&field, &mut errors);
+            }
         } else if let Some(bind_pat) = ast::BindPat::cast(node.clone()) {
             let mut_token = bind_pat.mut_token();
             require_mut_names_a_binding(mut_token, Some(ast::Pat::BindPat(bind_pat)), &mut errors);
@@ -2076,6 +2079,49 @@ fn require_block(expr: &ast::Expr, rule: &str, errors: &mut Vec<SyntaxError>) {
                     insert: " }".to_owned(),
                 },
             ],
+        }),
+    });
+}
+
+/// `mut x = pattern`: the field name binds nothing there, so `mut` has no
+/// binding to mark; the pattern's own binders take it (`x = mut y`).
+fn reject_mut_on_field_with_pattern(field: &ast::RecordPatField, errors: &mut Vec<SyntaxError>) {
+    let (Some(mut_token), Some(eq)) = (field.mut_token(), field.eq_token()) else {
+        return;
+    };
+    let remove_mut = TextEdit {
+        range: TextRange::new(
+            mut_token.text_range().start(),
+            field
+                .field_name()
+                .map_or(mut_token.text_range().end(), |n| {
+                    n.syntax().text_range().start()
+                }),
+        ),
+        insert: String::new(),
+    };
+    // A plain binder after `=` takes the `mut` instead.
+    let (label, edits) = match field.pat() {
+        Some(ast::Pat::BindPat(bind)) if bind.mut_token().is_none() => (
+            "Move `mut` to the binding",
+            vec![
+                remove_mut,
+                TextEdit {
+                    range: TextRange::empty(bind.syntax().text_range().start()),
+                    insert: "mut ".to_owned(),
+                },
+            ],
+        ),
+        _ => ("Remove `mut`", vec![remove_mut]),
+    };
+    errors.push(SyntaxError {
+        message: "`mut` marks a binding, and a field with `= pattern` binds nothing itself; \
+                  write `mut` on the pattern's binding"
+            .to_owned(),
+        range: TextRange::new(mut_token.text_range().start(), eq.text_range().end()),
+        fix: Some(Fix {
+            label: label.to_owned(),
+            edits,
         }),
     });
 }

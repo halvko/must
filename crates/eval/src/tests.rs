@@ -2860,7 +2860,7 @@ fn let_record_destructure_evaluates() {
             "#]],
         ),
         (
-            r#"(fn { let struct { x as a, y as b }: struct { x: usize, y: usize } = struct { x = 1, y = 2 }; a + b })()"#,
+            r#"(fn { let struct { x = a, y = b }: struct { x: usize, y: usize } = struct { x = 1, y = 2 }; a + b })()"#,
             expect![[r#"
                 => 3
             "#]],
@@ -10176,4 +10176,66 @@ static bump = fn::<@a>(p: [usize; 2].&mut::<@a>) -> () {
         => 2
     "#]],
     );
+}
+
+#[test]
+fn record_field_patterns_dispatch_owned_and_borrowed() {
+    let text = r#"
+type Opt = enum { Some(usize), None };
+type R = struct { a: Opt, b: usize };
+static f = fn (r: R) -> usize {
+    match r {
+        R(struct { a = ::Some(0), b }) => b,
+        R(struct { a = ::Some(n), b = 1 }) => n,
+        R(struct { a = ::Some(n), b }) => n + b,
+        R(struct { a = ::None, .. }) => 7,
+    }
+};
+static g = fn::<@a>(r: R.&::<@a>) -> usize {
+    match r {
+        R(struct { a = ::Some(n), b = 2 }) => n.*,
+        R(struct { b, .. }) => b.*,
+    }
+};
+"#;
+    for (entry, expected) in [
+        (
+            "f(R(struct { a = Opt::Some(0), b = 4 }))",
+            expect![[r#"
+            => 4
+        "#]],
+        ),
+        (
+            "f(R(struct { a = Opt::Some(5), b = 1 }))",
+            expect![[r#"
+            => 5
+        "#]],
+        ),
+        (
+            "f(R(struct { a = Opt::Some(5), b = 2 }))",
+            expect![[r#"
+            => 7
+        "#]],
+        ),
+        (
+            "f(R(struct { a = Opt::None, b = 2 }))",
+            expect![[r#"
+            => 7
+        "#]],
+        ),
+        (
+            "{ let r: R = R(struct { a = Opt::Some(9), b = 2 }); g(r.&) }",
+            expect![[r#"
+            => 9
+        "#]],
+        ),
+        (
+            "{ let r: R = R(struct { a = Opt::None, b = 2 }); g(r.&) }",
+            expect![[r#"
+            => 2
+        "#]],
+        ),
+    ] {
+        check_run(text, entry, expected);
+    }
 }

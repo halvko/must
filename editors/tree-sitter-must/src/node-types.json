@@ -4269,20 +4269,36 @@
           }
         ]
       },
-      "rename": {
+      "pattern": {
         "multiple": false,
         "required": false,
         "types": [
           {
-            "type": "_",
-            "named": false
-          },
-          {
-            "type": "identifier",
+            "type": "array_pat",
             "named": true
           },
           {
-            "type": "param_name",
+            "type": "bind_pat",
+            "named": true
+          },
+          {
+            "type": "literal_pat",
+            "named": true
+          },
+          {
+            "type": "newtype_pat",
+            "named": true
+          },
+          {
+            "type": "record_pat",
+            "named": true
+          },
+          {
+            "type": "variant_pat",
+            "named": true
+          },
+          {
+            "type": "wildcard_pat",
             "named": true
           }
         ]

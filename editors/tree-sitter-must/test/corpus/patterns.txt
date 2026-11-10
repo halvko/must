@@ -2,7 +2,7 @@
 Binding patterns
 ==================
 
-static f = fn (Meters(struct { x, mut y as z, .. }): Meters, _: usize) { let Wrap(Inner(v)) = w; };
+static f = fn (Meters(struct { x, y = mut z, .. }): Meters, _: usize) { let Wrap(Inner(v)) = w; };
 
 ---
 
@@ -19,7 +19,8 @@ static f = fn (Meters(struct { x, mut y as z, .. }): Meters, _: usize) { let Wra
                 (param_name))
               (record_pat_field
                 (identifier)
-                (param_name))
+                (bind_pat
+                  (param_name)))
               (rest_pat)))
           (path_type
             (identifier)))
@@ -42,7 +43,7 @@ static f = fn (Meters(struct { x, mut y as z, .. }): Meters, _: usize) { let Wra
 Parameter names at any pattern depth
 ==================
 
-static f = fn (C(B(A(struct { x as y, z }))): C, mut w) { };
+static f = fn (C(B(A(struct { x = y, z }))): C, mut w) { };
 
 ---
 
@@ -61,7 +62,8 @@ static f = fn (C(B(A(struct { x as y, z }))): C, mut w) { };
                 (record_pat
                   (record_pat_field
                     (identifier)
-                    (param_name))
+                    (bind_pat
+                      (param_name)))
                   (record_pat_field
                     (param_name))))))
           (path_type
@@ -331,3 +333,51 @@ static f = fn () { match s { ::Wrap([a, 'x', Name(b)]) => a, Name(c) => c } };
                   (identifier)))
               (path_expr
                 (identifier)))))))))
+
+==================
+Record fields meet patterns
+==================
+
+static f = fn (r: R) -> usize { match r { struct { a = ::Some(0), b = [x, _], c } => x, _ => 0 } };
+
+---
+
+(source_file
+  (static_item
+    (identifier)
+    (fn_literal
+      (param_list
+        (param
+          (bind_pat
+            (param_name))
+          (path_type
+            (identifier))))
+      (ret_type
+        (path_type
+          (identifier)))
+      (block_expr
+        (expr_stmt
+          (match_expr
+            (path_expr
+              (identifier))
+            (match_arm
+              (record_pat
+                (record_pat_field
+                  (identifier)
+                  (variant_pat
+                    (identifier)
+                    (literal_pat
+                      (integer))))
+                (record_pat_field
+                  (identifier)
+                  (array_pat
+                    (bind_pat
+                      (identifier))
+                    (wildcard_pat)))
+                (record_pat_field
+                  (identifier)))
+              (path_expr
+                (identifier)))
+            (match_arm
+              (wildcard_pat)
+              (integer))))))))

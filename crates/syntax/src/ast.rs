@@ -187,14 +187,12 @@ ast_node!(
     RestPat: REST_PAT
 );
 ast_node!(
-    /// `struct { x, y as z, mut w, .. }` — a record-destructuring pattern,
-    /// construction's mirror image. Only legal as a whole `let`/parameter
-    /// pattern (or nested one level inside a [`NewtypePat`]) — not inside a
-    /// variant pattern's payload.
+    /// `struct { x, y = pattern, mut w, .. }` — a record-destructuring
+    /// pattern, construction's mirror image.
     RecordPat: RECORD_PAT
 );
 ast_node!(
-    /// One field of a [`RecordPat`]: `mut? name (as name)?`.
+    /// One field of a [`RecordPat`]: `mut? name` or `name = pattern`.
     RecordPatField: RECORD_PAT_FIELD
 );
 ast_node!(
@@ -835,7 +833,14 @@ impl Name {
         }
         let parent = self.syntax.parent()?;
         let slot = match parent.kind() {
-            RECORD_PAT_FIELD => RecordPatField::cast(parent)?.field_name()?.syntax,
+            RECORD_PAT_FIELD => {
+                let field = RecordPatField::cast(parent)?;
+                // `x = pattern`: the name selects a field and binds nothing.
+                if !field.is_shorthand() {
+                    return None;
+                }
+                field.field_name()?.syntax
+            }
             BIND_PAT => self.syntax.clone(),
             _ => return None,
         };
@@ -1418,23 +1423,25 @@ impl RecordPatField {
     pub fn is_mut(&self) -> bool {
         self.mut_token().is_some()
     }
-    /// The field being destructured — the first `NAME` child. Doubles as
-    /// the binding's own declaration site in the shorthand spelling (no
-    /// `as`): the same token both selects the field and names the local.
+    /// The field being destructured — the `NAME` child. Doubles as the
+    /// binding's own declaration site in the shorthand spelling (no
+    /// `= pattern`): the same token both selects the field and names the
+    /// local.
     pub fn field_name(&self) -> Option<Name> {
         children::<Name>(&self.syntax).next()
     }
-    pub fn as_token(&self) -> Option<SyntaxToken> {
-        token(&self.syntax, AS_KW)
+    pub fn eq_token(&self) -> Option<SyntaxToken> {
+        token(&self.syntax, EQ)
     }
-    /// The renamed binding (`z` in `y as z`), when written.
-    pub fn rename(&self) -> Option<Name> {
-        children::<Name>(&self.syntax).nth(1)
+    /// The pattern the field is matched against (`p` in `x = p`), when
+    /// written.
+    pub fn pat(&self) -> Option<Pat> {
+        child(&self.syntax)
     }
-    /// The name actually bound: the rename if present, else the field name
-    /// itself.
-    pub fn bound_name(&self) -> Option<Name> {
-        self.rename().or_else(|| self.field_name())
+    /// Whether the field name binds the field itself (`x`, `mut x`): no
+    /// `= pattern` follows it.
+    pub fn is_shorthand(&self) -> bool {
+        self.eq_token().is_none()
     }
 }
 

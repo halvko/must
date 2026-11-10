@@ -1986,7 +1986,18 @@ impl LowerCtx<'_> {
                         {
                             return None;
                         }
-                        self.body.children(pat).iter().copied().map(Some).collect()
+                        match (&self.body.pats[pat], shape) {
+                            // A record pattern meets the record's fields in
+                            // the type's order; `..` leaves the rest `_`.
+                            (PatData::Record { fields, .. }, Ty::Record(rec)) => {
+                                (rec.fields.iter())
+                                    .map(|(name, _)| {
+                                        fields.iter().find(|f| f.field == *name).map(|f| f.pat)
+                                    })
+                                    .collect()
+                            }
+                            _ => self.body.children(pat).into_iter().map(Some).collect(),
+                        }
                     }
                     _ => vec![None; arity],
                 };
@@ -2049,14 +2060,13 @@ impl LowerCtx<'_> {
     }
 
     /// Whether `pat` looks inside the value it meets: everything but `_`,
-    /// a binder, and a record pattern (whose fields are all binders).
-    // TODO: halvko/must#255: build the tree over hir's deconstructed rows.
+    /// a binder, and a record pattern none of whose fields tests.
+    // TODO: halvko/must#255: build the tree over hir\'s deconstructed rows.
     fn tests(&self, pat: Option<PatId>) -> bool {
-        pat.is_some_and(|pat| {
-            !matches!(
-                self.body.pats[pat],
-                PatData::Missing | PatData::Wildcard | PatData::Bind(_) | PatData::Record { .. }
-            )
+        pat.is_some_and(|pat| match &self.body.pats[pat] {
+            PatData::Missing | PatData::Wildcard | PatData::Bind(_) => false,
+            PatData::Record { fields, .. } => fields.iter().any(|f| self.tests(Some(f.pat))),
+            _ => true,
         })
     }
 
@@ -2353,15 +2363,13 @@ impl LowerCtx<'_> {
                 _ => (None, Vec::new()),
             };
             for f in fields {
-                let local = self.alloc_binding_local(b, f.binding);
                 let index = record.and_then(|r| r.fields.iter().position(|(n, _)| *n == f.field));
-                let value = match index {
-                    Some(index) => Self::bind_value(parts[index].val.clone()),
+                match index {
+                    Some(index) => self.bind_pat(b, f.pat, parts[index].val.clone(), origin),
                     // Unknown field (already diagnosed): a placeholder
-                    // keeps the local initialized and lowering total.
-                    None => ValueExpr::Use(Operand::Const(Const::Unit)),
-                };
-                b.push_assign(local, value, origin);
+                    // keeps each local initialized and lowering total.
+                    None => self.bind_placeholders(b, f.pat, origin),
+                }
             }
             return;
         }
@@ -2373,7 +2381,7 @@ impl LowerCtx<'_> {
             _ => None,
         };
         let parts = self.pat_parts(&open, &shape, variant, origin);
-        let subs = self.body.children(pat).to_vec();
+        let subs = self.body.children(pat);
         for (index, &sub) in subs.iter().enumerate() {
             match parts.get(index) {
                 Some(part) => self.bind_pat(b, sub, part.val.clone(), origin),
@@ -3929,7 +3937,7 @@ fn pat_owners<T: Copy>(
     let mut stack: Vec<_> = roots.into_iter().collect();
     while let Some((pat, owner)) = stack.pop() {
         out.insert(pat, owner);
-        stack.extend(body.children(pat).iter().map(|&sub| (sub, owner)));
+        stack.extend(body.children(pat).into_iter().map(|sub| (sub, owner)));
     }
     out
 }
