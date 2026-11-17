@@ -335,13 +335,13 @@ pub fn born_here(subject: Option<&BindingKind>, linear: bool) -> String {
 /// Why a LEAK refusal fired inside a generic body: the binder promised
 /// nothing about the value, so the body is checked against every type a
 /// caller might supply.
-fn leak_reason(param: &str) -> String {
+pub(crate) fn leak_reason(param: &str) -> String {
     format!("`{param}` may be a type that must be consumed")
 }
 
 /// The way out of a leak that is the same in every position: narrow the
 /// callers with the bound.
-fn forget_advice(param: &str) -> String {
+pub(crate) fn forget_advice(param: &str) -> String {
     format!("write `{param}: forget` to require one that can be discarded")
 }
 

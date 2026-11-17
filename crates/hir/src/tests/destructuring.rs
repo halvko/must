@@ -45,6 +45,108 @@ fn let_record_destructure_missing_field_without_rest_errors() {
 }
 
 #[test]
+fn a_record_pattern_missing_fields_offers_the_rest_marker() {
+    let fixed = apply_fix(
+        "static f = fn (p: struct { x: usize, y: usize }) -> usize { let struct { x } = p; x };",
+        "Add `..`",
+    );
+    assert!(
+        fixed.contains("let struct { x, .. } = p;"),
+        "fixed: {fixed}"
+    );
+    check_diagnostics(&fixed, expect![[r#""#]]);
+    // After a trailing comma the marker goes behind it; an empty pattern
+    // gets the marker alone.
+    let fixed = apply_fix(
+        "static f = fn (p: struct { x: usize, y: usize }) -> usize { let struct { x, } = p; x };",
+        "Add `..`",
+    );
+    assert!(
+        fixed.contains("let struct { x, .. } = p;"),
+        "fixed: {fixed}"
+    );
+    check_diagnostics(&fixed, expect![[r#""#]]);
+    let fixed = apply_fix(
+        "static f = fn (p: struct { x: usize }) -> () { let struct {} = p; };",
+        "Add `..`",
+    );
+    assert!(fixed.contains("let struct { .. } = p;"), "fixed: {fixed}");
+    check_diagnostics(&fixed, expect![[r#""#]]);
+}
+
+#[test]
+fn a_record_pattern_missing_a_field_that_must_be_consumed_binds_it() {
+    // `..` may not skip a field that must be consumed: bind it.
+    let source = r#"
+static f = fn::<T>(p: struct { t: T, x: usize, y: usize }) -> usize {
+    let struct { x } = p;
+    x
+};
+"#;
+    check_diagnostics(
+        source,
+        expect![[r#"
+            79..91: pattern does not mention fields `t`, `y`; bind `t` and add `..` to ignore the rest: `T` may be a type that must be consumed, or write `T: forget` to require one that can be discarded
+        "#]],
+    );
+    let fixed = apply_fix(source, "Bind `t` and add `..`");
+    assert!(
+        fixed.contains("let struct { x, t, .. } = p;"),
+        "fixed: {fixed}"
+    );
+    check_diagnostics(&fixed, expect![[r#""#]]);
+    // Every unmentioned field must be consumed: bound, with no `..`.
+    let source = r#"
+static f = fn::<T>(p: struct { t: T, x: usize }) -> usize {
+    let struct { x } = p;
+    x
+};
+"#;
+    check_diagnostics(
+        source,
+        expect![[r#"
+            69..81: pattern does not mention field `t`; bind `t`: `T` may be a type that must be consumed, or write `T: forget` to require one that can be discarded
+        "#]],
+    );
+    let fixed = apply_fix(source, "Bind `t`");
+    assert!(fixed.contains("let struct { x, t } = p;"), "fixed: {fixed}");
+    check_diagnostics(&fixed, expect![[r#""#]]);
+    // Fields declared `only move` must be consumed, said once for both.
+    let source = r#"
+type Lin = struct { n: usize } only move;
+static f = fn(p: struct { a: Lin, b: Lin, x: usize, y: usize }) -> usize {
+    let struct { x } = p;
+    x
+};
+"#;
+    check_diagnostics(
+        source,
+        expect![[r#"
+            126..138: pattern does not mention fields `a`, `b`, `y`; bind `a`, `b` and add `..` to ignore the rest: `a`, `b` must be consumed
+        "#]],
+    );
+    let fixed = apply_fix(source, "Bind `a`, `b` and add `..`");
+    assert!(
+        fixed.contains("let struct { x, a, b, .. } = p;"),
+        "fixed: {fixed}"
+    );
+    // The fixed source is clean: binding the fields is all the pattern owes.
+    check_diagnostics(&fixed, expect![[r#""#]]);
+    // Each parameter's reason once, in field order.
+    check_diagnostics(
+        r#"
+static f = fn::<T, U>(p: struct { a: T, b: U, c: T, x: usize }) -> usize {
+    let struct { x } = p;
+    x
+};
+"#,
+        expect![[r#"
+            84..96: pattern does not mention fields `a`, `b`, `c`; bind `a`, `b`, `c`: `T` may be a type that must be consumed, or write `T: forget` to require one that can be discarded; `U` may be a type that must be consumed, or write `U: forget` to require one that can be discarded
+        "#]],
+    );
+}
+
+#[test]
 fn let_record_destructure_missing_several_fields_without_rest_errors() {
     check_diagnostics(
         r#"static f = fn { let struct { x } = struct { x = 1, y = 2, z = 3 }; };"#,

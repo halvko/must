@@ -155,6 +155,35 @@ static q = Foo();
 }
 
 #[test]
+fn a_record_where_a_named_type_is_wanted_offers_to_construct_it() {
+    let fixed = apply_fix(
+        r#"
+type Foo = struct { x: usize };
+static a: Foo = struct { x = 1 };
+"#,
+        "Construct a `Foo`",
+    );
+    assert!(
+        fixed.contains("static a: Foo = Foo(struct { x = 1 });"),
+        "fixed: {fixed}"
+    );
+    check_diagnostics(&fixed, expect![[r#""#]]);
+    // Only a type over a record is constructed from one: for an enum the
+    // message names no constructor, and there is no fix.
+    let source = r#"
+type Shape = enum { Point };
+static a: Shape = struct { x = 1 };
+"#;
+    check_diagnostics(
+        source,
+        expect![[r#"
+        48..64: type mismatch: expected `Shape`, found `struct { x: {number} }` (expected `Shape` because of this annotation at 40..45)
+    "#]],
+    );
+    assert!(fixes_of(source).is_empty(), "fixes: {:?}", fixes_of(source));
+}
+
+#[test]
 fn named_type_is_distinct_from_its_underlying_record() {
     // No implicit nominal↔structural coercion in either direction. The
     // named-expected direction carries the construct-it hint.

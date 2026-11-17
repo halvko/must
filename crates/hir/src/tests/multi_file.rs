@@ -80,6 +80,33 @@ static main = fn () -> usize {{ h(P(struct {{ x = 1 }})) }};
     )
 }
 
+/// `path`'s diagnostics in the library `fixture`, one per line pair: the
+/// message, then its fix's label and the text each edit inserts (`-` for
+/// no fix).
+fn library_fixes(fixture: &str, path: &str) -> String {
+    let mut db = RootDatabase::default();
+    let files = base_db::new_library(&mut db, "", base_db::fixture_files(fixture));
+    let file = (files.into_iter())
+        .find(|file| file.path(&db) == path)
+        .expect("file in fixture");
+    (crate::file_diagnostics(&db, file).into_iter())
+        .map(|d| {
+            let fix = d.fix.map_or_else(
+                || "-".to_owned(),
+                |fix| {
+                    let inserts: Vec<String> = fix
+                        .edits
+                        .into_iter()
+                        .map(|edit| format!("{:?}", edit.insert))
+                        .collect();
+                    format!("{}: {}", fix.label, inserts.join(" "))
+                },
+            );
+            format!("{}\n    {fix}\n", d.message)
+        })
+        .collect()
+}
+
 /// A file sees another file's items only through `use`: values and types,
 /// renamed or not.
 #[test]
@@ -1117,4 +1144,105 @@ static e = fn (p: Nope) -> usize { p.*.w::<const { nope }> };
             52..56: unresolved name `nope`
         "#]],
     );
+}
+
+#[test]
+fn a_message_and_its_fix_name_a_type_or_trait_as_the_file_knows_it() {
+    // Imported under another name: the message prints that name, and the
+    // fix writes it.
+    let fixes = library_fixes(
+        r#"
+//- a.must
+use shapes::Foo as Bar;
+use shapes::D as Show;
+use shapes::P;
+static a: Bar = struct { x = 1 };
+static m = fn(p: P) -> usize { P::m(p) };
+//- shapes.must
+pub type Foo = struct { x: usize };
+pub trait D = requires { m: fn(Self) -> usize; };
+pub type P = struct { v: usize } with {
+    impl D { m = fn(x: Self) -> usize { x.v }; }
+};
+"#,
+        "a.must",
+    );
+    expect![[r#"
+        type mismatch: expected `Foo`, found `struct { x: {number} }`; `Bar` (declared as `Foo`) is a distinct type — construct it with `Bar(...)`
+            Construct a `Bar`: "Bar(" ")"
+        `m` is not a member of `P` itself: `Show` (declared as `D`) provides it — write `Show::<Self = P>::m` (a trait member is spelled through its trait)
+            Write `Show::<Self = P>::m`: "Show::<Self = P>"
+    "#]].assert_eq(&fixes);
+    // The implementer is written as the path wrote it, whichever of its
+    // names that is.
+    let fixes = library_fixes(
+        r#"
+//- a.must
+use shapes::D;
+use shapes::P;
+use shapes::P as Q;
+static m = fn(p: P) -> usize { Q::m(p) };
+//- shapes.must
+pub trait D = requires { m: fn(Self) -> usize; };
+pub type P = struct { v: usize } with {
+    impl D { m = fn(x: Self) -> usize { x.v }; }
+};
+"#,
+        "a.must",
+    );
+    expect![[r#"
+        `m` is not a member of `Q` (declared as `P`) itself: `D` provides it — write `D::<Self = Q>::m` (a trait member is spelled through its trait)
+            Write `D::<Self = Q>::m`: "D::<Self = Q>"
+    "#]].assert_eq(&fixes);
+    // Arguments moved onto the owner land on the segment as written, and
+    // the message names it that way too.
+    let fixes = library_fixes(
+        r#"
+//- a.must
+use shapes::Pair;
+use shapes::Pair as Two;
+use shapes::Opt;
+use shapes::Opt as Maybe;
+static a = fn(p: Pair::<usize>) -> usize { Two::first::<usize>(p) };
+static b = fn() -> Opt::<usize> { Maybe::Some::<usize>(1) };
+//- shapes.must
+pub type Pair = struct::<T> { a: T, b: usize } with {
+    impl Self {
+        pub first = fn(p: Self) -> T { let Pair(struct { a, b }) = p; a };
+    }
+};
+pub type Opt = enum::<T> { Some(T), None };
+"#,
+        "a.must",
+    );
+    expect![[r#"
+        `Pair::first` takes no generic arguments; if these are meant for `Two` (declared as `Pair`), write `Two::<...>::first`
+            Move the arguments to `Two`: "::<usize>" ""
+        a variant has no generic arguments of its own: they belong to the owner — write `Maybe::<...>::Some`
+            Move the arguments to `Maybe`: "::<usize>" ""
+    "#]].assert_eq(&fixes);
+    // Not imported at all: no name to write, so no fix.
+    let fixes = library_fixes(
+        r#"
+//- a.must
+use shapes::take;
+use shapes::P;
+static a = fn() -> usize { take(struct { x = 1 }) };
+static m = fn(p: P) -> usize { P::m(p) };
+//- shapes.must
+pub type Foo = struct { x: usize };
+pub static take = fn(f: Foo) -> usize { 0 };
+pub trait D = requires { m: fn(Self) -> usize; };
+pub type P = struct { v: usize } with {
+    impl D { m = fn(x: Self) -> usize { x.v }; }
+};
+"#,
+        "a.must",
+    );
+    expect![[r#"
+        type mismatch: expected `Foo`, found `struct { x: {number} }`; `Foo` is a distinct type — construct it with `Foo(...)`
+            -
+        `m` is not a member of `P` itself: `D` provides it — write `D::<Self = P>::m` (a trait member is spelled through its trait)
+            -
+    "#]].assert_eq(&fixes);
 }

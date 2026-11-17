@@ -1457,6 +1457,164 @@ pub fn file_diagnostics(db: &dyn Db, file: SourceFile) -> Vec<Diagnostic> {
                             insert: " =".to_owned(),
                         }],
                     }),
+                // `P::m` through the one trait that provides it, keeping
+                // `P` as the implementer: `D::<Self = P>::m`. With several
+                // providers the choice is the user's.
+                InferenceDiagnostic::QualifiedTraitMemberOnType {
+                    expr,
+                    member,
+                    traits,
+                    ..
+                } => match traits.as_slice() {
+                    [trait_] => trait_.written.as_ref().and_then(|trait_name| {
+                        source_map
+                            .node_for_expr(*expr)
+                            .and_then(|ptr| ast::PathExpr::cast(ptr.to_node(&syntax_root)))
+                            .filter(|path| path.generic_arg_list().is_none())
+                            .and_then(|path| path.name_ref())
+                            .filter(|owner| owner.text() != "Self")
+                            .map(|owner| {
+                                // The implementer as the user wrote it.
+                                let qualified = format!("{trait_name}::<Self = {}>", owner.text());
+                                syntax::Fix {
+                                    label: format!("Write `{qualified}::{member}`"),
+                                    edits: vec![syntax::TextEdit {
+                                        range: owner.syntax().text_range(),
+                                        insert: qualified,
+                                    }],
+                                }
+                            })
+                    }),
+                    _ => None,
+                },
+                // `::` in front of the name turns the binding into the
+                // variant it shadows; the short spelling, since the
+                // scrutinee's type already names the enum.
+                InferenceDiagnostic::BindShadowsVariant {
+                    pat,
+                    name,
+                    payload_must_consume,
+                    ..
+                } => source_map
+                    .node_for_pat(*pat)
+                    .and_then(|ptr| ast::BindPat::cast(ptr.to_node(&syntax_root)))
+                    .filter(|bind| bind.mut_token().is_none())
+                    .map(|bind| {
+                        let range = bind.syntax().text_range();
+                        let (payload, _) =
+                            infer::variant_payload_pattern(name, payload_must_consume);
+                        let mut edits = vec![syntax::TextEdit {
+                            range: TextRange::empty(range.start()),
+                            insert: "::".to_owned(),
+                        }];
+                        if !payload.is_empty() {
+                            edits.push(syntax::TextEdit {
+                                range: TextRange::empty(range.end()),
+                                insert: payload.clone(),
+                            });
+                        }
+                        syntax::Fix {
+                            label: format!("Match the variant `::{name}{payload}`"),
+                            edits,
+                        }
+                    }),
+                // Binds the fields that must be consumed by name (`..` may
+                // not skip them) and ends with `..` for the rest.
+                InferenceDiagnostic::PatMissingFields {
+                    pat,
+                    fields,
+                    must_consume,
+                    ..
+                } => source_map
+                    .node_for_pat(*pat)
+                    .and_then(|ptr| ast::RecordPat::cast(ptr.to_node(&syntax_root)))
+                    .and_then(|record| {
+                        let (bind, rest) = infer::missing_fields_plan(fields, must_consume);
+                        let mut added = bind.clone();
+                        if rest {
+                            added.push("..");
+                        }
+                        let edit = match record.fields().last() {
+                            // Behind the last field's trailing comma if it
+                            // has one, else behind the field with a comma
+                            // of our own.
+                            Some(last) => match std::iter::successors(
+                                last.syntax().next_sibling_or_token(),
+                                |it| it.next_sibling_or_token(),
+                            )
+                            .find(|it| !it.kind().is_trivia())
+                            .filter(|it| it.kind() == syntax::SyntaxKind::COMMA)
+                            {
+                                Some(comma) => syntax::TextEdit {
+                                    range: TextRange::empty(comma.text_range().end()),
+                                    insert: format!(" {}", added.join(", ")),
+                                },
+                                None => syntax::TextEdit {
+                                    range: TextRange::empty(last.syntax().text_range().end()),
+                                    insert: format!(", {}", added.join(", ")),
+                                },
+                            },
+                            None => syntax::TextEdit {
+                                range: TextRange::empty(record.l_brace_token()?.text_range().end()),
+                                insert: format!(" {} ", added.join(", ")),
+                            },
+                        };
+                        let bound = (bind.iter())
+                            .map(|name| format!("`{name}`"))
+                            .collect::<Vec<_>>()
+                            .join(", ");
+                        let label = match (bound.is_empty(), rest) {
+                            (true, _) => "Add `..`".to_owned(),
+                            (false, false) => format!("Bind {bound}"),
+                            (false, true) => format!("Bind {bound} and add `..`"),
+                        };
+                        Some(syntax::Fix {
+                            label,
+                            edits: vec![edit],
+                        })
+                    }),
+                // Moves the member's turbofish onto the owner:
+                // `Pair::first::<usize>` becomes `Pair::<usize>::first`.
+                InferenceDiagnostic::NotGeneric {
+                    expr,
+                    owner_list_hint: Some(owner),
+                    ..
+                }
+                | InferenceDiagnostic::VariantOwnGenericArgs {
+                    expr,
+                    owner,
+                    suggest_owner_list: true,
+                    ..
+                } => source_map
+                    .node_for_expr(*expr)
+                    .and_then(|ptr| ast::PathExpr::cast(ptr.to_node(&syntax_root)))
+                    .and_then(|path| owner_args_fix(&path, owner)),
+                // A record where a named type over a record is wanted: wrap
+                // it in the type's constructor.
+                InferenceDiagnostic::TypeMismatch {
+                    expr,
+                    construct: Some(named),
+                    ..
+                } => {
+                    let name = named.written.clone();
+                    name.zip(source_map.node_for_expr(*expr))
+                        .map(|(name, ptr)| {
+                            let range = ptr.text_range();
+                            syntax::Fix {
+                                label: format!("Construct a `{name}`"),
+                                edits: vec![
+                                    syntax::TextEdit {
+                                        range: TextRange::empty(range.start()),
+                                        insert: format!("{name}("),
+                                    },
+                                    syntax::TextEdit {
+                                        range: TextRange::empty(range.end()),
+                                        insert: ")".to_owned(),
+                                    },
+                                ],
+                            }
+                        })
+                }
                 InferenceDiagnostic::TypeMismatch {
                     expected,
                     actual: Ty::Borrow { referent, .. },
@@ -2333,6 +2491,62 @@ fn insert_before_dot(dot: &syntax::SyntaxToken, text: &str, name: &str) -> synta
             insert: text.to_owned(),
         }],
     }
+}
+
+/// The name `decl` goes by in `file`: its own name when that resolves to
+/// it there, else a name it was imported under (`use shapes::Point as
+/// P`). None when `file` cannot name it.
+pub(crate) fn name_in_file(db: &dyn Db, file: SourceFile, decl: &ItemLoc) -> Option<String> {
+    let scope = file_scope(db, file);
+    let names_decl = |resolution: &Resolution| match resolution {
+        Resolution::Item(loc) | Resolution::TypeItem(loc) | Resolution::TraitItem(loc) => {
+            loc == decl
+        }
+        _ => false,
+    };
+    let own = decl.display_name();
+    if scope.resolve(own).as_ref().is_some_and(names_decl) {
+        return Some(own.to_owned());
+    }
+    (scope.iter())
+        .filter(|(_, resolution)| names_decl(resolution))
+        .map(|(name, _)| name.to_owned())
+        .min()
+}
+
+/// Moves a path's member turbofish onto its owner segment, `owner`.
+/// `Self` takes no arguments, so `Self::m::<...>` is rewritten through
+/// the name the file knows the owner by, if any.
+fn owner_args_fix(path: &ast::PathExpr, owner: &infer::NameInFile) -> Option<syntax::Fix> {
+    let owner_ref = path.name_ref()?;
+    let member_args = path.member_generic_args()?;
+    let args = member_args.generic_arg_list()?;
+    if path.generic_arg_list().is_some() {
+        return None;
+    }
+    let owner_name = owner.shown();
+    let owner_edit = if owner_ref.text() == "Self" {
+        let owner = owner.written.as_deref()?;
+        syntax::TextEdit {
+            range: owner_ref.syntax().text_range(),
+            insert: format!("{owner}::{}", args.syntax().text()),
+        }
+    } else {
+        syntax::TextEdit {
+            range: TextRange::empty(owner_ref.syntax().text_range().end()),
+            insert: format!("::{}", args.syntax().text()),
+        }
+    };
+    Some(syntax::Fix {
+        label: format!("Move the arguments to `{owner_name}`"),
+        edits: vec![
+            owner_edit,
+            syntax::TextEdit {
+                range: member_args.syntax().text_range(),
+                insert: String::new(),
+            },
+        ],
+    })
 }
 
 /// The fix for a borrow `found` where its referent is wanted: undo a

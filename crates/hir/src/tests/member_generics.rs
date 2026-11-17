@@ -137,6 +137,39 @@ static main = fn() -> usize {
 }
 
 #[test]
+fn generic_arguments_on_a_binderless_segment_move_to_the_owner() {
+    let fixed = apply_fix(
+        r#"
+type Pair = struct::<T> { a: T, b: usize } with {
+    impl Self { first = fn(p: Self) -> T { let Pair(struct { a, b }) = p; a }; }
+};
+static main = fn() -> usize {
+    let p = Pair::<usize>(struct { a = 1, b = 2 });
+    Pair::first::<usize>(p)
+};
+"#,
+        "Move the arguments to `Pair`",
+    );
+    assert!(
+        fixed.contains("    Pair::<usize>::first(p)\n"),
+        "fixed: {fixed}"
+    );
+    check_diagnostics(&fixed, expect![[r#""#]]);
+    let fixed = apply_fix(
+        r#"
+type Shape = enum::<T> { Circle(T), Point };
+static main = fn() -> Shape::<usize> { Shape::Circle::<usize>(1) };
+"#,
+        "Move the arguments to `Shape`",
+    );
+    assert!(
+        fixed.contains("{ Shape::<usize>::Circle(1) }"),
+        "fixed: {fixed}"
+    );
+    check_diagnostics(&fixed, expect![[r#""#]]);
+}
+
+#[test]
 fn variant_own_generic_arguments_no_hint_on_a_non_generic_owner() {
     // `Shape` has no binder at all, so `Shape::<...>::Circle` is not a fix —
     // it is a second error ("Shape takes no generic arguments"). The hint
@@ -1091,4 +1124,23 @@ static plain_field = fn(h: Holder) -> fn(usize) -> usize { h.go::<usize> };
             266..279: `go` takes no generic arguments
         "#]],
     );
+}
+
+#[test]
+fn owner_arguments_written_through_self_move_to_the_owners_name() {
+    // `Self` takes no arguments, so the fix spells the owner as the message
+    // does.
+    let fixed = apply_fix(
+        r#"
+type Pair = struct::<T> { a: T, b: usize } with {
+    impl Self {
+        first = fn(p: Self) -> T { let Pair(struct { a, b }) = p; a };
+        second = fn(p: Self) -> T { Self::first::<T>(p) };
+    }
+};
+"#,
+        "Move the arguments to `Pair`",
+    );
+    assert!(fixed.contains("{ Pair::<T>::first(p) }"), "fixed: {fixed}");
+    check_diagnostics(&fixed, expect![[r#""#]]);
 }

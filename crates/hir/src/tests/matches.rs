@@ -596,6 +596,139 @@ static f = fn (s: Shape) -> usize {
     );
 }
 
+/// `::` in front turns the bind into the variant, with one `_` per
+/// payload value.
+#[test]
+fn a_bind_named_like_a_variant_offers_the_variant_pattern() {
+    let fixed = apply_fix(
+        r#"
+type Shape = enum { Circle(usize), Point };
+static f = fn (s: Shape) -> usize {
+    match s {
+        ::Circle(r) => r,
+        Point => 0,
+    }
+};
+"#,
+        "Match the variant `::Point`",
+    );
+    assert!(fixed.contains("        ::Point => 0,\n"), "fixed: {fixed}");
+    check_diagnostics(&fixed, expect![[r#""#]]);
+    let fixed = apply_fix_among(
+        r#"
+type Shape = enum { Rect(usize, usize), Point };
+static f = fn (s: Shape) -> usize {
+    match s {
+        Rect => 1,
+        ::Point => 0,
+    }
+};
+"#,
+        "Match the variant `::Rect(_, _)`",
+    );
+    assert!(
+        fixed.contains("        ::Rect(_, _) => 1,\n"),
+        "fixed: {fixed}"
+    );
+    check_diagnostics(&fixed, expect![[r#""#]]);
+}
+
+/// A payload value that must be consumed is bound by name, since `_` may
+/// not swallow it; through a borrow every value may be dropped.
+#[test]
+fn a_variant_fix_binds_the_payload_values_that_must_be_consumed() {
+    let source = r#"
+type Box = enum::<T> { Full(T, usize), Empty };
+static f = fn::<T>(b: Box::<T>, k: fn(T) -> ()) -> () {
+    match b {
+        Full => (),
+        ::Empty => (),
+    }
+};
+"#;
+    check_diagnostics(
+        source,
+        expect![[r#"
+            127..131: `Full` binds the whole value; write `::Full(full, _)` (or `Box::Full(full, _)`) to match the variant: `T` may be a type that must be consumed, or write `T: forget` to require one that can be discarded (`Box` is defined here at 6..9)
+            147..154: unreachable arm: `Empty` is already covered by a previous arm
+        "#]],
+    );
+    let fixed = apply_fix_among(source, "Match the variant `::Full(full, _)`");
+    assert!(
+        fixed.contains("        ::Full(full, _) => (),\n"),
+        "fixed: {fixed}"
+    );
+    // The fixed source is clean: binding the value is all the pattern owes.
+    check_diagnostics(&fixed, expect![[r#""#]]);
+    // Through a borrowed scrutinee each payload value is a borrow, which
+    // `_` may drop.
+    let fixed = apply_fix_among(
+        r#"
+type Box = enum::<T> { Full(T, usize), Empty };
+static f = fn::<@a, T>(b: Box::<T>.&::<@a>) -> () {
+    match b {
+        Full => (),
+        ::Empty => (),
+    }
+};
+"#,
+        "Match the variant `::Full(_, _)`",
+    );
+    assert!(
+        fixed.contains("        ::Full(_, _) => (),\n"),
+        "fixed: {fixed}"
+    );
+    check_diagnostics(&fixed, expect![[r#""#]]);
+}
+
+/// A binder that would be a keyword gets a `_` after it.
+#[test]
+fn a_variant_fix_binder_never_spells_a_keyword() {
+    let source = r#"
+type Flow = enum::<B> { Break(B), Continue };
+static f = fn::<B>(x: Flow::<B>, k: fn(B) -> ()) -> () {
+    match x {
+        Break => (),
+        ::Continue => (),
+    }
+};
+"#;
+    check_diagnostics(
+        source,
+        expect![[r#"
+        126..131: `Break` binds the whole value; write `::Break(break_)` (or `Flow::Break(break_)`) to match the variant: `B` may be a type that must be consumed, or write `B: forget` to require one that can be discarded (`Flow` is defined here at 6..10)
+        147..157: unreachable arm: `Continue` is already covered by a previous arm
+    "#]],
+    );
+    let fixed = apply_fix_among(source, "Match the variant `::Break(break_)`");
+    assert!(
+        fixed.contains("        ::Break(break_) => (),\n"),
+        "fixed: {fixed}"
+    );
+    check_diagnostics(&fixed, expect![[r#""#]]);
+}
+
+/// A `mut` binding is not a variant pattern to rewrite.
+#[test]
+fn a_mut_bind_named_like_a_variant_gets_no_fix() {
+    let source = r#"
+type Shape = enum { Circle(usize), Point };
+static f = fn (s: Shape) -> usize {
+    match s {
+        ::Circle(r) => r,
+        mut Point => 0,
+    }
+};
+"#;
+    check_diagnostics(
+        source,
+        expect![[r#"
+        129..138: `Point` binds the whole value; write `::Point` (or `Shape::Point`) to match the variant (`Shape` is defined here at 6..11)
+    "#]],
+    );
+    assert!(fixes_of(source).is_empty(), "fixes: {:?}", fixes_of(source));
+}
+
 #[test]
 fn match_bind_arm_named_like_variant_is_still_a_catch_all() {
     // A bind named like a variant is a *full* catch-all (never narrowed),
@@ -624,20 +757,30 @@ fn match_bind_arm_named_like_payload_variant_is_not_an_error() {
     // G25's motivating scenario: a bare bind named like a
     // *payload-carrying* variant used to require a `PatArity` error under
     // reinterpretation. Now it just binds the whole value — no error, only
-    // the shadow-name warning.
-    check_diagnostics(
-        r#"
+    // the shadow-name warning, whose fix writes the payload's `_`. (The
+    // `::Point` arm, dead behind the bind, keeps the fixed match exhaustive.)
+    let source = r#"
 type Shape = enum { Circle(usize), Point };
 static f = fn (s: Shape) -> usize {
     match s {
         Circle => 0,
+        ::Point => 1,
     }
 };
-"#,
+"#;
+    check_diagnostics(
+        source,
         expect![[r#"
-            103..109: `Circle` binds the whole value; write `::Circle` (or `Shape::Circle`) to match the variant (`Shape` is defined here at 6..11)
+            103..109: `Circle` binds the whole value; write `::Circle(_)` (or `Shape::Circle(_)`) to match the variant (`Shape` is defined here at 6..11)
+            124..131: unreachable arm: `Point` is already covered by a previous arm
         "#]],
     );
+    let fixed = apply_fix_among(source, "Match the variant `::Circle(_)`");
+    assert!(
+        fixed.contains("        ::Circle(_) => 0,\n"),
+        "fixed: {fixed}"
+    );
+    check_diagnostics(&fixed, expect![[r#""#]]);
 }
 
 #[test]

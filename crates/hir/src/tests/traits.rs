@@ -802,6 +802,41 @@ static d = fn() -> () { let m = Shape::Nope; };
 }
 
 #[test]
+fn a_trait_member_spelled_through_its_implementer_offers_the_trait() {
+    let fixed = apply_fix(
+        r#"
+trait D = requires { m: fn(Self) -> usize; };
+type P = struct { v: usize } with {
+    impl D { m = fn(x: Self) -> usize { x.v }; }
+};
+static main = fn(p: P) -> usize { P::m(p) };
+"#,
+        "Write `D::<Self = P>::m`",
+    );
+    assert!(
+        fixed.contains("-> usize { D::<Self = P>::m(p) };"),
+        "fixed: {fixed}"
+    );
+    check_diagnostics(&fixed, expect![[r#""#]]);
+    // The implementer stays `P`, also when the member is used as a value.
+    let fixed = apply_fix(
+        r#"
+trait D = requires { m: fn(Self) -> usize; };
+type P = struct { v: usize } with {
+    impl D { m = fn(x: Self) -> usize { x.v }; }
+};
+static f = P::m;
+"#,
+        "Write `D::<Self = P>::m`",
+    );
+    assert!(
+        fixed.contains("static f = D::<Self = P>::m;"),
+        "fixed: {fixed}"
+    );
+    check_diagnostics(&fixed, expect![[r#""#]]);
+}
+
+#[test]
 fn qualified_member_path_reaches_inherent_members_only() {
     // Each spelling names exactly one thing: `Type::m` is the type's OWN
     // member, and a trait member is spelled through its trait.
@@ -814,7 +849,7 @@ type P = struct { v: usize } with {
 static main = fn(p: P) -> usize { P::m(p) };
 "#,
         expect![[r#"
-            167..171: `m` is not a member of `P` itself: `D` provides it — write `D::m(value)` (a trait member is spelled through its trait)
+            167..171: `m` is not a member of `P` itself: `D` provides it — write `D::<Self = P>::m` (a trait member is spelled through its trait)
         "#]],
     );
 }

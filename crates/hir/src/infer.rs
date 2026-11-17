@@ -18,6 +18,7 @@ use crate::body::{
     BindingId, Body, ExprData, ExprId, GenericArgData, LiteralData, MatchArm, PatData, PatId,
     PlaceRoot, RecordLitField, Stmt, Undecided, body,
 };
+use crate::capability::MustConsume;
 use crate::constraint::{
     self, Cause, Constraints, Join, RegionConstraint, RegionConstraintReason, Relation, Witness,
     bound_cause, is_unresolved_number, resolve_args_fully, resolve_finished, resolve_fully,
@@ -248,6 +249,10 @@ pub enum InferenceDiagnostic {
         /// sibling branch that agreed on the type plus the axiom (annotation
         /// or call) that demanded it.
         reasons: Vec<Cause>,
+        /// A record where a named type over a record is wanted: the type
+        /// the message says to construct, and the fix does. Set when the
+        /// types are resolved.
+        construct: Option<NameInFile>,
     },
     /// Every branch of a join agrees on a type — the construct as a whole
     /// is what conflicts with the axiom that decided the expected type, so
@@ -585,6 +590,13 @@ pub enum InferenceDiagnostic {
         /// The enum whose variant the name shadows.
         item: ItemLoc,
         name: String,
+        /// The variant's payload types, substituted for the scrutinee's
+        /// arguments.
+        payload: Vec<Ty>,
+        /// Per payload value, why it must be consumed, `None` when `_`
+        /// may swallow it: the suggested pattern binds the `Some` ones by
+        /// name. Set when the types are resolved.
+        payload_must_consume: Vec<Option<MustConsume>>,
     },
     /// A variant pattern naming the wrong number of payload bindings.
     PatArity {
@@ -672,6 +684,9 @@ pub enum InferenceDiagnostic {
         expr: ExprId,
         /// The unmentioned `(name, type)` pairs, sorted by name.
         fields: Vec<(String, Ty)>,
+        /// The unmentioned fields `..` may not skip because they must be
+        /// consumed, each with why; set when field types are resolved.
+        must_consume: Vec<MustBind>,
     },
     /// A `let`/parameter pattern destructures a value whose type isn't
     /// known here (an unannotated bare `struct { ... }` pattern, with
@@ -735,7 +750,7 @@ pub enum InferenceDiagnostic {
         /// spelling collides with the separately reserved generic-trait
         /// form), a non-generic owner (the hint would trade one refusal for
         /// another), and every non-member mention.
-        owner_list_hint: Option<String>,
+        owner_list_hint: Option<NameInFile>,
     },
     /// `_` written in a *const* argument position. Const args are never
     /// inferred (TR06: running an instance backwards is
@@ -1141,10 +1156,10 @@ pub enum InferenceDiagnostic {
     QualifiedTraitMemberOnType {
         /// The path expression (carries the squiggle).
         expr: ExprId,
-        type_name: String,
+        type_name: NameInFile,
         member: String,
         /// The traits providing it for this type, in library order.
-        traits: Vec<String>,
+        traits: Vec<NameInFile>,
     },
     /// `Trait::<Self = T>::Item` — an associated-type path. Associated
     /// types are reserved; the trait declares the name, so this
@@ -1273,8 +1288,8 @@ pub enum InferenceDiagnostic {
     VariantOwnGenericArgs {
         /// The path expression (carries the squiggle).
         expr: ExprId,
-        /// The enum's display name.
-        owner: String,
+        /// The enum.
+        owner: NameInFile,
         /// The variant's name.
         variant: String,
         /// Whether `{owner}::<...>::{variant}` is worth hinting at: the
@@ -1287,6 +1302,138 @@ pub enum InferenceDiagnostic {
         /// for a binder-less MEMBER.
         suggest_owner_list: bool,
     },
+}
+
+/// A declaration a message names, with the name the diagnostic's file
+/// knows it by: its own, or the one it was imported under. The message
+/// prints that name and a fix writes it; with none (the file cannot name
+/// the declaration) the message falls back to the declaration's own name
+/// and there is no fix.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct NameInFile {
+    pub decl: ItemLoc,
+    pub written: Option<String>,
+}
+
+impl NameInFile {
+    pub(crate) fn new(db: &dyn Db, file: SourceFile, decl: &ItemLoc) -> NameInFile {
+        NameInFile {
+            decl: decl.clone(),
+            written: crate::name_in_file(db, file, decl),
+        }
+    }
+    /// The name a message prints.
+    pub fn shown(&self) -> &str {
+        self.written.as_deref().unwrap_or(self.decl.display_name())
+    }
+    /// The name a message prints, quoted, saying the declared name too when
+    /// they differ, since other parts of the message (a rendered type) use
+    /// it: `` `Bar` (declared as `Foo`) ``.
+    pub fn introduced(&self) -> String {
+        let declared = self.decl.display_name();
+        match self.shown() {
+            shown if shown == declared => format!("`{shown}`"),
+            shown => format!("`{shown}` (declared as `{declared}`)"),
+        }
+    }
+}
+
+/// A value a suggested pattern binds by name rather than skipping: its
+/// binder, and why it must be consumed.
+pub(crate) type MustBind = (String, MustConsume);
+
+/// The payload text a pattern for variant `name` writes to match any of
+/// its values (nothing for no payload): `_` per value, except a value that
+/// must be consumed (`Some` in `must_consume`) is bound by name (`circle`,
+/// `circle2`). Also returns the values so bound.
+pub(crate) fn variant_payload_pattern(
+    name: &str,
+    must_consume: &[Option<MustConsume>],
+) -> (String, Vec<MustBind>) {
+    if must_consume.is_empty() {
+        return (String::new(), Vec::new());
+    }
+    let mut binder = snake_case(name);
+    if syntax::SyntaxKind::from_keyword(&binder).is_some() {
+        binder.push('_');
+    }
+    let several = must_consume.iter().filter(|m| m.is_some()).count() > 1;
+    let mut bound = Vec::new();
+    let parts: Vec<String> = (must_consume.iter().enumerate())
+        .map(|(i, must)| match must {
+            None => "_".to_owned(),
+            Some(blame) => {
+                let name = if several {
+                    format!("{binder}{}", i + 1)
+                } else {
+                    binder.clone()
+                };
+                bound.push((name.clone(), blame.clone()));
+                name
+            }
+        })
+        .collect();
+    (format!("({})", parts.join(", ")), bound)
+}
+
+/// Why the values in `bound` may not be skipped, in the words of the `..`
+/// and `_` refusals: a value whose type must be consumed, or one of a
+/// rigid parameter that may be such a type (with the bound as the other
+/// way out).
+fn must_bind_reasons(bound: &[MustBind]) -> String {
+    let mut reasons = Vec::new();
+    let declared: Vec<String> = (bound.iter())
+        .filter(|(_, blame)| *blame == MustConsume::Declared)
+        .map(|(name, _)| format!("`{name}`"))
+        .collect();
+    if !declared.is_empty() {
+        reasons.push(format!("{} must be consumed", declared.join(", ")));
+    }
+    let mut params: Vec<&str> = Vec::new();
+    for param in bound.iter().filter_map(|(_, blame)| match blame {
+        MustConsume::Param(param) => Some(&**param),
+        MustConsume::Declared => None,
+    }) {
+        if !params.contains(&param) {
+            params.push(param);
+        }
+    }
+    for param in params {
+        reasons.push(format!(
+            "{}, or {}",
+            crate::diag::leak_reason(param),
+            crate::diag::forget_advice(param)
+        ));
+    }
+    reasons.join("; ")
+}
+
+/// `FullBox` as a binding name: `full_box`.
+fn snake_case(name: &str) -> String {
+    let mut out = String::new();
+    for (i, c) in name.chars().enumerate() {
+        if c.is_uppercase() {
+            if i > 0 {
+                out.push('_');
+            }
+            out.extend(c.to_lowercase());
+        } else {
+            out.push(c);
+        }
+    }
+    out
+}
+
+/// What a record pattern that leaves `fields` unmentioned should add: the
+/// fields that must be consumed, bound by name (`..` may not skip them),
+/// and whether `..` follows for the rest.
+pub(crate) fn missing_fields_plan<'a>(
+    fields: &[(String, Ty)],
+    must_consume: &'a [MustBind],
+) -> (Vec<&'a str>, bool) {
+    let bind: Vec<&str> = must_consume.iter().map(|(name, _)| name.as_str()).collect();
+    let rest = bind.len() < fields.len();
+    (bind, rest)
 }
 
 /// How a use site can WRITE the turbofish that pins a binder. An item's
@@ -1672,7 +1819,10 @@ impl InferenceDiagnostic {
     pub fn message(&self) -> String {
         match self {
             InferenceDiagnostic::TypeMismatch {
-                expected, actual, ..
+                expected,
+                actual,
+                construct,
+                ..
             } => {
                 let (want_str, got_str) = (expected.display(), actual.display());
                 let base = format!("type mismatch: expected `{want_str}`, found `{got_str}`");
@@ -1700,10 +1850,11 @@ impl InferenceDiagnostic {
                 // A nominal/structural near-miss: the found record may even
                 // be the declared shape, but a named type never coerces —
                 // say how to actually make one.
-                if let (Ty::Named(named), Ty::Record(_)) = (expected, actual) {
+                if let Some(named) = construct {
                     return format!(
-                        "{base}; `{name}` is a distinct type — construct it with `{name}(...)`",
-                        name = named.decl.display_name()
+                        "{base}; {} is a distinct type — construct it with `{}(...)`",
+                        named.introduced(),
+                        named.shown()
                     );
                 }
                 // The BORROW-where-owned near-miss: found is a borrow of
@@ -1983,10 +2134,23 @@ impl InferenceDiagnostic {
             InferenceDiagnostic::PatIntLiteralTooLarge { .. } => {
                 crate::diag::INT_LITERAL_TOO_LARGE.to_owned()
             }
-            InferenceDiagnostic::BindShadowsVariant { item, name, .. } => format!(
-                "`{name}` binds the whole value; write `::{name}` (or `{}::{name}`) to match the variant",
-                item.display_name()
-            ),
+            InferenceDiagnostic::BindShadowsVariant {
+                item,
+                name,
+                payload_must_consume,
+                ..
+            } => {
+                let (payload, bound) = variant_payload_pattern(name, payload_must_consume);
+                let why = if bound.is_empty() {
+                    String::new()
+                } else {
+                    format!(": {}", must_bind_reasons(&bound))
+                };
+                format!(
+                    "`{name}` binds the whole value; write `::{name}{payload}` (or `{}::{name}{payload}`) to match the variant{why}",
+                    item.display_name()
+                )
+            }
             InferenceDiagnostic::PatWrongEnum {
                 item,
                 variant,
@@ -2037,17 +2201,36 @@ impl InferenceDiagnostic {
             } => {
                 format!("no field `{name}` on `{}`", record_ty.display())
             }
-            InferenceDiagnostic::PatMissingFields { fields, .. } => {
-                let list = fields
-                    .iter()
-                    .map(|(name, _)| format!("`{name}`"))
-                    .collect::<Vec<_>>()
-                    .join(", ");
-                if fields.len() == 1 {
-                    format!("pattern does not mention field {list}; add `..` to ignore it")
+            InferenceDiagnostic::PatMissingFields {
+                fields,
+                must_consume,
+                ..
+            } => {
+                let list = |names: &mut dyn Iterator<Item = &str>| {
+                    names
+                        .map(|name| format!("`{name}`"))
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                };
+                let all = list(&mut fields.iter().map(|(name, _)| name.as_str()));
+                let s = if fields.len() == 1 { "" } else { "s" };
+                let (bind, rest) = missing_fields_plan(fields, must_consume);
+                let advice = if bind.is_empty() {
+                    let them = if fields.len() == 1 { "it" } else { "them" };
+                    format!("add `..` to ignore {them}")
                 } else {
-                    format!("pattern does not mention fields {list}; add `..` to ignore them")
-                }
+                    let rest = if rest {
+                        " and add `..` to ignore the rest"
+                    } else {
+                        ""
+                    };
+                    format!(
+                        "bind {}{rest}: {}",
+                        list(&mut bind.into_iter()),
+                        must_bind_reasons(must_consume)
+                    )
+                };
+                format!("pattern does not mention field{s} {all}; {advice}")
             }
             InferenceDiagnostic::PatBindingNeedsAnnotation { .. } => {
                 "cannot destructure this pattern: its type is not known here; \
@@ -2096,8 +2279,9 @@ impl InferenceDiagnostic {
                     Some(owner) => {
                         let member = name.rsplit("::").next().unwrap_or(name);
                         format!(
-                            "{base}; if these are meant for `{owner}`, write \
-                             `{owner}::<...>::{member}`"
+                            "{base}; if these are meant for {}, write `{}::<...>::{member}`",
+                            owner.introduced(),
+                            owner.shown()
                         )
                     }
                     None => base,
@@ -2247,25 +2431,21 @@ impl InferenceDiagnostic {
                 traits,
                 ..
             } => {
-                let providers = match traits.split_last() {
-                    Some((last, [])) => format!("`{last}` provides it"),
-                    Some((last, rest)) => format!(
-                        "{} and `{last}` provide it",
-                        rest.iter()
-                            .map(|t| format!("`{t}`"))
-                            .collect::<Vec<_>>()
-                            .join(", ")
-                    ),
+                let introduced: Vec<String> = traits.iter().map(NameInFile::introduced).collect();
+                let providers = match introduced.split_last() {
+                    Some((last, [])) => format!("{last} provides it"),
+                    Some((last, rest)) => format!("{} and {last} provide it", rest.join(", ")),
                     None => String::new(),
                 };
                 let spellings = traits
                     .iter()
-                    .map(|t| format!("`{t}::{member}(value)`"))
+                    .map(|t| format!("`{}::<Self = {}>::{member}`", t.shown(), type_name.shown()))
                     .collect::<Vec<_>>()
                     .join(" or ");
                 format!(
-                    "`{member}` is not a member of `{type_name}` itself: {providers} — \
-                     write {spellings} (a trait member is spelled through its trait)"
+                    "`{member}` is not a member of {} itself: {providers} — \
+                     write {spellings} (a trait member is spelled through its trait)",
+                    type_name.introduced()
                 )
             }
             InferenceDiagnostic::AssocTypeReserved { trait_, name, .. } => format!(
@@ -2346,6 +2526,7 @@ impl InferenceDiagnostic {
                 suggest_owner_list,
                 ..
             } => {
+                let owner = owner.shown();
                 if *suggest_owner_list {
                     format!(
                         "a variant has no generic arguments of its own: they \
@@ -2845,7 +3026,9 @@ struct MemberSite {
     /// An owner whose own list this path left unwritten — when it is
     /// GENERIC, the one place a list the member cannot take may still have
     /// a home, one segment to the left (`Owner::<...>::member`).
-    owner_hint: Option<ItemLoc>,
+    /// The owner segment's expression rides along so the error path can
+    /// name the owner as the path wrote it (`name_as_written`).
+    owner_hint: Option<(ItemLoc, ExprId)>,
 }
 
 /// What a use site calls a binder's owner, and the binder it names
@@ -3891,9 +4074,26 @@ impl<'db> InferCtx<'db> {
         for diag in self.result.diagnostics.iter_mut() {
             match diag {
                 InferenceDiagnostic::TypeMismatch {
-                    expected, actual, ..
+                    expected,
+                    actual,
+                    construct,
+                    ..
+                } => {
+                    *expected = resolve_finished(&mut self.table, expected);
+                    *actual = resolve_finished(&mut self.table, actual);
+                    *construct = match (&*expected, &*actual) {
+                        (Ty::Named(named), Ty::Record(_))
+                            if matches!(
+                                crate::ty::type_underlying_for(self.db, named),
+                                Some(Ty::Record(_))
+                            ) =>
+                        {
+                            Some(NameInFile::new(self.db, self.file, &named.decl))
+                        }
+                        _ => None,
+                    };
                 }
-                | InferenceDiagnostic::AllBranchesMismatch {
+                InferenceDiagnostic::AllBranchesMismatch {
                     expected, actual, ..
                 } => {
                     *expected = resolve_finished(&mut self.table, expected);
@@ -3951,10 +4151,31 @@ impl<'db> InferCtx<'db> {
                 InferenceDiagnostic::PatUnknownField { record_ty, .. } => {
                     *record_ty = resolve_finished(&mut self.table, record_ty);
                 }
-                InferenceDiagnostic::PatMissingFields { fields, .. } => {
+                InferenceDiagnostic::PatMissingFields {
+                    fields,
+                    must_consume,
+                    ..
+                } => {
                     for (_, ty) in fields.iter_mut() {
                         *ty = resolve_finished(&mut self.table, ty);
                     }
+                    *must_consume = (fields.iter())
+                        .filter_map(|(name, ty)| {
+                            Some((name.clone(), crate::capability::must_consume(self.db, ty)?))
+                        })
+                        .collect();
+                }
+                InferenceDiagnostic::BindShadowsVariant {
+                    payload,
+                    payload_must_consume,
+                    ..
+                } => {
+                    for ty in payload.iter_mut() {
+                        *ty = resolve_finished(&mut self.table, ty);
+                    }
+                    *payload_must_consume = (payload.iter())
+                        .map(|ty| crate::capability::must_consume(self.db, ty))
+                        .collect();
                 }
                 InferenceDiagnostic::PatNotRecord { ty, .. }
                 | InferenceDiagnostic::PatNotArray { ty, .. }
@@ -4002,7 +4223,6 @@ impl<'db> InferCtx<'db> {
                 | InferenceDiagnostic::PatArity { .. }
                 | InferenceDiagnostic::PatPathError { .. }
                 | InferenceDiagnostic::VariantPatUnknownScrutinee { .. }
-                | InferenceDiagnostic::BindShadowsVariant { .. }
                 | InferenceDiagnostic::BreakOutsideLoop { .. }
                 | InferenceDiagnostic::ContinueOutsideLoop { .. }
                 | InferenceDiagnostic::ReturnOutsideFn { .. }
@@ -6704,8 +6924,8 @@ impl<'db> InferCtx<'db> {
                 let owner_list_hint = site
                     .owner_hint
                     .as_ref()
-                    .filter(|owner| !item_generics(self.db, owner.to_id(self.db)).is_empty())
-                    .map(|owner| owner.display_name().to_owned());
+                    .filter(|(owner, _)| !item_generics(self.db, owner.to_id(self.db)).is_empty())
+                    .map(|(owner, base)| self.name_as_written(*base, owner));
                 self.result
                     .diagnostics
                     .push(InferenceDiagnostic::NotGeneric {
@@ -7725,6 +7945,19 @@ impl<'db> InferCtx<'db> {
         }
     }
 
+    /// `decl` as the path segment `base` wrote it (an import alias, say), so
+    /// message and fix agree with the source. For `Self` or a segment that
+    /// is not a plain name, its in-file name.
+    fn name_as_written(&self, base: ExprId, decl: &ItemLoc) -> NameInFile {
+        match &self.body.exprs[base] {
+            ExprData::NameRef(name) if name != "Self" => NameInFile {
+                decl: decl.clone(),
+                written: Some(name.clone()),
+            },
+            _ => NameInFile::new(self.db, self.file, decl),
+        }
+    }
+
     /// Resolve `Enum::Variant` in expression position — the type-directed
     /// second-segment resolution: the base's resolution comes from `scopes`
     /// like any name, the variant is looked up in the enum's declaration
@@ -7774,13 +8007,14 @@ impl<'db> InferCtx<'db> {
                     if let Some(member) = self.member_of(&loc, variant) {
                         return self.infer_qualified_member_value(
                             expr,
+                            base,
                             &loc,
                             member,
                             args,
                             member_args,
                         );
                     }
-                    if self.push_trait_member_on_type(expr, &loc, variant) {
+                    if self.push_trait_member_on_type(expr, base, &loc, variant) {
                         self.infer_const_args_free(args.unwrap_or(&[]));
                         return Ty::Error;
                     }
@@ -7832,7 +8066,7 @@ impl<'db> InferCtx<'db> {
                             self.result.diagnostics.push(
                                 InferenceDiagnostic::VariantOwnGenericArgs {
                                     expr,
-                                    owner: loc.display_name().to_owned(),
+                                    owner: self.name_as_written(base, &loc),
                                     variant: variant.to_owned(),
                                     suggest_owner_list,
                                 },
@@ -7863,13 +8097,14 @@ impl<'db> InferCtx<'db> {
                         if let Some(member) = self.member_of(&loc, variant) {
                             return self.infer_qualified_member_value(
                                 expr,
+                                base,
                                 &loc,
                                 member,
                                 args,
                                 member_args,
                             );
                         }
-                        if !self.push_trait_member_on_type(expr, &loc, variant) {
+                        if !self.push_trait_member_on_type(expr, base, &loc, variant) {
                             self.result
                                 .diagnostics
                                 .push(InferenceDiagnostic::NoSuchVariant {
@@ -8054,6 +8289,7 @@ impl<'db> InferCtx<'db> {
     fn infer_qualified_member_value(
         &mut self,
         expr: ExprId,
+        base: ExprId,
         owner: &ItemLoc,
         member: ItemLoc,
         args: Option<&[GenericArgData]>,
@@ -8077,7 +8313,7 @@ impl<'db> InferCtx<'db> {
         // have a home: `Owner::<...>::member`, one segment to the left. Set
         // only when the path left the owner's list unwritten; the consumer
         // also drops it for a binder-less owner.
-        let owner_hint = args.is_none().then(|| owner.clone());
+        let owner_hint = args.is_none().then(|| (owner.clone(), base));
         subst.extend(self.member_own_type_subst(
             expr,
             expr,
@@ -8115,15 +8351,21 @@ impl<'db> InferCtx<'db> {
     /// `Type::member` where the TYPE has no such member but a trait
     /// provides one for it: say which trait, and how its spelling goes.
     /// Returns whether the diagnostic was pushed.
-    fn push_trait_member_on_type(&mut self, expr: ExprId, loc: &ItemLoc, member: &str) -> bool {
+    fn push_trait_member_on_type(
+        &mut self,
+        expr: ExprId,
+        base: ExprId,
+        loc: &ItemLoc,
+        member: &str,
+    ) -> bool {
         if member.is_empty() {
             return false;
         }
         let self_key = crate::traits::SelfKey::Decl(loc.clone());
-        let traits: Vec<String> =
+        let traits: Vec<NameInFile> =
             crate::traits::traits_providing_member(self.db, self.file, &self_key, member)
                 .into_iter()
-                .map(|(trait_, _)| trait_.display_name().to_owned())
+                .map(|(trait_, _)| NameInFile::new(self.db, self.file, &trait_))
                 .collect();
         if traits.is_empty() {
             return false;
@@ -8132,7 +8374,8 @@ impl<'db> InferCtx<'db> {
             .diagnostics
             .push(InferenceDiagnostic::QualifiedTraitMemberOnType {
                 expr,
-                type_name: loc.display_name().to_owned(),
+                // The type as the path wrote it, which the fix keeps.
+                type_name: self.name_as_written(base, loc),
                 member: member.to_owned(),
                 traits,
             });
@@ -9423,7 +9666,8 @@ impl<'db> InferCtx<'db> {
                 if let Some(loc) = &enum_loc
                     && let Some(name) = name
                     && let Some(variants) = enum_variants(self.db, loc.to_id(self.db)).as_ref()
-                    && variants.iter().any(|(n, _)| *n == name)
+                    && let Some((_, payload)) = variants.iter().find(|(n, _)| *n == name)
+                    && let Scrutinee::Enum(named) = scrut
                 {
                     self.result
                         .diagnostics
@@ -9432,6 +9676,21 @@ impl<'db> InferCtx<'db> {
                             pat,
                             item: loc.clone(),
                             name: name.to_owned(),
+                            // The types the payload values would have in
+                            // the variant pattern: borrows, through a
+                            // borrowed scrutinee.
+                            payload: crate::ty::substitute_payload(
+                                payload,
+                                &named.decl,
+                                &named.args,
+                            )
+                            .into_iter()
+                            .map(|ty| match lens {
+                                Some(lens) => lens.wrap(lens.region.clone(), ty),
+                                None => ty,
+                            })
+                            .collect(),
+                            payload_must_consume: Vec::new(),
                         });
                 }
                 let ty = match scrut {
@@ -9836,6 +10095,7 @@ impl<'db> InferCtx<'db> {
                                     pat,
                                     expr: anchor,
                                     fields: missing,
+                                    must_consume: Vec::new(),
                                 });
                         }
                     }
@@ -10191,6 +10451,7 @@ impl<'db> InferCtx<'db> {
                                             expected,
                                             actual: found,
                                             reasons: Vec::new(),
+                                            construct: None,
                                         },
                                     );
                                 }
@@ -10419,6 +10680,7 @@ impl<'db> InferCtx<'db> {
                 expected: expected_shown,
                 actual: actual_shown,
                 reasons,
+                construct: None,
             });
         self.constraints
             .poison_unresolved_number(&mut self.table, &actual);

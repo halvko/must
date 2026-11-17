@@ -1377,6 +1377,7 @@ impl Constraints {
                         expected: expected.clone(),
                         actual,
                         reasons: reasons.clone(),
+                        construct: None,
                     });
                 }
             }
