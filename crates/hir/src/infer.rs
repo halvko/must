@@ -584,6 +584,9 @@ pub enum InferenceDiagnostic {
         /// The enum whose variant the name shadows.
         item: ItemLoc,
         name: String,
+        /// How many payload values the variant carries, each matched with
+        /// a `_` in the spelling the message suggests.
+        payload: usize,
     },
     /// A variant pattern naming the wrong number of payload bindings.
     PatArity {
@@ -671,6 +674,10 @@ pub enum InferenceDiagnostic {
         expr: ExprId,
         /// The unmentioned `(name, type)` pairs, sorted by name.
         fields: Vec<(String, Ty)>,
+        /// The unmentioned fields that must be consumed, which `..` may not
+        /// skip, so the message asks for them to be bound. Filled once the
+        /// field types are resolved.
+        must_consume: Vec<String>,
     },
     /// A `let`/parameter pattern destructures a value whose type isn't
     /// known here (an unannotated bare `struct { ... }` pattern, with
@@ -1143,7 +1150,7 @@ pub enum InferenceDiagnostic {
         type_name: String,
         member: String,
         /// The traits providing it for this type, in library order.
-        traits: Vec<String>,
+        traits: Vec<ItemLoc>,
     },
     /// `Trait::<Self = T>::Item` — an associated-type path. Associated
     /// types are reserved; the trait declares the name, so this
@@ -1286,6 +1293,16 @@ pub enum InferenceDiagnostic {
         /// for a binder-less MEMBER.
         suggest_owner_list: bool,
     },
+}
+
+/// The payload a variant pattern writes to match any value of a variant
+/// with `n` payload values: nothing for none, else `(_, ...)`.
+pub(crate) fn variant_payload_holes(n: usize) -> String {
+    if n == 0 {
+        String::new()
+    } else {
+        format!("({})", vec!["_"; n].join(", "))
+    }
 }
 
 /// How a use site can WRITE the turbofish that pins a binder. An item's
@@ -1982,10 +1999,18 @@ impl InferenceDiagnostic {
             InferenceDiagnostic::PatIntLiteralTooLarge { .. } => {
                 crate::diag::INT_LITERAL_TOO_LARGE.to_owned()
             }
-            InferenceDiagnostic::BindShadowsVariant { item, name, .. } => format!(
-                "`{name}` binds the whole value; write `::{name}` (or `{}::{name}`) to match the variant",
-                item.display_name()
-            ),
+            InferenceDiagnostic::BindShadowsVariant {
+                item,
+                name,
+                payload,
+                ..
+            } => {
+                let payload = variant_payload_holes(*payload);
+                format!(
+                    "`{name}` binds the whole value; write `::{name}{payload}` (or `{}::{name}{payload}`) to match the variant",
+                    item.display_name()
+                )
+            }
             InferenceDiagnostic::PatWrongEnum {
                 item,
                 variant,
@@ -2036,17 +2061,39 @@ impl InferenceDiagnostic {
             } => {
                 format!("no field `{name}` on `{}`", record_ty.display())
             }
-            InferenceDiagnostic::PatMissingFields { fields, .. } => {
-                let list = fields
-                    .iter()
-                    .map(|(name, _)| format!("`{name}`"))
-                    .collect::<Vec<_>>()
-                    .join(", ");
-                if fields.len() == 1 {
-                    format!("pattern does not mention field {list}; add `..` to ignore it")
+            InferenceDiagnostic::PatMissingFields {
+                fields,
+                must_consume,
+                ..
+            } => {
+                let list = |names: &mut dyn Iterator<Item = &String>| {
+                    names
+                        .map(|name| format!("`{name}`"))
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                };
+                let all = list(&mut fields.iter().map(|(name, _)| name));
+                let s = if fields.len() == 1 { "" } else { "s" };
+                let advice = if must_consume.is_empty() {
+                    let them = if fields.len() == 1 { "it" } else { "them" };
+                    format!("add `..` to ignore {them}")
+                } else if must_consume.len() == fields.len() {
+                    let (them, it) = if fields.len() == 1 {
+                        ("it", "it")
+                    } else {
+                        ("them", "they")
+                    };
+                    format!("bind {them}: {it} must be consumed")
                 } else {
-                    format!("pattern does not mention fields {list}; add `..` to ignore them")
-                }
+                    let consumed = list(&mut must_consume.iter());
+                    let which = if must_consume.len() == 1 {
+                        "which must be consumed"
+                    } else {
+                        "which must all be consumed"
+                    };
+                    format!("bind {consumed}, {which}, and add `..` to ignore the rest")
+                };
+                format!("pattern does not mention field{s} {all}; {advice}")
             }
             InferenceDiagnostic::PatBindingNeedsAnnotation { .. } => {
                 "cannot destructure this pattern: its type is not known here; \
@@ -2246,6 +2293,7 @@ impl InferenceDiagnostic {
                 traits,
                 ..
             } => {
+                let traits: Vec<&str> = traits.iter().map(ItemLoc::display_name).collect();
                 let providers = match traits.split_last() {
                     Some((last, [])) => format!("`{last}` provides it"),
                     Some((last, rest)) => format!(
@@ -3802,10 +3850,18 @@ impl<'db> InferCtx<'db> {
                 InferenceDiagnostic::PatUnknownField { record_ty, .. } => {
                     *record_ty = resolve_finished(&mut self.table, record_ty);
                 }
-                InferenceDiagnostic::PatMissingFields { fields, .. } => {
+                InferenceDiagnostic::PatMissingFields {
+                    fields,
+                    must_consume,
+                    ..
+                } => {
                     for (_, ty) in fields.iter_mut() {
                         *ty = resolve_finished(&mut self.table, ty);
                     }
+                    *must_consume = (fields.iter())
+                        .filter(|(_, ty)| !crate::capability::has_forget(self.db, ty))
+                        .map(|(name, _)| name.clone())
+                        .collect();
                 }
                 InferenceDiagnostic::PatNotRecord { ty, .. }
                 | InferenceDiagnostic::PatNotArray { ty, .. }
@@ -7948,10 +8004,10 @@ impl<'db> InferCtx<'db> {
             return false;
         }
         let self_key = crate::traits::SelfKey::Decl(loc.clone());
-        let traits: Vec<String> =
+        let traits: Vec<ItemLoc> =
             crate::traits::traits_providing_member(self.db, self.file, &self_key, member)
                 .into_iter()
-                .map(|(trait_, _)| trait_.display_name().to_owned())
+                .map(|(trait_, _)| trait_)
                 .collect();
         if traits.is_empty() {
             return false;
@@ -9249,7 +9305,7 @@ impl<'db> InferCtx<'db> {
                 if let Some(loc) = &enum_loc
                     && let Some(name) = name
                     && let Some(variants) = enum_variants(self.db, loc.to_id(self.db)).as_ref()
-                    && variants.iter().any(|(n, _)| *n == name)
+                    && let Some((_, payload)) = variants.iter().find(|(n, _)| *n == name)
                 {
                     self.result
                         .diagnostics
@@ -9258,6 +9314,7 @@ impl<'db> InferCtx<'db> {
                             pat,
                             item: loc.clone(),
                             name: name.to_owned(),
+                            payload: payload.len(),
                         });
                 }
                 let ty = match scrut {
@@ -9662,6 +9719,7 @@ impl<'db> InferCtx<'db> {
                                     pat,
                                     expr: anchor,
                                     fields: missing,
+                                    must_consume: Vec::new(),
                                 });
                         }
                     }
