@@ -1,7 +1,8 @@
 # Editor demos
 
 Before/after recordings of editor behaviour, referenced from PR descriptions.
-Not part of the source tree; nothing here is ever merged into main.
+Orphan branch, never merged into main. Link GIFs from PR descriptions by commit sha:
+`https://github.com/halvko/must/blob/<sha>/<dir>/<file>.gif?raw=true`. Recipe: editor-demos in the project files.
 
 ## #202 turbofish completion
 
