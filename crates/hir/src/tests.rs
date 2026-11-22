@@ -19514,3 +19514,110 @@ static f = fn::<@a, @b>(o: Out, r: Out.&mut::<@a>.&mut::<@b>) -> usize {
         "#]],
     );
 }
+
+/// A turbofish refused on a field still has its const arguments checked:
+/// an error inside is reported beside the refusal.
+#[test]
+fn a_refused_field_turbofish_checks_its_const_arguments() {
+    check_diagnostics(
+        r#"
+type P = struct { x: usize, y: usize };
+static h = fn (p: P) -> usize { p.x::<const { p.z }> };
+"#,
+        expect![[r#"
+            73..93: `x` takes no generic arguments
+            89..90: no field `z` on `P` (the fields of `P` are declared here at 10..39)
+        "#]],
+    );
+}
+
+#[test]
+fn a_refused_turbofish_inside_a_longer_place_checks_its_const_arguments() {
+    check_diagnostics(
+        r#"
+type Q = struct { y: usize };
+type P = struct { x: Q };
+static a = fn (p: P) -> usize { p.x::<const { p.z }>.y };
+"#,
+        expect![[r#"
+            89..109: `x` takes no generic arguments
+            105..106: no field `z` on `P` (the fields of `P` are declared here at 40..55)
+        "#]],
+    );
+}
+
+#[test]
+fn a_refused_turbofish_on_an_assignment_target_checks_its_const_arguments() {
+    check_diagnostics(
+        r#"
+type P = struct { w: usize };
+static b = fn (mut p: P) { p.w::<const { p.z }> = 1; };
+"#,
+        expect![[r#"
+            58..78: `w` takes no generic arguments
+            74..75: no field `z` on `P` (the fields of `P` are declared here at 10..29)
+        "#]],
+    );
+}
+
+#[test]
+fn a_refused_turbofish_on_a_linear_assignment_target_checks_its_const_arguments() {
+    check_diagnostics(
+        r#"
+type Res = struct { id: usize } only move with {
+    impl Self { drop = fn(r: Self) -> () { let Res(struct { id }) = r; }; };
+};
+type Holder = struct { res: Res, tag: usize };
+static make = fn (id: usize) -> Res { Res(struct { id = id }) };
+static f = fn (mut h: Holder) -> () { h.res::<const { h.nope }> = make(2); let Holder(struct { res, tag }) = h; let Res(struct { id }) = res; };
+"#,
+        expect![[r#"
+            280..305: `res` takes no generic arguments
+            280..305: this place still holds a value that must be consumed; assigning here would lose it
+            298..302: no field `nope` on `Holder` (the fields of `Holder` are declared here at 144..175)
+        "#]],
+    );
+}
+
+#[test]
+fn a_refused_turbofish_in_a_borrowed_place_checks_its_const_arguments() {
+    check_diagnostics(
+        r#"
+type P = struct { w: usize };
+static c = fn (p: P) { let r = p.w::<const { p.z }>.&; };
+"#,
+        expect![[r#"
+            62..82: `w` takes no generic arguments
+            78..79: no field `z` on `P` (the fields of `P` are declared here at 10..29)
+        "#]],
+    );
+}
+
+#[test]
+fn a_refused_turbofish_behind_a_refused_deref_checks_its_const_arguments() {
+    check_diagnostics(
+        r#"
+type P = struct { w: usize };
+static d = fn (p: P.&raw) -> usize { p.*.w::<const { p.*.z }> };
+"#,
+        expect![[r#"
+            68..71: dereferencing a raw pointer requires an `unsafe { ... }` block
+            68..92: `w` takes no generic arguments
+            84..87: dereferencing a raw pointer requires an `unsafe { ... }` block
+            88..89: no field `z` on `P` (the fields of `P` are declared here at 10..29)
+        "#]],
+    );
+}
+
+#[test]
+fn a_refused_turbofish_behind_a_broken_deref_checks_its_const_arguments() {
+    check_diagnostics(
+        r#"
+static e = fn (p: Nope) -> usize { p.*.w::<const { nope }> };
+"#,
+        expect![[r#"
+            19..23: unknown type `Nope`
+            52..56: unresolved name `nope`
+        "#]],
+    );
+}

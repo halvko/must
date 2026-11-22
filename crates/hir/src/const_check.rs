@@ -159,11 +159,10 @@ impl CheckCtx<'_> {
             // ARGUMENTS are compile-time positions wherever the mention
             // sits (they will be const-evaluated for instance identity), so
             // they check as const contexts unconditionally.
-            ExprData::GenericApp { args, .. } => {
-                for arg in args {
-                    if let crate::body::GenericArgData::Const(value) = arg {
-                        self.check_expr(*value, true);
-                    }
+            ExprData::GenericApp { .. } => {
+                let body = self.body;
+                for value in body.exprs[expr].const_arg_values() {
+                    self.check_expr(value, true);
                 }
             }
             ExprData::Call { callee, args, .. } => {
@@ -248,8 +247,15 @@ impl CheckCtx<'_> {
                 }
             }
             // A field access evaluates its receiver; the projection itself
-            // has no effect.
-            ExprData::Field { receiver, .. } => self.check_expr(*receiver, in_const),
+            // has no effect. A (refused) turbofish's const args are const
+            // contexts, as a `GenericApp`'s are.
+            ExprData::Field { receiver, .. } => {
+                self.check_expr(*receiver, in_const);
+                let body = self.body;
+                for value in body.exprs[expr].const_arg_values() {
+                    self.check_expr(value, true);
+                }
+            }
             // Array construction and indexing are pure data operations —
             // const-legal, like record literals and field access; the
             // bounds trap is the ordinary rejected-op story.

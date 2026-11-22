@@ -177,10 +177,14 @@ fn compute_expr_scopes(body: &Body, scopes: &mut ExprScopes, expr: ExprId, scope
                 compute_expr_scopes(body, scopes, field.value, scope);
             }
         }
-        // The field name is a projection, not a scoped reference; only the
-        // receiver is an expression.
+        // The field name is a projection, not a scoped reference; the
+        // receiver and any turbofish const-arg values (refused, but still
+        // typed) are ordinary scoped expressions.
         ExprData::Field { receiver, .. } => {
             compute_expr_scopes(body, scopes, *receiver, scope);
+            for value in body.exprs[expr].const_arg_values() {
+                compute_expr_scopes(body, scopes, value, scope);
+            }
         }
         ExprData::ArrayLit { elements } => {
             for &element in elements {
@@ -212,28 +216,19 @@ fn compute_expr_scopes(body: &Body, scopes: &mut ExprScopes, expr: ExprId, scope
         // arguments are semantically reserved but lexically ordinary:
         // their names resolve here like anyone else's, so the reservation
         // is the only thing standing between them and running.
-        ExprData::VariantPath {
-            base,
-            args,
-            member_args,
-            ..
-        } => {
+        ExprData::VariantPath { base, .. } => {
             compute_expr_scopes(body, scopes, *base, scope);
-            for arg in args.iter().flatten().chain(member_args.iter().flatten()) {
-                if let crate::body::GenericArgData::Const(value) = arg {
-                    compute_expr_scopes(body, scopes, *value, scope);
-                }
+            for value in body.exprs[expr].const_arg_values() {
+                compute_expr_scopes(body, scopes, value, scope);
             }
         }
         // The base is a scoped reference like a variant path's; type args
         // are not expressions, const-arg *values* are ordinary scoped
         // expressions.
-        ExprData::GenericApp { base, args } => {
+        ExprData::GenericApp { base, .. } => {
             compute_expr_scopes(body, scopes, *base, scope);
-            for arg in args {
-                if let crate::body::GenericArgData::Const(value) = arg {
-                    compute_expr_scopes(body, scopes, *value, scope);
-                }
+            for value in body.exprs[expr].const_arg_values() {
+                compute_expr_scopes(body, scopes, value, scope);
             }
         }
         ExprData::Match { scrutinee, arms } => {
