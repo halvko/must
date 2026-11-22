@@ -1321,6 +1321,9 @@ impl LowerCtx<'_> {
                 if let Some(op) = self.lower_place_read(b, expr) {
                     return op;
                 }
+                // A turbofish here is refused, but its const arguments are
+                // code: each error inside has its trap.
+                self.lower_link_args(b, [expr]);
                 let base = self.lower_expr(b, *receiver);
                 match self.field_index(*receiver, name) {
                     Some(index) => {
@@ -2470,18 +2473,18 @@ impl LowerCtx<'_> {
         value: ExprId,
         value_op: Operand,
     ) {
-        // A target inference rejected: trap with the squiggle's exact text.
-        if let Some(messages) = self.assign_traps.get(&target).cloned() {
-            self.trap(b, target, messages);
-            return;
-        }
         // Place-chain targets — field/element chains, and stores through a
         // raw pointer (`p.* = v;`, `p.*.x = v;`, `p.*[i] = v;`): one walk
-        // handles them all.
+        // handles them all, a rejected target included.
         if let ExprData::Field { .. } | ExprData::Index { .. } | ExprData::Deref { .. } =
             &self.body.exprs[target]
         {
             self.lower_field_assign_target(b, target, value, value_op);
+            return;
+        }
+        // A target inference rejected: trap with the squiggle's exact text.
+        if let Some(messages) = self.assign_traps.get(&target).cloned() {
+            self.trap(b, target, messages);
             return;
         }
         if let ExprData::NameRef(name) = &self.body.exprs[target] {
@@ -2606,6 +2609,19 @@ impl LowerCtx<'_> {
             kind,
             steps: chain,
         } = self.body.place_chain(target);
+        // The target is walked, not lowered: its links' turbofish const
+        // arguments lower here.
+        self.lower_link_args(b, chain.iter().rev().copied());
+        // The whole target rejected (assigning over a linear place): the
+        // links' own errors trap first, then the rejection, and the write
+        // doesn't happen.
+        if let Some(messages) = self.assign_traps.get(&target).cloned() {
+            if !chain.is_empty() {
+                self.place_traps_walked(b, root, &chain);
+            }
+            self.trap(b, target, messages);
+            return;
+        }
         // A deref roots the chain (`p.* = v;`, `p.*.x = v;`, `p.*[i] = v;`):
         // the store goes through the raw pointer — a new root whose
         // legality is the pointer's provenance (judged by the machine),
@@ -2836,24 +2852,32 @@ impl LowerCtx<'_> {
         // the POINTER (the read goes through it, path extended — nothing
         // materialized, the original allocation's identity preserved), a
         // name roots it in the binding's own storage.
-        let local = match kind {
-            PlaceRoot::Deref { receiver } => {
-                match self.lower_deref_root(b, root, receiver) {
-                    DerefRoot::Local(local) => local,
-                    DerefRoot::Trap(messages) => return Some(self.trap(b, root, messages)),
-                    // Never observable: read the placeholder instead.
-                    DerefRoot::Silent => return Some(Operand::Const(Const::Unit)),
-                }
-            }
+        // A name root settles here (it lowers nothing); a deref root is the
+        // pointer still to read.
+        let root_local = match kind {
+            PlaceRoot::Deref { receiver } => Err(receiver),
             PlaceRoot::Name(_) => {
                 let Some(Resolution::Local(binding)) = self.resolutions.get(root) else {
                     return None;
                 };
                 // A local of an enclosing function has no local here; the
                 // general path reports the unsupported capture.
-                *b.local_for_binding.get(binding)?
+                Ok(*b.local_for_binding.get(binding)?)
             }
             PlaceRoot::Temporary(_) | PlaceRoot::Missing | PlaceRoot::Value => return None,
+        };
+        // The chain is walked, not lowered: its links' turbofish const
+        // arguments lower here, `expr`'s own included, before the root, as
+        // in the address-of walk.
+        self.lower_link_args(b, chain.iter().rev().copied());
+        let local = match root_local {
+            Ok(local) => local,
+            Err(receiver) => match self.lower_deref_root(b, root, receiver) {
+                DerefRoot::Local(local) => local,
+                DerefRoot::Trap(messages) => return Some(self.trap(b, root, messages)),
+                // Never observable: read the placeholder instead.
+                DerefRoot::Silent => return Some(Operand::Const(Const::Unit)),
+            },
         };
         // A broken root or link INSIDE the chain (unknown field,
         // non-record receiver, non-array base, compile-time OOB),
@@ -2935,6 +2959,9 @@ impl LowerCtx<'_> {
             kind,
             steps: chain,
         } = self.body.place_chain(place);
+        // The place is walked, not lowered: its links' turbofish const
+        // arguments lower here.
+        self.lower_link_args(b, chain.iter().rev().copied());
         // A deref-rooted place: the pointer reads like any expression
         // (deeper derefs inside it are ordinary loads with their own
         // unsafe gating), then the address is that pointer, path-extended.
@@ -3114,33 +3141,13 @@ impl LowerCtx<'_> {
     fn refused_mention_args(&mut self, b: &mut BodyBuilder, mention: ExprId) {
         let mut pending = vec![mention];
         while let Some(expr) = pending.pop() {
-            let lists: Vec<&Vec<hir::body::GenericArgData>> = match &self.body.exprs[expr] {
-                ExprData::GenericApp { base, args } => {
-                    pending.push(*base);
-                    vec![args]
-                }
-                ExprData::VariantPath {
-                    base,
-                    args,
-                    member_args,
-                    ..
-                } => {
-                    pending.push(*base);
-                    args.iter().chain(member_args).collect()
-                }
-                // The receiver lowers on its own; only the member's list
-                // belongs to the refused path.
-                ExprData::Field { member_args, .. } => member_args.iter().collect(),
-                _ => Vec::new(),
-            };
-            let values: Vec<ExprId> = lists
-                .into_iter()
-                .flatten()
-                .filter_map(|arg| match arg {
-                    hir::body::GenericArgData::Const(value) => Some(*value),
-                    _ => None,
-                })
-                .collect();
+            let data = &self.body.exprs[expr];
+            // A field's receiver lowers on its own; only the member's list
+            // belongs to the refused path.
+            if let ExprData::GenericApp { base, .. } | ExprData::VariantPath { base, .. } = data {
+                pending.push(*base);
+            }
+            let values: Vec<ExprId> = data.const_arg_values().collect();
             for value in values {
                 self.lower_expr(b, value);
             }
@@ -3154,9 +3161,27 @@ impl LowerCtx<'_> {
         let PlaceChain {
             root, steps: chain, ..
         } = self.body.place_chain(place);
-        for link in root_outward(root, &chain) {
+        self.lower_link_args(b, chain.iter().rev().copied());
+        self.place_traps_walked(b, root, &chain);
+    }
+
+    /// [`Self::place_traps`] for a chain whose link arguments are already
+    /// lowered.
+    fn place_traps_walked(&mut self, b: &mut BodyBuilder, root: ExprId, chain: &[ExprId]) {
+        for link in root_outward(root, chain) {
             if let Some(messages) = self.link_traps(link) {
                 self.trap(b, link, messages);
+            }
+        }
+    }
+
+    /// Lower the const arguments of each field link's turbofish (refused,
+    /// but code: each error inside has its trap).
+    fn lower_link_args(&mut self, b: &mut BodyBuilder, links: impl IntoIterator<Item = ExprId>) {
+        let body = self.body;
+        for link in links {
+            for value in body.exprs[link].const_arg_values() {
+                self.lower_expr(b, value);
             }
         }
     }

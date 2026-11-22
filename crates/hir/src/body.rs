@@ -365,6 +365,29 @@ pub enum ExprData {
     },
 }
 
+impl ExprData {
+    /// The value expressions of the const arguments in this expression's
+    /// turbofishes, refused ones included.
+    pub fn const_arg_values(&self) -> impl Iterator<Item = ExprId> + '_ {
+        let lists: [Option<&[GenericArgData]>; 2] = match self {
+            ExprData::VariantPath {
+                args, member_args, ..
+            } => [args.as_deref(), member_args.as_deref()],
+            ExprData::GenericApp { args, .. } => [Some(args), None],
+            ExprData::Field { member_args, .. } => [member_args.as_deref(), None],
+            _ => [None, None],
+        };
+        lists
+            .into_iter()
+            .flatten()
+            .flatten()
+            .filter_map(|arg| match arg {
+                GenericArgData::Const(value) => Some(*value),
+                _ => None,
+            })
+    }
+}
+
 /// One turbofish argument, disambiguated by *form* at parse time (a
 /// literal or `const`-prefixed expression is a const arg; anything else is
 /// a type — see the grammar): whether the position actually takes a type

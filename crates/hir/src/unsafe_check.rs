@@ -175,20 +175,10 @@ impl CheckCtx<'_> {
             // Both lists a path can carry — the owner's turbofish and a
             // second segment's own — hold ordinary const-arg expressions,
             // so both are walked (the reserved one still contains code).
-            ExprData::VariantPath {
-                args, member_args, ..
-            } => {
-                for arg in args.iter().flatten().chain(member_args.iter().flatten()) {
-                    if let crate::body::GenericArgData::Const(value) = arg {
-                        self.check_expr(*value, in_unsafe);
-                    }
-                }
-            }
-            ExprData::GenericApp { args, .. } => {
-                for arg in args {
-                    if let crate::body::GenericArgData::Const(value) = arg {
-                        self.check_expr(*value, in_unsafe);
-                    }
+            ExprData::VariantPath { .. } | ExprData::GenericApp { .. } => {
+                let body = self.body;
+                for value in body.exprs[expr].const_arg_values() {
+                    self.check_expr(value, in_unsafe);
                 }
             }
             ExprData::Call { callee, args, .. } => {
@@ -300,7 +290,14 @@ impl CheckCtx<'_> {
                     self.check_expr(field.value, in_unsafe);
                 }
             }
-            ExprData::Field { receiver, .. } => self.check_expr(*receiver, in_unsafe),
+            // A refused turbofish's const args are still code to check.
+            ExprData::Field { receiver, .. } => {
+                self.check_expr(*receiver, in_unsafe);
+                let body = self.body;
+                for value in body.exprs[expr].const_arg_values() {
+                    self.check_expr(value, in_unsafe);
+                }
+            }
             ExprData::ArrayLit { elements } => {
                 for &element in elements {
                     self.check_expr(element, in_unsafe);
