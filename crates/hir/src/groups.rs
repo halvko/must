@@ -34,8 +34,10 @@ use base_db::{Db, SourceFile};
 use ena::unify::{InPlaceUnificationTable, UnifyKey};
 use rustc_hash::FxHashMap;
 
-use crate::constraint::{Constraints, resolve_finished, resolve_fully};
-use crate::infer::{InferCtx, InferenceDiagnostic, InferenceResult};
+use crate::constraint::{
+    ConstraintSnapshot, Constraints, resolve_finished, resolve_fully, resolve_shallow,
+};
+use crate::infer::{InferCtx, InferenceDiagnostic, InferenceResult, ProjectionKind, projected_ty};
 use crate::library::{LibraryId, library_item_ids, library_of};
 use crate::ty::{ParamScope, Ty, TyVar, TyVarValue, erase_infer, export_ty, lower_type_ref_in};
 use crate::{ItemLoc, item_loc};
@@ -658,8 +660,9 @@ pub fn body_group<'db>(db: &'db dyn Db, item: crate::ItemId<'db>) -> Option<(u32
 /// Inference for one binding group: checks every body the group covers
 /// once, in its own table, and returns the members' signatures and every
 /// body's result. Callees are checked before their callers, and the uses
-/// fill what their bodies left open together (T11 in
-/// `docs/design/types-and-data.md`).
+/// fill what their bodies left open together, projecting the field accesses
+/// and indexes waiting for a receiver as they go ([`Solver::project`]); T11
+/// in `docs/design/types-and-data.md`.
 #[salsa::tracked(returns(ref))]
 pub fn infer_group<'db>(db: &'db dyn Db, group: GroupId<'db>) -> GroupSignatures {
     let groups = inference_groups(db, group.library(db));
@@ -714,6 +717,7 @@ pub fn infer_group<'db>(db: &'db dyn Db, group: GroupId<'db>) -> GroupSignatures
         .unzip();
 
     let mut solver = Solver {
+        db,
         table: InPlaceUnificationTable::new(),
         constraints: Constraints::new(true),
         decided: vec![Ty::Error; member_count],
@@ -723,6 +727,9 @@ pub fn infer_group<'db>(db: &'db dyn Db, group: GroupId<'db>) -> GroupSignatures
         disagreements: FxHashMap::default(),
         lost: Vec::new(),
         mentions,
+        links: vec![FxHashMap::default(); bodies.len()],
+        projections: Vec::new(),
+        fired: Vec::new(),
     };
     let mut ctxs: Vec<Option<InferCtx<'db>>> = (0..bodies.len()).map(|_| None).collect();
 
@@ -736,7 +743,7 @@ pub fn infer_group<'db>(db: &'db dyn Db, group: GroupId<'db>) -> GroupSignatures
     for cycle in call_cycles(&calls) {
         let mut internal: Vec<(usize, Vec<(usize, Ty)>)> = Vec::new();
         for &m in &cycle {
-            let mut ctx = solver.check(db, &member_items, &member_locs, &bodies[m], &cycle);
+            let mut ctx = solver.check(&member_items, &member_locs, &bodies[m], &cycle);
             let uses = solver.export(&mut ctx, &member_locs, &bodies[m], &cycle, m);
             if !uses.is_empty() {
                 internal.push((m, uses));
@@ -754,18 +761,22 @@ pub fn infer_group<'db>(db: &'db dyn Db, group: GroupId<'db>) -> GroupSignatures
     // The members' uses fill what their callees left open, together.
     let member_fills = solver.take_fills();
     solver.unify_uses(&member_fills, false);
+    solver.projection_errors();
 
     let mut own_error = vec![false; member_count];
     for m in 0..member_count {
         // A member whose own body went wrong where it produces a value
         // carries its own error; its uses say nothing.
         let mut own_produced = rustc_hash::FxHashSet::default();
-        solver.own[m].produced_vars(&mut own_produced);
+        resolve_fully(&mut solver.table, &solver.own[m]).produced_vars(&mut own_produced);
         own_error[m] = wrong[m] == Wrong::OwnError
             || solver.own[m] == Ty::Error
-            || solver.met_error[m]
-                .iter()
-                .any(|var| own_produced.contains(var));
+            || solver.met_error[m].iter().any(|&var| {
+                matches!(
+                    resolve_fully(&mut solver.table, &Ty::Infer(var)),
+                    Ty::Infer(root) if own_produced.contains(&root)
+                )
+            });
         // A variable its body met an error on that is open in what the
         // member produces becomes `{error}`, so no fully typed body decides
         // what the body got wrong. Parameters stay open for uses.
@@ -786,7 +797,7 @@ pub fn infer_group<'db>(db: &'db dyn Db, group: GroupId<'db>) -> GroupSignatures
     // fills, together.
     for (b, body) in bodies.iter().enumerate() {
         if body.own.is_none() {
-            let mut ctx = solver.check(db, &member_items, &member_locs, body, &[]);
+            let mut ctx = solver.check(&member_items, &member_locs, body, &[]);
             solver.export(&mut ctx, &member_locs, body, &[], b);
             ctxs[b] = Some(ctx);
         }
@@ -854,6 +865,11 @@ pub fn infer_group<'db>(db: &'db dyn Db, group: GroupId<'db>) -> GroupSignatures
             let adopted = ctx.adopt_exported(&copy, &exported);
             debug_assert!(adopted, "a group body's copy disagrees with its decision");
         }
+        ctx.resolve_deferred_projections();
+        // A member its callers disagree on: the disagreement already asks
+        // for the annotation its deferred projections would.
+        let tied = body.own.is_some_and(|m| disagreements.contains_key(&m));
+        ctx.report_undetermined_projections(tied);
         ctx.poison_left_unbound();
         ctx.report_undetermined_members(|expr, loc| {
             let m = member_of[loc];
@@ -969,7 +985,8 @@ struct GroupBody<'db> {
 
 /// The members' signatures as the group decides them, in a table of
 /// their own (no body's variables are in it).
-struct Solver {
+struct Solver<'db> {
+    db: &'db dyn Db,
     table: InPlaceUnificationTable<TyVar>,
     /// Errors abstain: a body's own mistake decides nothing about a member.
     constraints: Constraints,
@@ -990,9 +1007,61 @@ struct Solver {
     /// Per body, how many times it mentions each member: its uses, each a
     /// vote.
     mentions: Vec<FxHashMap<usize, usize>>,
+    /// Per body, the solver variable each of its exported variables became,
+    /// so its copies and its deferred projections share them.
+    links: Vec<FxHashMap<TyVar, TyVar>>,
+    /// Every body's field accesses and indexes still waiting for their
+    /// receiver when the body was checked, as receiver, projection and
+    /// value ([`Self::project`]).
+    projections: Vec<Projection>,
+    /// The projections fired since the solver's outermost snapshot, in
+    /// order: a rollback unfires the ones fired after its snapshot.
+    fired: Vec<usize>,
 }
 
-impl Solver {
+/// A snapshot of the solver: its table's and which projections had fired.
+struct SolverSnapshot {
+    constraints: ConstraintSnapshot,
+    fired: usize,
+}
+
+/// A field access or index of a member's body (or of a fully typed body)
+/// that waits for its receiver, in the solver's table.
+struct Projection {
+    /// The member whose body it is in, if any.
+    own: Option<usize>,
+    receiver: Ty,
+    kind: ProjectionKind,
+    value: Ty,
+    /// Whether it fired: its receiver is determined, and the value met
+    /// what it projects to. Its receiver can't change after that, so it
+    /// never fires again (unless a rollback undoes the receiver).
+    fired: bool,
+}
+
+impl<'db> Solver<'db> {
+    /// Open a speculative unification; see [`Constraints::snapshot`].
+    fn snapshot(&mut self) -> SolverSnapshot {
+        SolverSnapshot {
+            constraints: self.constraints.snapshot(&mut self.table),
+            fired: self.fired.len(),
+        }
+    }
+
+    fn commit(&mut self, snapshot: SolverSnapshot) {
+        self.constraints
+            .commit(&mut self.table, snapshot.constraints);
+    }
+
+    /// Undo a speculative unification, unfiring the projections it fired.
+    fn rollback_to(&mut self, snapshot: SolverSnapshot) {
+        self.constraints
+            .rollback_to(&mut self.table, snapshot.constraints);
+        for i in self.fired.drain(snapshot.fired..) {
+            self.projections[i].fired = false;
+        }
+    }
+
     /// An instance of member `m`'s decided signature in another table: each
     /// variable becomes the one `vars` has for it, else a new one `mint`
     /// makes of its kind, so the links between them survive.
@@ -1012,14 +1081,14 @@ impl Solver {
     /// Check `body`, with a copy of the signature of each member it
     /// mentions: fresh for itself, what a member of its `cycle` writes,
     /// else an instance of what the member's body decided.
-    fn check<'db>(
+    fn check(
         &mut self,
-        db: &'db dyn Db,
         member_items: &[crate::ItemId<'db>],
         member_locs: &[ItemLoc],
         body: &GroupBody<'db>,
         cycle: &[usize],
     ) -> InferCtx<'db> {
+        let db = self.db;
         let mut table = InPlaceUnificationTable::new();
         let mut vars: FxHashMap<TyVar, Ty> = FxHashMap::default();
         let copies = body
@@ -1057,16 +1126,8 @@ impl Solver {
         cycle: &[usize],
         b: usize,
     ) -> Vec<(usize, Ty)> {
-        let mut vars: FxHashMap<TyVar, Ty> = FxHashMap::default();
         let mut internal = Vec::new();
-        for &m in &body.mentioned {
-            let copy = ctx.copies()[&member_locs[m]].clone();
-            let resolved = ctx.resolve(&copy);
-            let moved = export_ty(&resolved, &mut |var| {
-                vars.entry(var)
-                    .or_insert_with(|| Ty::Infer(self.table.new_key(ctx.var_kind(var))))
-                    .clone()
-            });
+        for (m, moved) in self.moved_copies(ctx, member_locs, &body.mentioned, b) {
             if body.own == Some(m) {
                 self.own[m] = if ctx.root_has_error() {
                     Ty::Error
@@ -1079,18 +1140,17 @@ impl Solver {
                 self.fills[b].push((m, moved));
             }
         }
-        if let Some(own) = body.own {
-            let errors = ctx.left_unbound().to_vec();
-            self.met_error[own] = errors
-                .into_iter()
-                .filter_map(|var| match ctx.resolve(&Ty::Infer(var)) {
-                    Ty::Infer(root) => match vars.get(&root) {
-                        Some(Ty::Infer(moved)) => Some(*moved),
-                        _ => None,
-                    },
-                    _ => None,
-                })
-                .collect();
+        self.record_errors(ctx, body, b);
+        for (receiver, kind, value) in ctx.deferred_projections() {
+            let receiver = self.moved(ctx, b, &receiver);
+            let value = self.moved(ctx, b, &value);
+            self.projections.push(Projection {
+                own: body.own,
+                receiver,
+                kind,
+                value,
+                fired: false,
+            });
         }
         internal
     }
@@ -1105,47 +1165,238 @@ impl Solver {
             .collect()
     }
 
-    /// Unify each body's uses with the members' `decided` signatures
-    /// (T11). Where they don't all agree, every member votes against the
-    /// state before any vote, so the order of the items decides nothing;
-    /// members whose results share a variable commit together, or all tie.
-    /// `uses` pairs each body with its uses, one per member it
-    /// uses. `own_decides`: what is decided of a member is its own body's.
-    fn unify_uses(&mut self, uses: &[(usize, Vec<(usize, Ty)>)], own_decides: bool) {
-        let all = || {
-            uses.iter()
-                .flat_map(|(b, uses)| uses.iter().map(|(m, ty)| (*b, *m, ty)))
-        };
-        if self.agree(all().map(|(_, m, ty)| (m, ty))) {
+    /// Body `b`'s copy of each member it mentions, moved into the solver's
+    /// table through [`Self::links`].
+    fn moved_copies(
+        &mut self,
+        ctx: &mut InferCtx<'_>,
+        member_locs: &[ItemLoc],
+        mentioned: &[usize],
+        b: usize,
+    ) -> Vec<(usize, Ty)> {
+        mentioned
+            .iter()
+            .map(|&m| {
+                let copy = ctx.copies()[&member_locs[m]].clone();
+                (m, self.moved(ctx, b, &copy))
+            })
+            .collect()
+    }
+
+    /// `ty`, of body `b`, moved into the solver's table through
+    /// [`Self::links`].
+    fn moved(&mut self, ctx: &mut InferCtx<'_>, b: usize, ty: &Ty) -> Ty {
+        let links = &mut self.links[b];
+        let table = &mut self.table;
+        let resolved = ctx.resolve(ty);
+        export_ty(&resolved, &mut |var| {
+            Ty::Infer(
+                *links
+                    .entry(var)
+                    .or_insert_with(|| table.new_key(ctx.var_kind(var))),
+            )
+        })
+    }
+
+    /// The variables a member's `body` (body `b`) met an error on, in the
+    /// solver's table.
+    fn record_errors(&mut self, ctx: &mut InferCtx<'_>, body: &GroupBody<'_>, b: usize) {
+        let Some(own) = body.own else {
             return;
-        }
-        let mut used: Vec<usize> = all().map(|(_, m, _)| m).collect();
-        used.sort_unstable();
-        used.dedup();
-        let mut plans = Vec::new();
-        for m in used {
-            let uses: Vec<(usize, &Ty)> = all()
-                .filter(|&(_, of, _)| of == m)
-                .map(|(b, _, ty)| (b, ty))
+        };
+        let errors = ctx.left_unbound().to_vec();
+        self.met_error[own] = errors
+            .into_iter()
+            .filter_map(|var| match ctx.resolve(&Ty::Infer(var)) {
+                Ty::Infer(root) => self.links[b].get(&root).copied(),
+                _ => None,
+            })
+            .collect();
+    }
+
+    /// Fire each deferred field access or index whose receiver is
+    /// determined: its value meets what the receiver projects to. Each fires
+    /// once (until a rollback undoes its receiver). A value that doesn't fit
+    /// stays as it is; the body reports it once the group is decided.
+    fn project(&mut self) {
+        // The first pass tries every unfired projection, since receivers
+        // may have been bound outside this call. Later passes retry only
+        // the projections deferred on a variable a firing just bound.
+        let mut deferred_on: FxHashMap<TyVar, Vec<usize>> = FxHashMap::default();
+        let mut wake: Vec<usize> = (0..self.projections.len())
+            .filter(|&i| !self.projections[i].fired)
+            .collect();
+        while !wake.is_empty() {
+            let mut bound = rustc_hash::FxHashSet::default();
+            for i in std::mem::take(&mut wake) {
+                if self.projections[i].fired {
+                    continue;
+                }
+                // The head is all a projection reads of its receiver.
+                let receiver = resolve_shallow(&mut self.table, &self.projections[i].receiver);
+                if let Ty::Infer(var) = receiver {
+                    let root = self.table.find(var);
+                    deferred_on.entry(root).or_default().push(i);
+                    continue;
+                }
+                self.projections[i].fired = true;
+                self.fired.push(i);
+                let Projection { kind, value, .. } = &self.projections[i];
+                let Some(projected) = projected_ty(self.db, &receiver, kind) else {
+                    continue;
+                };
+                let value = value.clone();
+                // Every variable the unification can bind is open here.
+                let mut open = rustc_hash::FxHashSet::default();
+                resolve_fully(&mut self.table, &value).open_vars(&mut open);
+                resolve_fully(&mut self.table, &projected).open_vars(&mut open);
+                let snapshot = self.snapshot();
+                if self
+                    .constraints
+                    .unify_exported(&mut self.table, &value, &projected)
+                {
+                    self.commit(snapshot);
+                    bound.extend(open);
+                } else {
+                    self.rollback_to(snapshot);
+                }
+            }
+            wake = bound
+                .iter()
+                .filter_map(|var| deferred_on.remove(var))
+                .flatten()
                 .collect();
-            let (plan, lost) = self.vote(m, &uses, own_decides);
-            plans.extend(plan);
-            self.lost.extend(lost);
+            wake.sort_unstable();
+            wake.dedup();
         }
-        // Plans that share a variable, or are linked by a safety edge, stand
-        // or fall together: each group commits if it fits, and every member
-        // in a group that doesn't ties.
-        // TODO: halvko/must#234: tie only the members that conflict.
-        let snapshot = self.constraints.snapshot(&mut self.table);
+    }
+
+    /// Record each projection that cannot succeed on its determined
+    /// receiver (a missing field, an index of a non-array, a field of a
+    /// broken type) as an error its member's body met: its value is the
+    /// body's own `{error}`.
+    fn projection_errors(&mut self) {
+        for i in 0..self.projections.len() {
+            let Projection {
+                own,
+                receiver,
+                kind,
+                value,
+                ..
+            } = &self.projections[i];
+            let (own, value) = (*own, value.clone());
+            let Some(own) = own else {
+                continue;
+            };
+            let receiver = resolve_fully(&mut self.table, receiver);
+            if matches!(receiver, Ty::Infer(_) | Ty::Never)
+                || projected_ty(self.db, &receiver, kind).is_some_and(|ty| !ty.contains_error())
+            {
+                continue;
+            }
+            let mut open = rustc_hash::FxHashSet::default();
+            resolve_fully(&mut self.table, &value).open_vars(&mut open);
+            self.met_error[own].extend(open);
+        }
+    }
+
+    /// The open variables of the values of the projections whose receiver
+    /// is still undetermined: a use that leaves one of them open waits for
+    /// another vote to determine it.
+    fn deferred_values(&mut self) -> rustc_hash::FxHashSet<TyVar> {
+        let mut deferred = rustc_hash::FxHashSet::default();
+        for i in 0..self.projections.len() {
+            let Projection {
+                receiver, value, ..
+            } = &self.projections[i];
+            let value = value.clone();
+            if let Ty::Infer(_) = resolve_fully(&mut self.table, receiver) {
+                resolve_fully(&mut self.table, &value).open_vars(&mut deferred);
+            }
+        }
+        deferred
+    }
+
+    /// Unify each body's uses with the members' `decided` signatures
+    /// (T11). `uses` pairs each body with its uses, one per member it uses;
+    /// `own_decides`: what is decided of a member is its own body's. A
+    /// member whose use waits on a deferred projection (`k(p.x)` before
+    /// anything typed `p`) is decided after the members that may determine
+    /// it; members whose uses wait on one another are decided together.
+    fn unify_uses(&mut self, uses: &[(usize, Vec<(usize, Ty)>)], own_decides: bool) {
+        // Each member with its uses, as `(body, use)` pairs.
+        let mut left: Vec<(usize, Vec<(usize, &Ty)>)> = Vec::new();
+        let mut flat: Vec<(usize, usize, &Ty)> = uses
+            .iter()
+            .flat_map(|(b, uses)| uses.iter().map(|(m, ty)| (*m, *b, ty)))
+            .collect();
+        flat.sort_by_key(|&(m, b, _)| (m, b));
+        for (m, b, ty) in flat {
+            match left.last_mut() {
+                Some((last, member_uses)) if *last == m => member_uses.push((b, ty)),
+                _ => left.push((m, vec![(b, ty)])),
+            }
+        }
+        while !left.is_empty() {
+            let deferred = self.deferred_values();
+            let waiting: Vec<bool> = left
+                .iter()
+                .map(|(_, member_uses)| {
+                    member_uses.iter().any(|&(_, ty)| {
+                        let mut open = rustc_hash::FxHashSet::default();
+                        resolve_fully(&mut self.table, ty).open_vars(&mut open);
+                        !open.is_disjoint(&deferred)
+                    })
+                })
+                .collect();
+            // A member linked to a waiting member waits too, so the two
+            // still vote in one round. A member's uses are linked to one
+            // another, as in `vote_round`, but its decided signature
+            // doesn't count here: the member that determines a receiver is
+            // linked to the use waiting on it through that signature, and
+            // must go first.
+            let sets: Vec<(Option<usize>, Vec<&Ty>)> = left
+                .iter()
+                .map(|(_, member_uses)| (None, member_uses.iter().map(|&(_, ty)| ty).collect()))
+                .collect();
+            let keys = self.link_keys(&sets);
+            let waiting_keys: rustc_hash::FxHashSet<TyVar> = (0..left.len())
+                .filter(|&i| waiting[i])
+                .filter_map(|i| keys[i])
+                .collect();
+            let (later, now): (Vec<_>, Vec<_>) = left
+                .into_iter()
+                .zip(keys)
+                .partition(|(_, key)| key.is_some_and(|key| waiting_keys.contains(&key)));
+            let strip = |groups: Vec<(_, Option<TyVar>)>| -> Vec<_> {
+                groups.into_iter().map(|(group, _)| group).collect()
+            };
+            let (now, later) = if now.is_empty() {
+                (strip(later), Vec::new())
+            } else {
+                (strip(now), strip(later))
+            };
+            self.vote_round(&now, own_decides);
+            left = later;
+        }
+    }
+
+    /// A key per set, equal for two sets exactly when their variables are
+    /// linked (shared, or through a safety edge); `None` for a set with no
+    /// variable. `Some(m)` in a set adds member `m`'s decided signature.
+    /// The table is left as it was.
+    fn link_keys(&mut self, sets: &[(Option<usize>, Vec<&Ty>)]) -> Vec<Option<TyVar>> {
+        let snapshot = self.snapshot();
         for &(sub, sup) in self.constraints.safety_edges() {
             self.table.union(sub, sup);
         }
-        let mut keys: Vec<Option<TyVar>> = Vec::with_capacity(plans.len());
-        for plan in &plans {
+        let mut keys: Vec<Option<TyVar>> = Vec::with_capacity(sets.len());
+        for (m, uses) in sets {
             let mut vars = rustc_hash::FxHashSet::default();
-            let uses = plan.winners.iter().map(|&(_, ty, _)| ty);
-            let agreeing = plan.agreeing.iter().map(|&(_, ty)| ty);
-            for ty in uses.chain(agreeing).chain([&self.decided[plan.m]]) {
+            if let Some(m) = *m {
+                resolve_fully(&mut self.table, &self.decided[m]).table_vars(&mut vars);
+            }
+            for ty in uses {
                 resolve_fully(&mut self.table, ty).table_vars(&mut vars);
             }
             let mut vars = vars.into_iter();
@@ -1155,11 +1406,44 @@ impl Solver {
             }
             keys.push(key);
         }
-        let keys: Vec<Option<TyVar>> = keys
+        let keys = keys
             .into_iter()
             .map(|key| key.map(|var| self.table.find(var)))
             .collect();
-        self.constraints.rollback_to(&mut self.table, snapshot);
+        self.rollback_to(snapshot);
+        keys
+    }
+
+    /// One round of [`Self::unify_uses`]: where the uses don't all agree,
+    /// every member votes against the state before any vote, so the order
+    /// of the items decides nothing; members whose results share a
+    /// variable commit together, or all tie.
+    fn vote_round(&mut self, members: &[(usize, Vec<(usize, &Ty)>)], own_decides: bool) {
+        let all = members
+            .iter()
+            .flat_map(|(m, uses)| uses.iter().map(move |&(_, ty)| (*m, ty)));
+        if self.agree(all) {
+            return;
+        }
+        let mut plans = Vec::new();
+        for (m, uses) in members {
+            let (plan, lost) = self.vote(*m, uses, own_decides);
+            plans.extend(plan);
+            self.lost.extend(lost);
+        }
+        // Plans that share a variable, or are linked by a safety edge, stand
+        // or fall together: each group commits if it fits, and every member
+        // in a group that doesn't ties.
+        // TODO: halvko/must#234: tie only the members that conflict.
+        let sets: Vec<(Option<usize>, Vec<&Ty>)> = plans
+            .iter()
+            .map(|plan| {
+                let uses = plan.winners.iter().map(|&(_, ty, _)| ty);
+                let agreeing = plan.agreeing.iter().map(|&(_, ty)| ty);
+                (Some(plan.m), uses.chain(agreeing).collect())
+            })
+            .collect();
+        let keys = self.link_keys(&sets);
         let mut groups: Vec<Vec<usize>> = Vec::new();
         let mut by_key: FxHashMap<TyVar, usize> = FxHashMap::default();
         for (i, key) in keys.into_iter().enumerate() {
@@ -1215,10 +1499,14 @@ impl Solver {
         let mut abstaining: Vec<(usize, &Ty)> = Vec::new();
         let mut lost = Vec::new();
         for &(b, ty) in uses {
-            let snapshot = self.constraints.snapshot(&mut self.table);
+            let snapshot = self.snapshot();
             let agrees = self
                 .constraints
                 .unify_exported(&mut self.table, &self.decided[m], ty);
+            // What the use determines of the member's receivers projects.
+            if agrees {
+                self.project();
+            }
             let view = resolve_fully(&mut self.table, &self.decided[m]);
             let fills: Vec<Ty> = holes
                 .iter()
@@ -1232,7 +1520,7 @@ impl Solver {
             let all_numbers = numbers
                 .iter()
                 .all(|&var| matches!(self.table.probe_value(var), TyVarValue::UnknownNumber));
-            self.constraints.rollback_to(&mut self.table, snapshot);
+            self.rollback_to(snapshot);
             if !agrees {
                 let deciders = if own_decides { vec![m] } else { Vec::new() };
                 let use_ty = ty.clone();
@@ -1246,6 +1534,7 @@ impl Solver {
                     b,
                     ty,
                     key: view.erase_regions_and_safety(),
+                    view,
                     numbers,
                     fills,
                     weight: self.mentions[b][&m],
@@ -1287,9 +1576,9 @@ impl Solver {
             .collect();
         if leaders.is_empty() {
             // No vote: the uses leave the member open, and agree or tie.
-            let snapshot = self.constraints.snapshot(&mut self.table);
+            let snapshot = self.snapshot();
             let agrees = self.agree(abstaining.iter().map(|&(_, ty)| (m, ty)));
-            self.constraints.rollback_to(&mut self.table, snapshot);
+            self.rollback_to(snapshot);
             if !agrees {
                 let tied = abstaining.iter().map(|&(b, ty)| (b, ty.clone())).collect();
                 self.undecide(m, tied, Vec::new());
@@ -1307,7 +1596,7 @@ impl Solver {
         let tied = |votes: &[Vote<'t>]| -> Vec<(usize, Ty)> {
             (0..votes.len())
                 .filter(|&v| won(v))
-                .map(|v| (votes[v].b, votes[v].ty.clone()))
+                .map(|v| (votes[v].b, votes[v].view.clone()))
                 .collect()
         };
         if leaders
@@ -1320,7 +1609,7 @@ impl Solver {
 
         // Below the top a safety is invariant (T13): winners that differ
         // there tie.
-        let snapshot = self.constraints.snapshot(&mut self.table);
+        let snapshot = self.snapshot();
         let joined = (0..votes.len())
             .filter(|&v| won(v))
             .all(|v| self.join(&holes, &votes[v].fills));
@@ -1330,33 +1619,38 @@ impl Solver {
             winners: Vec::new(),
             agreeing: Vec::new(),
         };
-        let mut rest = abstaining;
+        // Each other use, with what names it if it loses: what it makes the
+        // member, its projections included, when it voted.
+        let mut rest: Vec<(usize, &Ty, Ty)> = abstaining
+            .into_iter()
+            .map(|(b, ty)| (b, ty, ty.clone()))
+            .collect();
         for (v, vote) in votes.iter_mut().enumerate() {
             if won(v) && joined && self.agree(std::iter::once((m, vote.ty))) {
                 plan.winners
                     .push((vote.b, vote.ty, std::mem::take(&mut vote.fills)));
             } else {
-                rest.push((vote.b, vote.ty));
+                rest.push((vote.b, vote.ty, vote.view.clone()));
             }
         }
         if plan.winners.is_empty() {
             // The join contradicts every winner's use, or doesn't fit them.
-            self.constraints.rollback_to(&mut self.table, snapshot);
+            self.rollback_to(snapshot);
             self.undecide(m, tied(&votes), Vec::new());
             return (None, lost);
         }
         // Every other use folds in, or loses to the winners.
-        rest.sort_by_key(|&(b, _)| b);
+        rest.sort_by_key(|&(b, ..)| b);
         let deciders: Vec<usize> = plan.winners.iter().map(|&(b, ..)| b).collect();
-        for (b, ty) in rest {
+        for (b, ty, use_ty) in rest {
             if self.agree(std::iter::once((m, ty))) {
                 plan.agreeing.push((b, ty));
             } else {
-                let (use_ty, deciders) = (ty.clone(), deciders.clone());
+                let deciders = deciders.clone();
                 lost.push((b, m, Outvoted { use_ty, deciders }));
             }
         }
-        self.constraints.rollback_to(&mut self.table, snapshot);
+        self.rollback_to(snapshot);
         (Some(plan), lost)
     }
 
@@ -1372,12 +1666,12 @@ impl Solver {
     /// Whether the `plans` at `at` fit together; if they do, they stay
     /// applied, else the table is left as it was.
     fn apply_all(&mut self, plans: &[Plan<'_>], at: &[usize]) -> bool {
-        let snapshot = self.constraints.snapshot(&mut self.table);
+        let snapshot = self.snapshot();
         let fits = at.iter().all(|&i| self.apply(&plans[i]));
         if fits {
-            self.constraints.commit(&mut self.table, snapshot);
+            self.commit(snapshot);
         } else {
-            self.constraints.rollback_to(&mut self.table, snapshot);
+            self.rollback_to(snapshot);
         }
         fits
     }
@@ -1388,7 +1682,7 @@ impl Solver {
         if a.numbers.is_empty() && b.numbers.is_empty() {
             return a.key == b.key;
         }
-        let snapshot = self.constraints.snapshot(&mut self.table);
+        let snapshot = self.snapshot();
         // The rollback after each use reset its literals' numbers.
         for &var in a.numbers.iter().chain(&b.numbers) {
             self.table.union_value(var, TyVarValue::UnknownNumber);
@@ -1396,7 +1690,7 @@ impl Solver {
         let matches = self
             .constraints
             .unify_exported(&mut self.table, &a.key, &b.key);
-        self.constraints.rollback_to(&mut self.table, snapshot);
+        self.rollback_to(snapshot);
         matches
     }
 
@@ -1417,7 +1711,7 @@ impl Solver {
     /// Unify each of `uses` with its member's decided signature, keeping
     /// the result only if they all agree.
     fn agree<'t>(&mut self, mut uses: impl Iterator<Item = (usize, &'t Ty)>) -> bool {
-        let snapshot = self.constraints.snapshot(&mut self.table);
+        let snapshot = self.snapshot();
         // Exact, safety included: a body's copy is the member's type, not a
         // value meeting a position, so its safety is the member's (#168).
         let agrees = uses.all(|(m, ty)| {
@@ -1425,9 +1719,10 @@ impl Solver {
                 .unify_exported(&mut self.table, &self.decided[m], ty)
         });
         if agrees {
-            self.constraints.commit(&mut self.table, snapshot);
+            self.project();
+            self.commit(snapshot);
         } else {
-            self.constraints.rollback_to(&mut self.table, snapshot);
+            self.rollback_to(snapshot);
         }
         agrees
     }
@@ -1526,6 +1821,8 @@ struct Vote<'t> {
     /// The member's signature as the use alone makes it, regions and
     /// safety erased.
     key: Ty,
+    /// `key` without the regions and safety erased.
+    view: Ty,
     /// The literals' numbers `key` leaves open.
     numbers: Vec<TyVar>,
     /// What the use fills each hole of the member with.

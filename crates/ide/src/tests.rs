@@ -592,6 +592,35 @@ fn diagnostics_include_mir_findings() {
     assert_eq!(u32::from(diagnostics[0].range.start()), 64);
 }
 
+/// A field access on a `let mut q;` read before it is assigned waits for
+/// the assignment to type `q`; what is left is the read before the
+/// assignment, which MIR's initialization check reports.
+#[test]
+fn a_deferred_field_access_before_assignment_reports_the_read() {
+    let src = r#"
+type Point = struct { x: usize, y: usize };
+static f = fn (c: bool) -> usize {
+    let mut q;
+    if c { return q.x; };
+    q = Point(struct { x = 1, y = 2 });
+    q.y
+};
+"#;
+    let (analysis, file, _pos) = fixture(&format!("{src}$0"));
+    let diagnostics = analysis.diagnostics(file);
+    let errors: Vec<(u32, &str)> = diagnostics
+        .iter()
+        .filter(|d| d.severity == crate::Severity::Error)
+        .map(|d| (u32::from(d.range.start()), d.message.as_str()))
+        .collect();
+    // On the `q` of `return q.x`.
+    assert_eq!(
+        errors,
+        [(113, "`q` is used before it is assigned a value")],
+        "{diagnostics:?}"
+    );
+}
+
 /// A member's MIR lowering findings are reported with the file's
 /// diagnostics (halvko/must#94).
 #[test]
@@ -7025,6 +7054,27 @@ static main = fn { g(P(struct { n = 1 }), true); };
 type P = struct { n: usize };
 static g = fn (p: P, b: bool) -> struct { both: [bool; 2], p: P } { struct { p = p, both = [b, b] } };
 static main = fn { g(P(struct { n = 1 }), true); };
+"#,
+    );
+}
+
+/// A field access on a parameter its caller types waits for the caller,
+/// so the whole signature is written in one step.
+#[test]
+fn assist_writes_a_param_reached_only_through_a_field() {
+    check_assist(
+        r#"
+type Point = struct { x: usize, y: usize };
+static origin = Point(struct { x = 0, y = 0 });
+static translate$0 = const fn (p, dx) { Point(struct { x = p.x + dx, y = p.y }) };
+static moved = translate(origin, 5);
+"#,
+        "Insert inferred signature",
+        r#"
+type Point = struct { x: usize, y: usize };
+static origin = Point(struct { x = 0, y = 0 });
+static translate = const fn (p: Point, dx: usize) -> Point { Point(struct { x = p.x + dx, y = p.y }) };
+static moved = translate(origin, 5);
 "#,
     );
 }
