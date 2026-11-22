@@ -1,0 +1,3 @@
+type Point = struct { x: usize, y: usize };
+static translate = const fn (p, dx) { Point(struct { x = p.x + dx, y = p.y }) };
+

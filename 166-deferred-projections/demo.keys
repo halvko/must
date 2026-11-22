@@ -1,0 +1,5 @@
+# Squiggles on p.x / p.y first; then type a caller that determines `p`.
+pause 2
+goto 4:1
+type_text 'static main = fn () -> Point { translate(Point(struct { x = 1, y = 2 }), 5) };'
+pause 5
