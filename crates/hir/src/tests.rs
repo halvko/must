@@ -2465,6 +2465,259 @@ fn field_access_on_unannotated_param_requires_an_annotation() {
     );
 }
 
+/// A field access on an undetermined receiver waits for it:
+/// `translate`'s caller makes `p` a `Point`, and `p.x + dx` then makes `dx`
+/// a `usize`.
+#[test]
+fn field_access_waits_for_a_caller_to_determine_the_receiver() {
+    let text = r#"
+type Point = struct { x: usize, y: usize };
+static origin = Point(struct { x = 0, y = 0 });
+static translate = const fn (p, dx) {
+    Point(struct { x = p.x + dx, y = p.y })
+};
+static moved = translate(origin, 5);
+"#;
+    check_signatures(
+        text,
+        expect![[r#"
+        origin: Point
+        translate: fn(Point, usize) -> Point
+        moved: Point
+    "#]],
+    );
+    check_diagnostics(text, expect![[r#""#]]);
+    check_infer(
+        text,
+        expect![[r#"
+        61..66 'Point': fn(struct { x: usize, y: usize }) -> Point
+        61..91 'Point(struct { x ...': Point
+        67..90 'struct { x = 0, y...': struct { x: usize, y: usize }
+        80..81 '0': usize
+        87..88 '0': usize
+        112..176 'const fn (p, dx) ...': fn(Point, usize) -> Point
+        122..123 'p': Point
+        125..127 'dx': usize
+        129..176 '{     Point(struc...': Point
+        135..140 'Point': fn(struct { x: usize, y: usize }) -> Point
+        135..174 'Point(struct { x ...': Point
+        141..173 'struct { x = p.x ...': struct { x: usize, y: usize }
+        154..155 'p': Point
+        154..157 'p.x': usize
+        154..162 'p.x + dx': usize
+        160..162 'dx': usize
+        168..169 'p': Point
+        168..171 'p.y': usize
+        193..202 'translate': fn(Point, usize) -> Point
+        193..213 'translate(origin, 5)': Point
+        203..209 'origin': Point
+        211..212 '5': usize
+    "#]],
+    );
+}
+
+/// The same for an index, and through a chain of projections: each one
+/// waits for the one before it.
+#[test]
+fn index_and_chained_fields_wait_for_the_receiver() {
+    let text = r#"
+static first = fn (a) { a[0] };
+static inner = fn (r) { r.a.b };
+static main = fn () -> usize {
+    first([1, 2]) + inner(struct { a = struct { b = 3 } })
+};
+"#;
+    check_signatures(
+        text,
+        expect![[r#"
+        first: fn([usize; 2]) -> usize
+        inner: fn(struct { a: struct { b: usize } }) -> usize
+        main: fn() -> usize
+    "#]],
+    );
+    check_diagnostics(text, expect![[r#""#]]);
+}
+
+/// A receiver determined later in the same body: the call after the field
+/// access types `p`.
+#[test]
+fn field_access_waits_for_a_later_use_in_the_same_body() {
+    check_diagnostics(
+        r#"
+type Point = struct { x: usize, y: usize };
+static take = fn (_p: Point) -> () { };
+static f = fn (p) -> usize { let x = p.x; take(p); x };
+"#,
+        expect![[r#""#]],
+    );
+}
+
+/// A deferred `let mut q;` read before it is assigned: the access is typed
+/// from the assignment, so type checking reports nothing; the read before
+/// the assignment is MIR's initialization check
+/// (`ide::tests::a_deferred_field_access_before_assignment_reports_the_read`).
+#[test]
+fn field_access_on_a_later_assigned_local_waits() {
+    let text = r#"
+type Point = struct { x: usize, y: usize };
+static f = fn (c: bool) -> usize {
+    let mut q;
+    if c { return q.x; };
+    q = Point(struct { x = 1, y = 2 });
+    q.y
+};
+"#;
+    check_diagnostics(text, expect![[r#""#]]);
+    check_infer(
+        text,
+        expect![[r#"
+            56..170 'fn (c: bool) -> u...': fn(bool) -> usize
+            60..61 'c': bool
+            78..170 '{     let mut q; ...': usize
+            92..93 'q': Point
+            99..119 'if c { return q.x; }': ()
+            102..103 'c': bool
+            104..119 '{ return q.x; }': ()
+            106..116 'return q.x': !
+            113..114 'q': Point
+            113..116 'q.x': usize
+            125..126 'q': Point
+            129..134 'Point': fn(struct { x: usize, y: usize }) -> Point
+            129..159 'Point(struct { x ...': Point
+            135..158 'struct { x = 1, y...': struct { x: usize, y: usize }
+            148..149 '1': usize
+            155..156 '2': usize
+            165..166 'q': Point
+            165..168 'q.y': usize
+        "#]],
+    );
+}
+
+/// Projections across members resolve whatever order the members are
+/// written in: each caller determines its callee's receiver in turn.
+#[test]
+fn projections_across_members_resolve_in_any_order() {
+    let callee_first = r#"
+type Inner = struct { x: usize };
+type Mid = struct { i: Inner };
+type Outer = struct { m: Mid };
+static a = fn (p) { p.x };
+static b = fn (q) { a(q.i) };
+static c = fn (r) { b(r.m) };
+static o = Outer(struct { m = Mid(struct { i = Inner(struct { x = 1 }) }) });
+static main = fn () -> usize { c(o) };
+"#;
+    let expected = expect![[r#"
+        a: fn(Inner) -> usize
+        b: fn(Mid) -> usize
+        c: fn(Outer) -> usize
+        o: Outer
+        main: fn() -> usize
+    "#]];
+    check_signatures(callee_first, expected);
+    check_diagnostics(callee_first, expect![[r#""#]]);
+    let caller_first = r#"
+type Inner = struct { x: usize };
+type Mid = struct { i: Inner };
+type Outer = struct { m: Mid };
+static main = fn () -> usize { c(o) };
+static o = Outer(struct { m = Mid(struct { i = Inner(struct { x = 1 }) }) });
+static c = fn (r) { b(r.m) };
+static b = fn (q) { a(q.i) };
+static a = fn (p) { p.x };
+"#;
+    check_signatures(
+        caller_first,
+        expect![[r#"
+        main: fn() -> usize
+        o: Outer
+        c: fn(Outer) -> usize
+        b: fn(Mid) -> usize
+        a: fn(Inner) -> usize
+    "#]],
+    );
+    check_diagnostics(caller_first, expect![[r#""#]]);
+}
+
+/// Calling a field whose receiver is undetermined commits it to a safe
+/// `fn`, which a caller then confirms.
+#[test]
+fn calling_a_field_of_an_undetermined_receiver() {
+    let text = r#"
+static inc = fn (n: usize) -> usize { n + 1 };
+static call = fn (h) { (h.f)(1) };
+static main = fn () -> usize { call(struct { f = inc }) };
+"#;
+    check_signatures(
+        text,
+        expect![[r#"
+        inc: fn(usize) -> usize
+        call: fn(struct { f: fn(usize) -> usize }) -> usize
+        main: fn() -> usize
+    "#]],
+    );
+    check_diagnostics(text, expect![[r#""#]]);
+}
+
+/// A caller whose field is not the `fn` the call commits it to: a mismatch.
+#[test]
+fn calling_a_field_of_an_undetermined_receiver_checks_the_field() {
+    check_diagnostics(
+        r#"
+static call = fn (h) -> usize { (h.f)(1) };
+static main = fn () -> usize { call(struct { f = true }) };
+"#,
+        expect![[r#"
+            34..37: type mismatch: expected `fn({number}) -> usize`, found `bool`
+        "#]],
+    );
+}
+
+/// What a determined receiver turns out to lack is reported at the access
+/// once the receiver is known. `z`'s use says nothing: like any member
+/// whose body meets an error in what it produces, `z` carries its own
+/// error.
+#[test]
+fn a_deferred_field_access_reports_a_missing_field() {
+    let text = r#"
+type Point = struct { x: usize, y: usize };
+static origin = Point(struct { x = 0, y = 0 });
+static z = fn (p) { p.z };
+static main = fn () { z(origin); };
+"#;
+    check_signatures(
+        text,
+        expect![[r#"
+        origin: Point
+        z: fn(Point) -> {error}
+        main: fn()
+    "#]],
+    );
+    check_diagnostics(
+        text,
+        expect![[r#"
+        115..116: no field `z` on `Point` (the fields of `Point` are declared here at 14..43)
+    "#]],
+    );
+}
+
+/// A deferred field access whose value doesn't fit its context reports the
+/// mismatch at the access once the receiver is known.
+#[test]
+fn a_deferred_field_access_reports_a_mismatch() {
+    check_diagnostics(
+        r#"
+type Point = struct { x: usize, y: usize };
+static origin = Point(struct { x = 0, y = 0 });
+static wrong = fn (p) -> bool { p.x };
+static main = fn () { wrong(origin); };
+"#,
+        expect![[r#"
+            125..128: type mismatch: expected `bool`, found `usize` (expected `bool` because of this return type at 115..122)
+        "#]],
+    );
+}
+
 #[test]
 fn shorthand_field_resolves_and_type_checks() {
     check_diagnostics(
@@ -19511,6 +19764,265 @@ static f = fn::<@a, @b>(o: Out, r: Out.&mut::<@a>.&mut::<@b>) -> usize {
             287..293 'mk().a': value 'mk()' ["mk().a"]
             287..295 'mk().a.b': value 'mk()' ["mk().a.b", "mk().a"]
             287..298 'mk().a.b[1]': value 'mk()' ["mk().a.b[1]", "mk().a.b", "mk().a"]
+        "#]],
+    );
+}
+
+/// A use whose member waits on a deferred projection votes with what the
+/// projection gives, so callers' plurality decides: two callers make
+/// `f` take an `A`, one a `B`, and the `B` one is outvoted.
+#[test]
+fn uses_vote_with_what_the_member_projects() {
+    let src = r#"
+type A = struct { x: usize };
+type B = struct { x: bool };
+static a = A(struct { x = 1 });
+static b = B(struct { x = true });
+static f = fn (p) { p.x };
+static m1 = fn () { f(a); };
+static m2 = fn () { f(a); };
+static m3 = fn () { f(b); };
+"#;
+    check_signatures(
+        src,
+        expect![[r#"
+        a: A
+        b: B
+        f: fn(A) -> usize
+        m1: fn()
+        m2: fn()
+        m3: fn()
+    "#]],
+    );
+    check_diagnostics(
+        src,
+        expect![[r#"
+            232..233: `f` is `fn(A) -> usize` here, as `m1` and `m2` make it, but this use makes it `fn(B) -> bool` (`m1` is defined here at 161..163) (`m2` is defined here at 190..192)
+        "#]],
+    );
+}
+
+/// One caller each: a tie, which asks for the annotation at the uses; the
+/// projection in `f` doesn't ask again.
+#[test]
+fn a_tie_on_a_member_with_a_deferred_projection_reports_once() {
+    let src = r#"
+type A = struct { x: usize };
+type B = struct { x: bool };
+static a = A(struct { x = 1 });
+static b = B(struct { x = true });
+static f = fn (p) { p.x };
+static g = fn () -> usize { f(a) };
+static h = fn () -> bool { f(b) };
+"#;
+    check_signatures(
+        src,
+        expect![[r#"
+            a: A
+            b: B
+            f: {error}
+            g: fn() -> usize
+            h: fn() -> bool
+        "#]],
+    );
+    check_diagnostics(
+        src,
+        expect![[r#"
+            182..183: callers disagree on the type of `f`: `g` makes it `fn(A) -> usize`, `h` makes it `fn(B) -> bool`; add a type annotation to its definition (defined here at 134..135) (`g` is defined here at 161..162) (`h` is defined here at 197..198)
+            217..218: callers disagree on the type of `f`: `g` makes it `fn(A) -> usize`, `h` makes it `fn(B) -> bool`; add a type annotation to its definition (defined here at 134..135) (`g` is defined here at 161..162) (`h` is defined here at 197..198)
+        "#]],
+    );
+}
+
+/// `f`'s use of `k` waits for `f`'s receiver, which `g` determines: `k` is
+/// decided after `f`, so the use votes as `fn(bool) -> bool` and ties
+/// with `u`'s, exactly as with `p: B` written.
+#[test]
+fn a_use_through_a_deferred_projection_votes_as_if_annotated() {
+    let src = |param: &str| {
+        format!(
+            r#"
+type B = struct {{ x: bool }};
+static b = B(struct {{ x = true }});
+static k = fn (y) {{ y }};
+static u = fn () {{ let _: usize = k(1); }};
+static f = fn ({param}) {{ k(p.x) }};
+static g = fn () {{ f(b); }};
+"#
+        )
+    };
+    check_signatures(
+        &src("p"),
+        expect![[r#"
+        b: B
+        k: {error}
+        u: fn()
+        f: fn(B) -> bool
+        g: fn()
+    "#]],
+    );
+    check_signatures(
+        &src("p: B"),
+        expect![[r#"
+        b: B
+        k: {error}
+        u: fn()
+        f: fn(B) -> bool
+        g: fn()
+    "#]],
+    );
+    check_diagnostics(
+        &src("p"),
+        expect![[r#"
+            124..125: callers disagree on the type of `k`: `u` makes it `fn(usize) -> usize`, `f` makes it `fn(bool) -> bool`; add a type annotation to its definition (defined here at 72..73) (`u` is defined here at 97..98) (`f` is defined here at 140..141)
+            153..154: callers disagree on the type of `k`: `u` makes it `fn(usize) -> usize`, `f` makes it `fn(bool) -> bool`; add a type annotation to its definition (defined here at 72..73) (`u` is defined here at 97..98) (`f` is defined here at 140..141)
+        "#]],
+    );
+    check_diagnostics(
+        &src("p: B"),
+        expect![[r#"
+            124..125: callers disagree on the type of `k`: `u` makes it `fn(usize) -> usize`, `f` makes it `fn(bool) -> bool`; add a type annotation to its definition (defined here at 72..73) (`u` is defined here at 97..98) (`f` is defined here at 140..141)
+            156..157: callers disagree on the type of `k`: `u` makes it `fn(usize) -> usize`, `f` makes it `fn(bool) -> bool`; add a type annotation to its definition (defined here at 72..73) (`u` is defined here at 97..98) (`f` is defined here at 140..141)
+        "#]],
+    );
+}
+
+/// A body with a deferred projection and a use that lost: the group
+/// decides it like any other body.
+#[test]
+fn a_deferred_projection_beside_an_outvoted_use() {
+    let src = r#"
+type B = struct { x: bool };
+static b = B(struct { x = true });
+static k = fn (y) { y };
+static u1 = fn () { let _: usize = k(1); };
+static u2 = fn () { let _: usize = k(2); };
+static f = fn (p) { let _: bool = k(true); p.x };
+static g = fn () { f(b); };
+"#;
+    check_signatures(
+        src,
+        expect![[r#"
+            b: B
+            k: fn(usize) -> usize
+            u1: fn()
+            u2: fn()
+            f: fn(B) -> bool
+            g: fn()
+        "#]],
+    );
+    check_diagnostics(
+        src,
+        expect![[r#"
+            212..213: `k` is `fn(usize) -> usize` here, as `u1` and `u2` make it, but this use makes it `fn(bool) -> bool` (`u1` is defined here at 97..99) (`u2` is defined here at 141..143)
+        "#]],
+    );
+}
+
+/// A deferred field whose declared type is broken projects `{error}`,
+/// which binds nothing: the group still finishes, and the broken type is
+/// reported at its declaration.
+#[test]
+fn a_deferred_field_of_a_broken_type_terminates() {
+    let text = r#"
+type P = struct { x: Nope };
+static h = fn (p) { p.x };
+static main = fn (q: P) { h(q); };
+"#;
+    check_signatures(
+        text,
+        expect![[r#"
+        h: fn(P) -> {error}
+        main: fn(P)
+    "#]],
+    );
+    check_diagnostics(
+        text,
+        expect![[r#"
+        22..26: unknown type `Nope`
+    "#]],
+    );
+}
+
+/// The source for the turbofish tests: `h` reads `p.{field}::<usize>`,
+/// with `p` annotated as written in `param`, and `main` calls it with a `P`.
+fn turbofish_on_a_field_access(param: &str, field: &str) -> String {
+    format!(
+        r#"
+type P = struct {{ x: usize }} with {{ impl Self {{ m = fn (a: Self) -> usize {{ a.x }}; }} }};
+static h = fn ({param}) -> usize {{ p.{field}::<usize> }};
+static main = fn () -> usize {{ h(P(struct {{ x = 1 }})) }};
+"#
+    )
+}
+
+/// A turbofish on a field access whose receiver is determined later is
+/// refused on a field, as with a determined receiver.
+#[test]
+fn a_turbofish_on_a_deferred_field_is_refused_as_on_a_known_one() {
+    check_diagnostics(
+        &turbofish_on_a_field_access("p", "x"),
+        expect![[r#"
+        118..130: `x` takes no generic arguments
+    "#]],
+    );
+    check_diagnostics(
+        &turbofish_on_a_field_access("p: P", "x"),
+        expect![[r#"
+        121..133: `x` takes no generic arguments
+    "#]],
+    );
+}
+
+/// A turbofish on a member read as a field, with its receiver determined
+/// later, adds no second diagnostic: the member's own is the same one a
+/// determined receiver gets.
+#[test]
+fn a_turbofish_on_a_deferred_member_adds_nothing_to_the_members_error() {
+    check_diagnostics(
+        &turbofish_on_a_field_access("p", "m"),
+        expect![[r#"
+        118..130: `m` is a member fn, not a field; call it: `.m(...)`
+    "#]],
+    );
+    check_diagnostics(
+        &turbofish_on_a_field_access("p: P", "m"),
+        expect![[r#"
+        121..133: `m` is a member fn, not a field; call it: `.m(...)`
+    "#]],
+    );
+}
+
+/// A field access inside the const argument of a deferred field access's
+/// turbofish is checked like any expression, once its own receiver is
+/// determined: a missing field there is reported beside the refusal.
+#[test]
+fn a_field_access_in_a_deferred_turbofish_is_checked() {
+    check_diagnostics(
+        r#"
+type P = struct { x: usize, y: usize };
+static h = fn (p) -> usize { p.x::<const { p.z }> };
+static main = fn () -> usize { h(P(struct { x = 1, y = 2 })) };
+"#,
+        expect![[r#"
+            70..90: `x` takes no generic arguments
+            86..87: no field `z` on `P` (the fields of `P` are declared here at 10..39)
+        "#]],
+    );
+}
+
+/// A field access inside the const argument of a deferred field access's
+/// turbofish waits on its own receiver: with nothing to determine `p`,
+/// both accesses ask for its annotation.
+#[test]
+fn a_field_access_in_a_deferred_turbofish_waits_for_its_receiver() {
+    check_diagnostics(
+        r#"
+static h = fn (p) -> usize { p.x::<const { p.y }> };
+"#,
+        expect![[r#"
+            30..31: cannot determine the type of this expression; add a type annotation
+            44..45: cannot determine the type of this expression; add a type annotation
         "#]],
     );
 }
