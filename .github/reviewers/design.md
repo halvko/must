@@ -1,5 +1,5 @@
 ---
-model: opus
+model: fable
 ---
 
 Judge whether the change fits the design it lives in, not whether a given

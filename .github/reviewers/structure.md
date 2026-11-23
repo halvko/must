@@ -1,5 +1,5 @@
 ---
-model: opus
+model: fable
 ---
 
 Look for structural red flags: code whose shape makes it harder to reason
