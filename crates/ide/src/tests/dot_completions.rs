@@ -78,6 +78,25 @@ trait Ord = requires {
 };
 "#;
 
+/// Erik's `Ord` fixture: `max` takes the other side as `usize.&::<@a>`.
+const PROJECTION_FIXTURE: &str = r#"
+type Point = struct { x: usize, y: usize } with {
+    impl Self {
+        manhatten_distance = fn::<@a>(other: Self.&::<@a>, self: Self.&::<@a>) -> usize {
+            self.*.x.&.max(RECEIVER).*
+        }
+    }
+};
+type Cmp = enum { Greater, Eq, Less }
+trait Ord = requires {
+    max: fn::<@a>(Self.&::<@a>, Self.&::<@a>) -> Self.&::<@a>;
+} with {
+    impl usize {
+        max = fn::<@a>(other: Self.&::<@a>, self: Self.&::<@a>) -> Self.&::<@a> { self }
+    }
+}
+"#;
+
 /// Applies the completion labeled `label`, with `argument` at its tab
 /// stop, and asserts the written code checks without errors.
 fn check_applied_checks_clean(text: &str, label: &str, argument: &str) {
@@ -111,6 +130,39 @@ fn check_applied_checks_clean(text: &str, label: &str, argument: &str) {
         r#"{label:?} in
 {written}
 errors: {errors:?}"#
+    );
+}
+
+/// Applies the dot row labeled `label` and asserts its refusal agrees with
+/// the checker: the row sorts last exactly when the written code has an
+/// error.
+fn check_chain_refusal_matches_checker(text: &str, label: &str, refused: bool) {
+    let (analysis, file, pos) = fixture(text);
+    let items = analysis.completions(pos);
+    let item = items
+        .iter()
+        .find(|c| c.label == label)
+        .unwrap_or_else(|| panic!("no completion labeled {label:?}: {items:?}"));
+    let insert = match &item.text_edit.insert {
+        crate::InsertText::Plain(text) => text,
+        crate::InsertText::Snippet { snippet, .. } => snippet,
+    };
+    let mut written = analysis.file_text(file).to_string();
+    let range = item.text_edit.range;
+    written.replace_range(usize::from(range.start())..usize::from(range.end()), insert);
+    let mut host = AnalysisHost::new();
+    let written_file = host.create_file("test.must".to_owned(), written.clone());
+    let errors: Vec<_> = host
+        .snapshot()
+        .diagnostics(written_file)
+        .into_iter()
+        .filter(|d| d.severity == crate::Severity::Error)
+        .map(|d| d.message)
+        .collect();
+    assert_eq!(
+        (is_refused(item), !errors.is_empty()),
+        (refused, refused),
+        "{label:?} in\n{written}\nerrors: {errors:?}"
     );
 }
 
@@ -576,7 +628,8 @@ fn a_bound_requirement_sorts_like_an_inherent_member() {
     // A requirement is rendered through the same [`Provenance::Item`] band
     // as an inherent member — not a band of its own — so a bound-directed
     // offer and a field or member candidate interleave by type match, not
-    // by which mechanism produced them.
+    // by which mechanism produced them. Type tier `1`: called, `push`
+    // returns the body's expected `()`.
     assert_eq!(
         completion_sort_text(
             &format!(
@@ -585,7 +638,7 @@ fn a_bound_requirement_sorts_like_an_inherent_member() {
             ),
             "push",
         ),
-        "2_20_push",
+        "1_20_push",
     );
 }
 
@@ -620,7 +673,7 @@ fn multiple_bounds_union_their_requirements_on_the_dot() {
         r#"
 trait Show = requires { show: fn(Self) -> str; };
 trait Size = requires { size: fn(Self) -> usize; len: fn(Self) -> usize; };
-static f = fn::<T: Show + Size>(t: T) -> str { t.$0 };
+static f = fn::<T: Show + Size>(t: T) -> () { t.$0 };
 "#,
         expect_test::expect![[r#"
             len Function (fn(T) -> usize)
@@ -974,6 +1027,154 @@ static g = fn::<@a>(x: usize.&::<@a>) -> () { let y = x.$0; };
 }
 
 #[test]
+fn dot_completions_borrow_a_field_through_the_receiver_when_a_borrow_is_expected() {
+    check_completions(
+        &PROJECTION_FIXTURE.replace("RECEIVER", "other.$0"),
+        expect_test::expect![[r#"
+            *.x.& Field (usize.&)
+            *.y.& Field (usize.&)
+            *.x Field (usize)
+            *.y Field (usize)
+            manhatten_distance Function (fn(Point.&::<@a>, Point.&::<@a>) -> usize)
+        "#]],
+    );
+    check_completion_applied(
+        &PROJECTION_FIXTURE.replace("RECEIVER", "other.$0"),
+        "*.x.&",
+        expect_test::expect![[r#"
+            self.*.x.&.max(other.*.x.&).*
+            filter: x
+        "#]],
+    );
+}
+
+#[test]
+fn dot_completions_borrow_a_field_replaces_a_typed_prefix() {
+    check_completion_applied(
+        &PROJECTION_FIXTURE.replace("RECEIVER", "other.x$0"),
+        "*.x.&",
+        expect_test::expect![[r#"
+            self.*.x.&.max(other.*.x.&).*
+            filter: x
+        "#]],
+    );
+}
+
+#[test]
+fn dot_completions_rank_fields_by_the_expectation_at_a_bare_dot() {
+    check_completions(
+        r#"
+type Point = struct { x: usize, y: str };
+static f = fn::<@a>(p: Point.&::<@a>) -> str {
+    p.$0
+};
+"#,
+        expect_test::expect![[r#"
+            *.y Field (str)
+            *.x Field (usize)
+        "#]],
+    );
+}
+
+#[test]
+fn dot_completions_borrow_an_owned_receiver_when_a_borrow_of_it_is_expected() {
+    check_completion_applied(
+        r#"
+static g = fn::<@a>(n: usize.&::<@a>) -> usize { n.* };
+static f = fn (n: usize) -> usize { g(n.$0) };
+"#,
+        "&",
+        expect_test::expect![[r#"
+            static f = fn (n: usize) -> usize { g(n.&) };
+            filter: .&
+        "#]],
+    );
+}
+
+#[test]
+fn dot_completions_borrow_a_field_of_an_owned_receiver() {
+    check_completion_applied(
+        r#"
+type Point = struct { x: usize, y: usize };
+static g = fn::<@a>(n: usize.&::<@a>) -> usize { n.* };
+static f = fn (p: Point) -> usize { g(p.$0) };
+"#,
+        "x.&",
+        expect_test::expect![[r#"
+            static f = fn (p: Point) -> usize { g(p.x.&) };
+            filter: x
+        "#]],
+    );
+}
+
+#[test]
+fn dot_completions_deref_to_the_expected_referent() {
+    check_completion_applied(
+        r#"
+static f = fn::<@a, @b>(n: usize.&::<@a>.&::<@b>) -> usize {
+    n.$0
+};
+"#,
+        "*.*",
+        expect_test::expect![[r#"
+            n.*.*
+            filter: *.*
+        "#]],
+    );
+}
+
+#[test]
+fn dot_completions_refuse_the_expected_chain_the_checker_would_reject() {
+    let refused = |text: &str, label: &str| {
+        let (analysis, _file, pos) = fixture(text);
+        let items = analysis.completions(pos);
+        let item = items
+            .iter()
+            .find(|c| c.label == label)
+            .unwrap_or_else(|| panic!("{label} is offered"));
+        is_refused(item)
+    };
+    // A linear value can't be copied out of its borrow.
+    assert!(refused(
+        r#"
+type Lin = struct { n: usize } only move;
+static f = fn::<@a>(l: Lin.&::<@a>) -> Lin { l.$0 };
+"#,
+        "*",
+    ));
+    // A `&mut` field borrow through a shared borrow.
+    const MUT_FIELD: &str = r#"
+type Point = struct { x: usize };
+static g = fn::<@a>(n: usize.&mut::<@a>) -> () { () };
+static f = fn::<@a>(p: Point.BORROW::<@a>) -> () { g(p.$0) };
+"#;
+    assert!(refused(&MUT_FIELD.replace("BORROW", "&"), "*.x.&mut"));
+    assert!(!refused(&MUT_FIELD.replace("BORROW", "&mut"), "*.x.&mut"));
+    // A `&mut` read out through a shared layer.
+    const MUT_DEREF: &str = r#"
+static g = fn::<@a>(n: usize.&mut::<@a>) -> () { () };
+static f = fn::<@a, @b>(n: usize.&mut::<@a>.BORROW::<@b>) -> () { g(n.$0) };
+"#;
+    assert!(refused(&MUT_DEREF.replace("BORROW", "&"), "*"));
+    assert!(!refused(&MUT_DEREF.replace("BORROW", "&mut"), "*"));
+}
+
+#[test]
+fn dot_completions_offer_no_chain_without_an_expectation() {
+    check_completions(
+        r#"
+type Point = struct { x: usize };
+static f = fn::<@a>(p: Point.&::<@a>) -> () {
+    p.$0;
+};
+"#,
+        expect_test::expect![[r#"
+            *.x Field (usize)
+        "#]],
+    );
+}
+
+#[test]
 fn dot_completions_judge_a_shared_name_per_spelling() {
     // On an owned `x`, `x.ord()` resolves to `Ord2` (value `Self`) and
     // `x.&.ord()` to `Ord` (borrowed `Self`): each spelling has one carrier,
@@ -1173,6 +1374,35 @@ static g = fn::<@a>(x: usize.&::<@a>) -> () { let y = x.$0; };
 "#,
         "ord",
     );
+}
+
+#[test]
+fn dot_completions_refuse_a_mut_read_out_through_a_shared_step() {
+    // `s.*.n.*` reborrows the `&mut` `n` holds, but `n` is read through the
+    // shared `s`.
+    const TEXT: &str = r#"
+static g = fn::<@a>(m: usize.&mut::<@a>) -> () { () };
+static f = fn::<@a, @b, @c>(s: struct { n: usize.&mut::<@a>.&mut::<@b> }.BORROW::<@c>) -> () {
+    g(s.*.n.$0)
+};
+"#;
+    check_chain_refusal_matches_checker(&TEXT.replace("BORROW", "&"), "*", true);
+    check_chain_refusal_matches_checker(&TEXT.replace("BORROW", "&mut"), "*", false);
+}
+
+#[test]
+fn dot_completions_judge_a_receiver_mut_borrow_by_its_binding() {
+    // `n.&mut` borrows the binding itself, so its `mut` decides, not the
+    // borrow layers it holds.
+    const TEXT: &str = r#"
+static g = fn::<@a, @b>(m: usize.LAYER::<@a>.&mut::<@b>) -> () { () };
+static f = fn::<@a>(x: usize.LAYER::<@a>) -> () { let MUTn = x; g(n.$0) };
+"#;
+    let case = |layer: &str, mutable: &str| TEXT.replace("LAYER", layer).replace("MUT", mutable);
+    check_chain_refusal_matches_checker(&case("&mut", ""), "&mut", true);
+    check_chain_refusal_matches_checker(&case("&mut", "mut "), "&mut", false);
+    check_chain_refusal_matches_checker(&case("&", ""), "&mut", true);
+    check_chain_refusal_matches_checker(&case("&", "mut "), "&mut", false);
 }
 
 #[test]

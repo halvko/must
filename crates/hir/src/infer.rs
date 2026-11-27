@@ -2399,6 +2399,67 @@ pub fn dot_receiver_exclusive<'db>(
     }
 }
 
+/// A place chain dot completion writes after the receiver at `place`, for
+/// the type the position expects (P18).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DotChain {
+    /// `place.*` repeated `derefs` times, reading the referent out.
+    Deref { derefs: usize },
+    /// `place.&` / `place.&mut`: a borrow of the receiver itself.
+    BorrowReceiver { mutable: bool },
+    /// `place.*.x.&` / `place.*.x.&mut`: a field borrowed through every
+    /// borrow layer of the receiver.
+    BorrowField { mutable: bool },
+}
+
+/// Whether the checker refuses `chain` written after the dot receiver at
+/// `place`, whose type is `ty`. Decided here, beside
+/// [`dot_receiver_exclusive`], by the checker's own place rules, so the
+/// chains completion sorts last are the ones the checker rejects:
+/// - reading a `&mut` out is a reborrow, which needs every layer read
+///   through to be `&mut` and `place` to hold no shared step; reading
+///   anything else out is a copy;
+/// - borrowing the receiver itself as `&mut` judges `place` the way
+///   `place.&mut` is judged, so a binding's `mut` decides, not the layers
+///   its type holds;
+/// - borrowing a field as `&mut` through the layers needs the receiver to
+///   provide a `&mut`.
+pub fn dot_chain_refused<'db>(
+    db: &'db dyn Db,
+    item: ItemId<'db>,
+    place: ExprId,
+    ty: &Ty,
+    chain: DotChain,
+) -> bool {
+    match chain {
+        DotChain::Deref { derefs } => {
+            let mut layer = ty;
+            let mut layers_exclusive = true;
+            for _ in 0..derefs {
+                let Ty::Borrow {
+                    mutable, referent, ..
+                } = layer
+                else {
+                    // Not that many layers: nothing the dot could write.
+                    return true;
+                };
+                layers_exclusive &= *mutable;
+                layer = referent;
+            }
+            match layer {
+                Ty::Borrow { mutable: true, .. } => {
+                    !layers_exclusive || mut_reborrow_refused(db, item, place)
+                }
+                _ => !crate::capability::is_copyable(db, layer),
+            }
+        }
+        DotChain::BorrowReceiver { mutable } => mutable && mut_borrow_refused(db, item, place),
+        DotChain::BorrowField { mutable } => {
+            mutable && !dot_receiver_exclusive(db, item, place, &crate::ty::deref_receiver(ty))
+        }
+    }
+}
+
 /// Whether a `&mut` reborrow through the borrow `place` is refused because
 /// the place is read through a shared borrow (`s.*.c` with `s: S.&`),
 /// whatever the root's `mut`ness.
