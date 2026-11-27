@@ -9,9 +9,12 @@
   that declare a name of a kind the position takes (a type for an annotation, a trait for a bound, a
   type or a trait before `::`). A name the file declares or imports more than once is an error at
   every place it comes from, none more to blame than another; `as` renames an import to resolve
-  that. An import names a top-level item of the imported module, never that module's own imports. A
-  file in no library is a library by itself.
-- **M02** A library is the files of one directory tree. `foo.must` is module `foo`, and the
+  that. An import names a top-level item of the imported module, never that module's own imports.
+- **M02** A library is a directory holding a `must.toml`, its root, and the `.must` files under
+  it, except under another `must.toml`, which starts a library of its own, so no file is in two;
+  hidden directories are not part of it. The manifest may be empty and has no keys. A file
+  with no `must.toml` above it is standalone: a library of one file, which has nothing to
+  import. `foo.must` is module `foo`, and the
   directory `foo/` beside it holds `foo`'s children: `foo/bar.must` is `foo::bar`. There are no
   `mod` declarations and no `mod.rs`: the files are the module tree. A `use` path is the
   module's path from the library's root, the same from every file, or, starting with `self` or

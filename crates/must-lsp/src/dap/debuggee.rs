@@ -186,6 +186,8 @@ impl<W: Write + Clone> Debuggee<W> {
         let text = std::fs::read_to_string(path)
             .map_err(|err| format!("error: cannot read `{path}`: {err}"))?;
         let db: &'static RootDatabase = Box::leak(Box::new(RootDatabase::default()));
+        // TODO: halvko/must#263: load the program's library, as `must run`
+        // does; loaded by itself, a program that imports fails at the import.
         let prepared = runner::prepare(db, &text, path, entry)?;
         let mut machine = Machine::new(db, RunMode::without_stdin(console.clone()));
         machine

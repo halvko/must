@@ -9,10 +9,11 @@
 //!
 //! Two refusals are possible, and both are loud:
 //!
-//! * the FILE does not check clean — a backend has no business compiling
-//!   code the checker rejects, so its diagnostics are printed and nothing
+//! * the FILE's library (every module of it, not only those the program
+//!   reaches) does not check clean — a backend has no business compiling
+//!   code the checker rejects, so the diagnostics are printed and nothing
 //!   is written, exiting with `check`'s own exit code. This is narrower
-//!   than it sounds: it covers the file's own items, not the `-e` entry
+//!   than it sounds: it covers the library's items, not the `-e` entry
 //!   expression injected on top of them. That expression runs the way
 //!   `must run` runs it — as run-mode code, not a checked const
 //!   context — because injecting it AS a const context (a `static`
@@ -32,8 +33,7 @@
 //! still the FILE'S fault, so it gets the same exit code as the first
 //! bullet, not the usage-error code a malformed `-e` expression gets.
 
-use crate::runner::PrepareError;
-use base_db::RootDatabase;
+use crate::runner::{LoadError, PrepareError, Program};
 
 /// Read, compile, write. Returns the process exit code.
 ///
@@ -59,65 +59,71 @@ pub fn compile(path: &str, output: &str, entry: &str) -> i32 {
 }
 
 fn compile_on_budget(path: &str, output: &str, entry: &str) -> i32 {
-    let text = match std::fs::read_to_string(path) {
-        Ok(text) => text,
-        Err(err) => {
-            eprintln!("error: cannot read `{path}`: {err}");
+    let program = match crate::runner::load(path, entry) {
+        Ok(program) => program,
+        Err(LoadError::Source(message)) => {
+            eprintln!("{message}");
             return 2;
         }
-    };
-
-    let db = RootDatabase::default();
-    let prepared = match crate::runner::prepare(&db, &text, path, entry) {
-        Ok(prepared) => prepared,
         // A file-syntax failure is the same class `check` reports on the
         // same file (exit 1); a bad entry expression is a usage error (the
         // file itself may check clean).
-        Err(err @ PrepareError::FileSyntax(_)) => {
+        Err(LoadError::Prepare(err @ PrepareError::FileSyntax(_))) => {
             eprintln!("{err}");
             return 1;
         }
-        Err(err @ PrepareError::Entry(_)) => {
+        Err(LoadError::Prepare(err @ PrepareError::Entry(_))) => {
             eprintln!("{err}");
             return 2;
         }
     };
+    let Program {
+        db,
+        sources,
+        prepared,
+    } = &program;
 
-    // A backend compiles checked programs. `prepared.file` already carries
-    // the one parse this needs; diagnostics are filtered to the file's own
-    // range so the synthetic `-e` wrapper (see the module doc) cannot
-    // manufacture a const-context error out of an ordinary call.
-    let diagnostics: Vec<_> = ide::Analysis::new(db.clone())
-        .diagnostics(prepared.file)
-        .into_iter()
-        .filter(|d| usize::from(d.range.start()) < prepared.original_len)
-        .collect();
-    let rendered = crate::check::render(path, &text, &diagnostics);
-    print!("{}", rendered.text);
-    if rendered.errors > 0 {
-        eprintln!("error: `{path}` has errors; nothing was compiled");
+    // Every error in the library refuses the compile, the named file's
+    // first. Diagnostics inside the synthetic `-e` wrapper are dropped (see
+    // the module doc), so an ordinary call cannot raise a const-context error.
+    let analysis = ide::Analysis::new(db.clone());
+    let mut errors = 0;
+    for file in crate::check::library_files(db, prepared.file) {
+        let diagnostics: Vec<_> = (analysis.diagnostics(file).into_iter())
+            .filter(|d| !prepared.in_entry(file, d.range.start()))
+            .collect();
+        let rendered = crate::check::render(&analysis, sources, file, &diagnostics);
+        print!("{}", rendered.text);
+        errors += rendered.errors;
+    }
+    if errors > 0 {
+        eprintln!("error: the library of `{path}` has errors; nothing was compiled");
         return 1;
     }
 
-    let artifact = match codegen_wasm::compile(&db, &prepared.entry) {
+    let artifact = match codegen_wasm::compile(db, &prepared.entry) {
         Ok(artifact) => artifact,
         Err(err) => {
             eprintln!("error: {}", err.message());
             if let Some(origin) = err.origin() {
-                match crate::runner::source_position(
-                    &db,
+                let file = origin.0.file;
+                let position = crate::runner::source_position(
+                    db,
                     prepared.file,
                     prepared.original_len,
                     &origin,
-                ) {
-                    Some((line, column)) => {
+                );
+                match (position, sources.display(file).zip(sources.text(file))) {
+                    (None, _) => eprintln!("  --> the entry expression"),
+                    // In a file no tool loaded (the prelude): nowhere to point.
+                    (Some(_), None) => {}
+                    (Some((line, column)), Some((path, text))) => {
                         eprintln!("  --> {path}:{line}:{column}");
                         if let Some(source_line) = text.lines().nth(line as usize - 1) {
                             eprintln!("   |");
                             eprintln!("{line:>3}| {}", source_line.trim_end());
                         }
                     }
-                    None => eprintln!("  --> the entry expression"),
                 }
             }
             return 1;

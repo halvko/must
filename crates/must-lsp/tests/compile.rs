@@ -313,3 +313,118 @@ fn a_malformed_entry_expression_is_a_usage_error() {
     assert!(!wasm.exists());
     let _ = std::fs::remove_file(&source);
 }
+
+#[test]
+fn a_library_compiles_only_when_all_of_it_checks() {
+    let dir = std::env::temp_dir().join(format!("must-compile-{}-library", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(dir.join("days")).expect("create fixture directory");
+    std::fs::write(dir.join("must.toml"), "").expect("write fixture");
+    std::fs::write(
+        dir.join("util.must"),
+        r#"
+static greet = fn () -> () { print("hello from util\n"); };
+type Counter = struct { n: usize };
+"#,
+    )
+    .expect("write fixture");
+    std::fs::write(
+        dir.join("days/day1.must"),
+        r#"
+use util::{greet, Counter};
+static main = fn () -> () {
+    greet();
+    let n: usize = 1;
+    n.shout();
+    let c = Counter(struct { n = 1 });
+    c.tally();
+};
+"#,
+    )
+    .expect("write fixture");
+    // Day1 reaches this impl by a dot-call, with no import.
+    let shout = |body: &str| {
+        let text = format!(
+            r#"
+trait Shout = requires {{ shout: fn(Self) -> (); }} with {{
+    impl usize {{ shout = fn(n: usize) -> () {{ {body} }}; }}
+}};
+"#
+        );
+        std::fs::write(dir.join("shout.must"), text).expect("write fixture");
+    };
+    shout(r#"print("shout\n");"#);
+    // And this one on a type day1 imports, from a file it doesn't.
+    let tally = |body: &str| {
+        let text = format!(
+            r#"
+use util::Counter;
+trait Tally = requires {{ tally: fn(Self) -> (); }} with {{
+    impl Counter {{ tally = fn(c: Counter) -> () {{ {body} }}; }}
+}};
+"#
+        );
+        std::fs::write(dir.join("tally.must"), text).expect("write fixture");
+    };
+    tally(r#"print("tally\n");"#);
+    let day2 = |body: &str| {
+        let text = format!(
+            r#"
+static main = fn () -> () {{ {body} }};
+"#
+        );
+        std::fs::write(dir.join("days/day2.must"), text).expect("write fixture");
+    };
+    day2("");
+    let wasm = dir.join("day1.wasm");
+    let compile = |wasm: &std::path::Path| {
+        run(&[
+            "compile",
+            dir.join("days/day1.must").to_str().unwrap(),
+            "-o",
+            wasm.to_str().unwrap(),
+        ])
+    };
+    let (message, code) = compile(&wasm);
+    assert_eq!(code, 0, "compilation should succeed: {message}");
+    assert_eq!(
+        execute(&wasm),
+        r#"hello from util
+shout
+tally
+"#
+    );
+
+    // Any error in the library refuses: one in a file day1 reaches only
+    // by a dot-call, or in a day it doesn't reach at all.
+    shout(r#"let m: usize = "s";"#);
+    let refused = dir.join("refused.wasm");
+    let (message, code) = compile(&refused);
+    assert_eq!(code, 1, "{message}");
+    assert!(message.contains("shout.must:3:"), "{message}");
+    assert!(message.contains("nothing was compiled"), "{message}");
+    assert!(!refused.exists());
+    shout(r#"print("shout\n");"#);
+    day2(r#"let m: usize = "s";"#);
+    let (message, code) = compile(&refused);
+    assert_eq!(code, 1, "{message}");
+    assert!(message.contains("day2.must:2:"), "{message}");
+    assert!(!refused.exists());
+    day2("");
+
+    // And one in a module day1 imports.
+    std::fs::write(
+        dir.join("util.must"),
+        r#"
+static greet = fn () -> () { let n: usize = "s"; };
+type Counter = struct { n: usize };
+"#,
+    )
+    .expect("write fixture");
+    let (message, code) = compile(&refused);
+    let _ = std::fs::remove_dir_all(&dir);
+    assert_eq!(code, 1, "{message}");
+    assert!(message.contains("util.must:2:45"), "{message}");
+    assert!(message.contains("nothing was compiled"), "{message}");
+    assert!(!refused.exists());
+}

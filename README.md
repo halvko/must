@@ -172,6 +172,15 @@ must run examples/hello.must                    # evaluates main()
 must run examples/functions.must -e 'fib(20)'   # any expression in file scope
 ```
 
+A `must.toml` (it can be empty) marks a library's root: `must run`,
+`check` and `compile` load the library's `.must` files, so the file they
+are given can `use` the others (`use util::parse;` reads `util.must`
+beside the manifest). The library is the tree under the manifest, short
+of hidden directories and of any directory with a `must.toml` of its own,
+which is another library. A file with no `must.toml` above it stands
+alone and imports nothing. `check` reports the errors of the whole
+library, and `compile` refuses while it has any.
+
 It also *compiles* Must code, to a self-contained WebAssembly module with
 no runtime of any kind — no allocator, no collector, no unwinder, no
 support library:

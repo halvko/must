@@ -15,6 +15,7 @@ pub mod compile;
 pub mod dap;
 mod from_proto;
 mod pool;
+pub mod project;
 pub mod runner;
 mod to_proto;
 
