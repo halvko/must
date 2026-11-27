@@ -131,7 +131,17 @@ impl Drop for TestClient {
     }
 }
 
+/// `file:///name.must` moved into `tests/project`, whose `must.toml` keeps
+/// the documents out of the standalone hint every file outside a project
+/// gets. [`standalone_uri`] is for the documents about that hint.
 fn uri(s: &str) -> lsp_types::Uri {
+    let name = s.strip_prefix("file:///").expect("a `file:///` URI");
+    let project = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/project");
+    format!("file://{project}/{name}").parse().unwrap()
+}
+
+/// `file:///name.must` as written: no `must.toml` above it.
+fn standalone_uri(s: &str) -> lsp_types::Uri {
     s.parse().unwrap()
 }
 
@@ -1358,5 +1368,144 @@ fn dogfood_loops_example_offers_sensible_completions() {
         "expected several distinct completion kinds, got {kinds:?}"
     );
 
+    drop(client);
+}
+
+#[test]
+fn a_standalone_file_offers_to_create_its_manifest() {
+    let code_actions = |client: &mut TestClient, file: &lsp_types::Uri, range| {
+        client
+            .request::<lsp_types::request::CodeActionRequest>(lsp_types::CodeActionParams {
+                text_document: lsp_types::TextDocumentIdentifier { uri: file.clone() },
+                range,
+                context: lsp_types::CodeActionContext::default(),
+                work_done_progress_params: Default::default(),
+                partial_result_params: Default::default(),
+            })
+            .unwrap_or_default()
+    };
+    let file = standalone_uri("file:///standalone.must");
+    // The text starts right after `r#"`, not on its own line: the hint sits
+    // on the first line, so that line has to be the `use`.
+    let text = r#"use util::a;
+static main = fn {};
+"#;
+
+    // A client that can create files gets the manifest beside the file.
+    let init = lsp_types::InitializeParams {
+        capabilities: lsp_types::ClientCapabilities {
+            workspace: Some(lsp_types::WorkspaceClientCapabilities {
+                workspace_edit: Some(lsp_types::WorkspaceEditClientCapabilities {
+                    document_changes: Some(true),
+                    resource_operations: Some(vec![lsp_types::ResourceOperationKind::Create]),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            }),
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+    let mut client = TestClient::start_with(init);
+    client.open(&file, text);
+    let diagnostics = client.next_diagnostics().diagnostics;
+    let rendered: Vec<_> = (diagnostics.iter())
+        .map(|d| (d.severity.unwrap(), d.range, d.message.as_str()))
+        .collect();
+    let at = |line, start, end| {
+        lsp_types::Range::new(
+            lsp_types::Position::new(line, start),
+            lsp_types::Position::new(line, end),
+        )
+    };
+    assert_eq!(
+        rendered,
+        [
+            (
+                lsp_types::DiagnosticSeverity::INFORMATION,
+                at(0, 0, 3),
+                "standalone file, not in a project (no `must.toml` above it)"
+            ),
+            (
+                lsp_types::DiagnosticSeverity::ERROR,
+                at(0, 4, 8),
+                "this file isn't in a project (no `must.toml` above it), \
+                 so it cannot import from `util`"
+            ),
+        ]
+    );
+    let actions = code_actions(&mut client, &file, at(0, 4, 8));
+    let [lsp_types::CodeActionOrCommand::CodeAction(action)] = actions.as_slice() else {
+        panic!("one quick fix: {actions:?}");
+    };
+    assert_eq!(
+        action.title,
+        "Create `must.toml` here, making this directory a project"
+    );
+    let edit = action.edit.as_ref().expect("a workspace edit");
+    assert_eq!(edit.changes, None);
+    assert_eq!(
+        edit.document_changes,
+        Some(lsp_types::DocumentChanges::Operations(vec![
+            lsp_types::DocumentChangeOperation::Op(lsp_types::ResourceOp::Create(
+                lsp_types::CreateFile {
+                    uri: "file:///must.toml".parse().unwrap(),
+                    options: Some(lsp_types::CreateFileOptions {
+                        overwrite: Some(false),
+                        ignore_if_exists: Some(true),
+                    }),
+                    annotation_id: None,
+                }
+            ))
+        ]))
+    );
+    drop(client);
+
+    // One that cannot gets no fix, rather than one it would half apply.
+    let mut client = TestClient::start();
+    client.open(&file, text);
+    client.next_diagnostics();
+    assert_eq!(code_actions(&mut client, &file, at(0, 4, 8)), []);
+    drop(client);
+}
+
+#[test]
+fn the_server_watches_manifests_where_the_client_can() {
+    let init = lsp_types::InitializeParams {
+        capabilities: lsp_types::ClientCapabilities {
+            workspace: Some(lsp_types::WorkspaceClientCapabilities {
+                did_change_watched_files: Some(
+                    lsp_types::DidChangeWatchedFilesClientCapabilities {
+                        dynamic_registration: Some(true),
+                        ..Default::default()
+                    },
+                ),
+                ..Default::default()
+            }),
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+    let client = TestClient::start_with(init);
+    let registration = loop {
+        if let Message::Request(req) = client.recv()
+            && req.method == "client/registerCapability"
+        {
+            break serde_json::from_value::<lsp_types::RegistrationParams>(req.params).unwrap();
+        }
+    };
+    let [registration] = registration.registrations.as_slice() else {
+        panic!("one registration: {registration:?}");
+    };
+    assert_eq!(registration.method, "workspace/didChangeWatchedFiles");
+    let options: lsp_types::DidChangeWatchedFilesRegistrationOptions =
+        serde_json::from_value(registration.register_options.clone().unwrap()).unwrap();
+    assert_eq!(
+        options.watchers,
+        [lsp_types::FileSystemWatcher {
+            glob_pattern: lsp_types::GlobPattern::String("**/must.toml".to_owned()),
+            kind: Some(lsp_types::WatchKind::Create | lsp_types::WatchKind::Delete),
+        }]
+    );
     drop(client);
 }

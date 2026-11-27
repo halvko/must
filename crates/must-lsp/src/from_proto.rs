@@ -4,6 +4,16 @@ use ide::LineIndex;
 use line_index::{LineCol, WideEncoding, WideLineCol};
 use syntax::TextSize;
 
+/// The path a `file:` URI names; `None` for any other scheme (an unsaved
+/// buffer, say).
+pub(crate) fn file_path(uri: &lsp_types::Uri) -> Option<std::path::PathBuf> {
+    if uri.scheme()?.as_str() != "file" {
+        return None;
+    }
+    let path = uri.path().as_estr().decode().into_string().ok()?;
+    Some(std::path::PathBuf::from(path.into_owned()))
+}
+
 pub(crate) fn offset(line_index: &LineIndex, position: lsp_types::Position) -> Option<TextSize> {
     // A line or column past the end of the document is legal client input —
     // the spec says an overshooting column "defaults back to the line
