@@ -116,3 +116,41 @@ type Counter = struct { n: usize } with {
     }
 };
 "#;
+
+/// Every candidate's detail and the line it leaves once applied: for rows
+/// that share a label, so each is pinned to the text it writes.
+fn check_completions_applied(fixture_text: &str, expect: expect_test::Expect) {
+    let (analysis, file, pos) = fixture(fixture_text);
+    let mut rendered = String::new();
+    for item in analysis.completions(pos) {
+        let detail = item.detail.as_deref().unwrap_or_default();
+        let line = applied_line(&analysis, file, &item);
+        rendered.push_str(&format!(
+            r#"{detail}: {line}
+"#
+        ));
+    }
+    expect.assert_eq(&rendered);
+}
+
+/// The line holding `item`'s edit, with the edit applied.
+fn applied_line(
+    analysis: &crate::Analysis,
+    file: SourceFile,
+    item: &crate::CompletionItem,
+) -> String {
+    let insert = match &item.text_edit.insert {
+        crate::InsertText::Plain(text) => text,
+        crate::InsertText::Snippet { snippet, .. } => snippet,
+    };
+    let mut text = analysis.file_text(file).to_string();
+    let range = item.text_edit.range;
+    text.replace_range(usize::from(range.start())..usize::from(range.end()), insert);
+    let line_start = text[..usize::from(range.start())]
+        .rfind('\n')
+        .map_or(0, |i| i + 1);
+    let line_end = text[line_start..]
+        .find('\n')
+        .map_or(text.len(), |i| line_start + i);
+    text[line_start..line_end].trim().to_owned()
+}

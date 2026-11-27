@@ -413,6 +413,55 @@ static f = fn (s: str) {
 }
 
 #[test]
+fn completions_dot_skips_a_builtin_member_a_trait_member_shadows() {
+    // `s.next_char(i)` resolves to `Scan::next_char`, so the builtin row would
+    // write a call that never reaches it.
+    check_completions(
+        r#"
+trait Scan = requires {
+    next_char: fn(usize, Self) -> usize;
+} with {
+    impl str {
+        next_char = fn(i: usize, _s: Self) -> usize { i };
+    }
+};
+static f = fn (s: str) {
+    s.$0
+};
+"#,
+        expect_test::expect![[r#"
+            next_char Function (fn(usize, str) -> usize)
+            len Function (fn(str) -> usize)
+        "#]],
+    );
+}
+
+#[test]
+fn completions_dot_keeps_a_builtin_member_the_trait_member_leaves_owned() {
+    // `Scan::next_char` borrows `Self`, so the owned `s.next_char(i)` still
+    // reaches the builtin; `s.&.next_char(i)` reaches the trait member.
+    check_completions_applied(
+        r#"
+trait Scan = requires {
+    next_char: fn::<@a>(usize, Self.&::<@a>) -> usize;
+} with {
+    impl str {
+        next_char = fn::<@a>(i: usize, _s: Self.&::<@a>) -> usize { i };
+    }
+};
+static f = fn (s: str) {
+    s.$0
+};
+"#,
+        expect_test::expect![[r#"
+            fn(usize, str.&::<@a>) -> usize: s.&.next_char($1)
+            fn(str) -> usize: s.len()
+            fn(usize, str) -> NextChar: s.next_char($1)
+        "#]],
+    );
+}
+
+#[test]
 fn completions_are_suppressed_inside_a_character_literal() {
     // A half-typed `'` is a CHAR token, so without this the list would pop
     // open on the keystroke after the apostrophe — the same suppression a
