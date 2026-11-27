@@ -262,7 +262,7 @@ extern static live: unsafe fn(u8.&raw, usize) -> isize;
 "#,
     ),
     (
-        "retired unqualified variant pattern",
+        "newtype pattern in a match arm",
         r#"
 type Shape = enum { Circle(usize), Point };
 static old = fn (s: Shape) -> usize {

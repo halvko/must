@@ -95,7 +95,7 @@ static f = fn (s: Shape) -> usize {
 };
 "#,
         expect![[r#"
-            103..108: this `match` does not cover `Shape::Pair`, `Shape::Point`
+            103..108: this `match` does not cover `Shape::Pair(_, _)`, `Shape::Point`
         "#]],
     );
 }
@@ -123,7 +123,8 @@ static f = fn (s: Shape) -> usize {
     assert_eq!(fix.edits.len(), 1);
     assert_eq!(
         fix.edits[0].insert,
-        "\n        ::Point => panic(\"unhandled ::Point\"),"
+        r#"
+        Shape::Point => panic("unhandled Shape::Point"),"#
     );
     let last_arm_end = text.find("::Circle(r) => r,").unwrap() + "::Circle(r) => r,".len();
     assert_eq!(u32::from(fix.edits[0].range.start()), last_arm_end as u32);
@@ -166,7 +167,8 @@ static f = fn (s: Shape) -> usize {
     let fix = diagnostics[0].fix.as_ref().expect("diagnostic has a fix");
     assert_eq!(
         fix.edits[0].insert,
-        ",\n        ::Point => panic(\"unhandled ::Point\"),"
+        r#",
+        Shape::Point => panic("unhandled Shape::Point"),"#
     );
 
     let mut patched = text.to_owned();
@@ -199,7 +201,8 @@ static f = fn (s: Shape) {
     let fix = diagnostics[0].fix.as_ref().expect("diagnostic has a fix");
     assert_eq!(
         fix.edits[0].insert,
-        ",\n        ::Point => panic(\"unhandled ::Point\"),"
+        r#",
+        Shape::Point => panic("unhandled Shape::Point"),"#
     );
 
     let mut patched = text.to_owned();
@@ -237,8 +240,10 @@ static f = fn (s: Shape) {
     assert_eq!(fix.edits.len(), 1);
     assert_eq!(
         fix.edits[0].insert,
-        "\n        ::Circle(v) => panic(\"unhandled ::Circle\"),\n\
-         \x20\x20\x20\x20\x20\x20\x20\x20::Point => panic(\"unhandled ::Point\"),\n    "
+        r#"
+        Shape::Circle(_) => panic("unhandled Shape::Circle(_)"),
+        Shape::Point => panic("unhandled Shape::Point"),
+    "#
     );
     let anchor = text.find("match s {").unwrap() + "match s {".len();
     assert_eq!(u32::from(fix.edits[0].range.start()), anchor as u32);
@@ -263,8 +268,10 @@ static f = fn (s: Shape) {
     let fix = diagnostics[0].fix.as_ref().expect("diagnostic has a fix");
     assert_eq!(
         fix.edits[0].insert,
-        "\n        ::Circle(v) => panic(\"unhandled ::Circle\"),\n\
-         \x20\x20\x20\x20\x20\x20\x20\x20::Point => panic(\"unhandled ::Point\"),\n    "
+        r#"
+        Shape::Circle(_) => panic("unhandled Shape::Circle(_)"),
+        Shape::Point => panic("unhandled Shape::Point"),
+    "#
     );
 
     let mut patched = text.to_owned();
@@ -296,7 +303,8 @@ fn match_add_missing_arms_fix_leaves_a_trailing_comment_alone() {
     let fix = diagnostics[0].fix.as_ref().expect("diagnostic has a fix");
     assert_eq!(
         fix.edits[0].insert,
-        "\n        ::Point => panic(\"unhandled ::Point\"),"
+        r#"
+        Shape::Point => panic("unhandled Shape::Point"),"#
     );
 
     let mut patched = text.to_owned();
@@ -313,10 +321,9 @@ fn match_add_missing_arms_fix_leaves_a_trailing_comment_alone() {
 }
 
 #[test]
-fn match_add_missing_arms_fix_names_binders_by_payload_arity() {
-    // Unit / one-payload / two-payload variants, in declaration order:
-    // `::Point` gets no parens, `::Circle` gets one binder (`v`), `::Pair`
-    // gets one per field (`v1, v2`).
+fn match_add_missing_arms_fix_spells_each_missing_pattern() {
+    // Unit / one-payload / two-payload variants, in declaration order, each
+    // spelled as the message spells it: `_` for every payload.
     let text = r#"
 type Shape = enum { Point, Circle(usize), Pair(usize, str) };
 static f = fn (s: Shape) {
@@ -330,10 +337,44 @@ static f = fn (s: Shape) {
     let fix = diagnostics[0].fix.as_ref().expect("diagnostic has a fix");
     assert_eq!(
         fix.edits[0].insert,
-        "\n        ::Point => panic(\"unhandled ::Point\"),\n\
-         \x20\x20\x20\x20\x20\x20\x20\x20::Circle(v) => panic(\"unhandled ::Circle\"),\n\
-         \x20\x20\x20\x20\x20\x20\x20\x20::Pair(v1, v2) => panic(\"unhandled ::Pair\"),\n    "
+        r#"
+        Shape::Point => panic("unhandled Shape::Point"),
+        Shape::Circle(_) => panic("unhandled Shape::Circle(_)"),
+        Shape::Pair(_, _) => panic("unhandled Shape::Pair(_, _)"),
+    "#
     );
+}
+
+#[test]
+fn match_add_missing_arms_fix_spells_nested_patterns() {
+    // A value missing below the top level gets an arm for exactly it.
+    let text = r#"
+type Inner = enum { A, B };
+type Outer = enum { Wrap(Inner), Empty };
+static f = fn (o: Outer) {
+    match o {
+        ::Wrap(::A) => {},
+        ::Empty => {},
+    };
+};
+"#;
+    let db = RootDatabase::default();
+    let file = SourceFile::new(&db, "test.must".to_owned(), text.to_owned());
+    let diagnostics = crate::file_diagnostics(&db, file);
+    assert_eq!(diagnostics.len(), 1, "diagnostics: {diagnostics:?}");
+    let fix = diagnostics[0].fix.as_ref().expect("diagnostic has a fix");
+    assert_eq!(
+        fix.edits[0].insert,
+        r#"
+        Outer::Wrap(Inner::B) => panic("unhandled Outer::Wrap(Inner::B)"),"#
+    );
+    let mut patched = text.to_owned();
+    patched.insert_str(
+        usize::from(fix.edits[0].range.start()),
+        &fix.edits[0].insert,
+    );
+    let file = SourceFile::new(&db, "test.must".to_owned(), patched);
+    assert_eq!(crate::file_diagnostics(&db, file), vec![]);
 }
 
 #[test]
@@ -353,39 +394,15 @@ fn match_add_missing_arms_fix_projects_through_a_borrowed_scrutinee() {
     assert_eq!(fix.label, "Add missing match arms");
     assert_eq!(
         fix.edits[0].insert,
-        "\n        ::Point => panic(\"unhandled ::Point\"),"
+        r#"
+        Shape::Point => panic("unhandled Shape::Point"),"#
     );
 }
 
 #[test]
-fn match_add_missing_arms_fix_avoids_shadowing_a_visible_local() {
-    // A `v` already visible at the match's own scope (a `let` right before
-    // it) is not shadowed by the generated payload binder — it gets
-    // suffixed until free instead.
-    let text = r#"
-type Shape = enum { Circle(usize), Point };
-static f = fn (s: Shape) {
-    let v: usize = 1;
-    match s {};
-};
-"#;
-    let db = RootDatabase::default();
-    let file = SourceFile::new(&db, "test.must".to_owned(), text.to_owned());
-    let diagnostics = crate::file_diagnostics(&db, file);
-    assert_eq!(diagnostics.len(), 1, "diagnostics: {diagnostics:?}");
-    let fix = diagnostics[0].fix.as_ref().expect("diagnostic has a fix");
-    assert_eq!(
-        fix.edits[0].insert,
-        "\n        ::Circle(v_) => panic(\"unhandled ::Circle\"),\n\
-         \x20\x20\x20\x20\x20\x20\x20\x20::Point => panic(\"unhandled ::Point\"),\n    "
-    );
-}
-
-#[test]
-fn match_without_catch_all_offers_no_fix() {
-    // The sibling diagnostic for a non-enum scrutinee with no `_`/binding
-    // arm: there is no variant list to enumerate, so no fix is offered
-    // (this fix is scoped to `NonExhaustiveMatch` only).
+fn match_on_a_scalar_offers_a_wildcard_arm() {
+    // A scalar's values are not listed one by one: the missing pattern is
+    // `_`, and the fix adds that arm.
     let text = r#"
 static f = fn (n: usize) -> usize {
     match n { }
@@ -395,12 +412,172 @@ static f = fn (n: usize) -> usize {
     let file = SourceFile::new(&db, "test.must".to_owned(), text.to_owned());
     let diagnostics = crate::file_diagnostics(&db, file);
     assert_eq!(diagnostics.len(), 1, "diagnostics: {diagnostics:?}");
-    assert!(
-        diagnostics[0]
-            .message
-            .contains("this `match` does not cover every possible")
+    assert_eq!(
+        diagnostics[0].message,
+        "this `match` does not cover every possible `usize`; add a `_` arm"
     );
-    assert!(diagnostics[0].fix.is_none());
+    let fix = diagnostics[0].fix.as_ref().expect("diagnostic has a fix");
+    assert_eq!(
+        fix.edits[0].insert,
+        r#"
+        _ => panic("unhandled _"),
+    "#
+    );
+}
+
+#[test]
+fn a_broken_part_reads_as_a_wildcard() {
+    // `'a'` cannot match a `usize`, so it reads as `_`: `::Circle('a')`
+    // covers every circle and the match is exhaustive.
+    check_diagnostics(
+        r#"
+type Shape = enum { Circle(usize), Point };
+static f = fn (s: Shape) -> usize {
+    match s {
+        ::Circle('a') => 0,
+        ::Point => 1,
+    }
+};
+"#,
+        expect![[r#"
+            112..115: type mismatch: this pattern is on a `usize`, and `char` cannot match one
+        "#]],
+    );
+}
+
+#[test]
+fn a_broken_arm_still_reports_what_is_missing() {
+    check_diagnostics(
+        r#"
+type Shape = enum { Circle(usize), Square(usize), Point };
+static f = fn (s: Shape) -> usize {
+    match s {
+        ::Circle('a') => 0,
+    }
+};
+"#,
+        expect![[r#"
+            100..105: this `match` does not cover `Shape::Square(_)`, `Shape::Point`
+            127..130: type mismatch: this pattern is on a `usize`, and `char` cannot match one
+        "#]],
+    );
+}
+
+#[test]
+fn a_broken_arm_leaves_a_later_duplicate_dead() {
+    check_diagnostics(
+        r#"
+type Shape = enum { Circle(usize), Point };
+static f = fn (s: Shape) -> usize {
+    match s {
+        ::Circle('a') => 0,
+        ::Point => 1,
+        ::Point => 2,
+    }
+};
+"#,
+        expect![[r#"
+            112..115: type mismatch: this pattern is on a `usize`, and `char` cannot match one
+            153..160: unreachable arm: the arms above match every value it matches
+        "#]],
+    );
+}
+
+#[test]
+fn a_wrong_slot_count_still_tests_its_variant() {
+    check_diagnostics(
+        r#"
+type Shape = enum { Circle(usize), Point };
+static f = fn (s: Shape) -> usize {
+    match s {
+        ::Circle(a, b) => 0,
+    }
+};
+"#,
+        expect![[r#"
+            85..90: this `match` does not cover `Shape::Point`
+            103..117: `Circle` has 1 payload, this pattern names 2
+        "#]],
+    );
+}
+
+#[test]
+fn a_nested_newtype_pattern_names_the_type_of_an_unknown_value() {
+    // Like construction: `Meters(m)` says the payload is a `Meters`, so
+    // `m` is its record (the arm's mismatch shows it).
+    check_diagnostics(
+        r#"
+type Option = enum::<T> { Some(T), None };
+type Meters = struct { n: usize };
+static f = fn () -> usize {
+    let o = Option::None;
+    match o {
+        ::Some(Meters(m)) => m,
+        ::None => 0,
+    }
+};
+"#,
+        expect![[r#"
+            176..177: type mismatch: expected `usize`, found `struct { n: usize }` (expected `usize` because of this return type at 96..104)
+        "#]],
+    );
+}
+
+#[test]
+fn a_newtype_pattern_named_like_a_variant_suggests_the_variant() {
+    // `Circle(r)` is a newtype pattern; on a `Shape` the variant is the
+    // likely intent, whether or not a type `Circle` exists. Not in a `let`:
+    // `::Circle(r)` would be refutable there.
+    check_diagnostics(
+        r#"
+type Shape = enum { Circle(usize), Point };
+type Point = struct { x: usize };
+static f = fn (s: Shape) -> usize {
+    match s {
+        Circle(r) => r,
+        Point(p) => p.x,
+        _ => 0,
+    }
+};
+static g = fn (s: Shape) -> usize {
+    let Circle(r) = s;
+    r
+};
+"#,
+        expect![[r#"
+            137..146: `Circle` does not name a type; write `::Circle(...)` to match the variant
+            161..169: type mismatch: expected `Point`, found `Shape`; write `::Point` to match the variant
+            247..256: `Circle` does not name a type
+        "#]],
+    );
+}
+
+#[test]
+fn a_named_pattern_on_a_number_is_refused() {
+    // A number is no named type: the pattern is refused on the spot,
+    // whichever kind names the type.
+    check_diagnostics(
+        r#"
+type Option = enum::<T> { Some(T), None };
+type Meters = struct { n: usize };
+static f = fn () -> usize {
+    match 5 {
+        Meters(m) => m.n,
+        _ => 0,
+    }
+};
+static g = fn () -> usize {
+    match 5 {
+        Option::Some(x) => x,
+        _ => 0,
+    }
+};
+"#,
+        expect![[r#"
+            129..138: type mismatch: expected `Meters`, found `{number}`
+            222..237: a variant pattern needs an enum; only `_` or a binding can match a `{number}`
+        "#]],
+    );
 }
 
 #[test]
@@ -421,6 +598,9 @@ static f = fn (s: Shape) -> usize {
 
 #[test]
 fn match_arm_after_wildcard_is_unreachable() {
+    // One wording for every dead arm, by design: with nested patterns the
+    // arms that cover one often do so together, so there is no single arm
+    // to name.
     check_diagnostics(
         r#"
 type Shape = enum { Circle(usize), Point };
@@ -432,7 +612,7 @@ static f = fn (s: Shape) -> usize {
 };
 "#,
         expect![[r#"
-            119..130: unreachable arm: `Circle` is already covered by a previous arm
+            119..130: unreachable arm: the arms above match every value it matches
         "#]],
     );
 }
@@ -451,7 +631,7 @@ static f = fn (s: Shape) -> usize {
 };
 "#,
         expect![[r#"
-            129..140: unreachable arm: `Circle` is already covered by a previous arm
+            129..140: unreachable arm: the arms above match every value it matches
         "#]],
     );
 }
@@ -614,7 +794,7 @@ static f = fn (s: Shape) -> usize {
 "#,
         expect![[r#"
             129..134: `Point` binds the whole value; write `::Point` (or `Shape::Point`) to match the variant (`Shape` is defined here at 6..11)
-            149..150: unreachable arm: a previous arm already matches anything
+            149..150: unreachable arm: the arms above match every value it matches
         "#]],
     );
 }
@@ -698,8 +878,8 @@ static g = fn (s: str) -> usize {
 };
 "#,
         expect![[r#"
-            59..70: a variant pattern needs an enum scrutinee; `_`, a binding, or an integer literal can match a `usize`
-            158..169: a variant pattern needs an enum scrutinee; only `_` or a binding can match a `str`
+            59..70: a variant pattern needs an enum; `_`, a binding, or an integer literal can match a `usize`
+            158..169: a variant pattern needs an enum; only `_` or a binding can match a `str`
         "#]],
     );
 }
@@ -732,5 +912,309 @@ static area_ish = const fn (s: Shape) -> usize {
 static x = area_ish(Shape::Circle(3));
 "#,
         expect![[r#""#]],
+    );
+}
+
+// A value two levels down that no arm covers is named in full.
+#[test]
+fn exhaustiveness_names_a_value_missed_at_depth() {
+    check_diagnostics(
+        r#"
+type S = enum { A, B };
+type T = enum { Wrap(S, S), Nil };
+static f = fn (t: T) -> usize {
+    match t {
+        ::Wrap(::A, _) => 1,
+        ::Wrap(_, ::A) => 2,
+        ::Nil => 3,
+    }
+};
+"#,
+        expect![[r#"
+            96..101: this `match` does not cover `T::Wrap(S::B, S::B)`
+        "#]],
+    );
+}
+
+// An arm whose every value an earlier arm took, only through their
+// sub-patterns together, never runs.
+#[test]
+fn an_arm_covered_by_earlier_nested_arms_is_unreachable() {
+    check_diagnostics(
+        r#"
+type S = enum { A, B };
+type T = enum { Wrap(S, S), Nil };
+static f = fn (t: T) -> usize {
+    match t {
+        ::Wrap(::A, _) => 1,
+        ::Wrap(_, ::A) => 2,
+        ::Wrap(::A, ::A) => 3,
+        _ => 4,
+    }
+};
+"#,
+        expect![[r#"
+            172..188: unreachable arm: the arms above match every value it matches
+        "#]],
+    );
+}
+
+// Literals inside an array never cover their element type, so the missing
+// value is any array.
+#[test]
+fn literals_inside_an_array_need_a_catch_all() {
+    check_diagnostics(
+        r#"
+static f = fn (c: [char; 2]) -> usize {
+    match c {
+        ['a', _] => 1,
+        [_, 'b'] => 2,
+    }
+};
+"#,
+        expect![[r#"
+            45..50: this `match` does not cover `[_, _]`
+        "#]],
+    );
+}
+
+// A `let` is a one-arm `match`: a nested pattern that can fail names what
+// it misses.
+#[test]
+fn a_let_with_a_refutable_nested_pattern_names_what_it_misses() {
+    check_diagnostics(
+        r#"
+type S = enum { A, B };
+type T = enum { Wrap(S, S), Nil };
+static f = fn (t: T) -> usize {
+    let ::Wrap(::A, x) = t;
+    0
+};
+"#,
+        expect![[r#"
+            100..114: this pattern does not cover `T::Wrap(S::B, _)`, `T::Nil`; use `match`
+        "#]],
+    );
+}
+
+// A record pattern is an arm like any other, and one of binders covers
+// every value.
+#[test]
+fn a_record_pattern_in_an_arm_covers_its_type() {
+    check_diagnostics(
+        r#"
+static f = fn (p: struct { x: usize, y: usize }) -> usize {
+    match p {
+        struct { x, y } => x + y,
+    }
+};
+"#,
+        expect![[""]],
+    );
+}
+
+#[test]
+fn array_record_and_newtype_patterns_project_through_a_borrow() {
+    check_infer(
+        r#"
+type N = struct { x: usize };
+static f = fn::<@a>(p: [N; 1].&::<@a>) -> usize {
+    let [N(struct { x })] = p;
+    x.*
+};
+"#,
+        expect![[r#"
+            42..121 'fn::<@a>(p: [N; 1...': fn([N; 1].&::<@a>) -> usize
+            51..52 'p': [N; 1].&::<@a>
+            79..121 '{     let [N(stru...': usize
+            101..102 'x': usize.&
+            109..110 'p': [N; 1].&::<@a>
+            116..117 'x': usize.&
+            116..119 'x.*': usize
+        "#]],
+    );
+}
+
+// A variant whose payload has no values (an `enum {}`) holds no value
+// either: no arm or `let` has to cover it, and an arm for it never runs.
+#[test]
+fn a_variant_without_values_needs_no_arm_and_its_arm_never_runs() {
+    check_diagnostics(
+        r#"
+type Void = enum {};
+type E = enum { A(usize), B(Void) };
+static f = fn (e: E) -> usize { match e { ::A(n) => n } };
+static g = fn (e: E) -> usize { match e { ::A(n) => n, ::B(_) => 0 } };
+static h = fn (e: E) -> usize { let ::A(n) = e; n };
+static k = fn (v: Void) -> usize { match v {} };
+"#,
+        expect![[r#"
+            173..179: unreachable arm: the arms above match every value it matches
+        "#]],
+    );
+}
+
+// A type has no values when every value of it would have to hold a value
+// of a type without values, at any depth: in an enum's every variant, a
+// record, an array, or itself. A variant whose payload has such a type
+// needs no arm, and an arm for it never runs.
+#[test]
+fn a_payload_enum_whose_variants_all_hold_no_value_needs_no_arm() {
+    // `W`'s only variant holds a `Void`.
+    check_diagnostics(
+        r#"
+type Void = enum {};
+type W = enum { X(Void) };
+type E = enum { A(usize), B(W) };
+static f = fn (e: E) -> usize { match e { ::A(n) => n } };
+static g = fn (e: E) -> usize { match e { ::A(n) => n, ::B(_) => 0 } };
+"#,
+        expect![[r#"
+            197..203: unreachable arm: the arms above match every value it matches
+        "#]],
+    );
+}
+
+#[test]
+fn a_payload_record_with_a_field_without_values_needs_no_arm() {
+    // `N`'s field `v` holds no value.
+    check_diagnostics(
+        r#"
+type Void = enum {};
+type N = struct { v: Void };
+type E = enum { A(usize), B(N) };
+static f = fn (e: E) -> usize { match e { ::A(n) => n } };
+static g = fn (e: E) -> usize { match e { ::A(n) => n, ::B(_) => 0 } };
+"#,
+        expect![[r#"
+            199..205: unreachable arm: the arms above match every value it matches
+        "#]],
+    );
+}
+
+#[test]
+fn a_payload_array_of_a_type_without_values_needs_no_arm() {
+    // A `[Void; 1]` has an element, and no element has a value.
+    check_diagnostics(
+        r#"
+type Void = enum {};
+type E = enum { A(usize), B([Void; 1]) };
+static f = fn (e: E) -> usize { match e { ::A(n) => n } };
+static g = fn (e: E) -> usize { match e { ::A(n) => n, ::B(_) => 0 } };
+"#,
+        expect![[r#"
+            178..184: unreachable arm: the arms above match every value it matches
+        "#]],
+    );
+}
+
+#[test]
+fn a_payload_type_that_only_holds_itself_needs_no_arm() {
+    // Every `Loop` holds another `Loop`, so none is finite.
+    check_diagnostics(
+        r#"
+type Void = enum {};
+type Loop = enum { Again(Loop) };
+type E = enum { A(usize), B(Loop) };
+static f = fn (e: E) -> usize { match e { ::A(n) => n } };
+static g = fn (e: E) -> usize { match e { ::A(n) => n, ::B(_) => 0 } };
+"#,
+        expect![[r#"
+            207..213: unreachable arm: the arms above match every value it matches
+        "#]],
+    );
+}
+
+#[test]
+fn a_recursive_type_with_a_way_out_needs_its_arms() {
+    // `L::Nil` ends a list, so `L::Cons` holds values.
+    check_diagnostics(
+        r#"
+type Void = enum {};
+type L = enum { Cons(usize, L), Nil };
+static k = fn (l: L) -> usize { match l { ::Nil => 0 } };
+"#,
+        expect![[r#"
+            93..98: this `match` does not cover `L::Cons(_, _)`
+        "#]],
+    );
+}
+
+#[test]
+fn a_generic_payload_without_values_at_any_depth_needs_no_arm() {
+    // Both payloads bottom out in a `Void`, through `One` twice and
+    // through each side of `Either`.
+    check_diagnostics(
+        r#"
+type Void = enum {};
+type One = enum::<T> { X(T) };
+type Either = enum::<L, R> { Left(L), Right(R) };
+type E = enum { A(usize), B(One::<One::<Void>>), C(Either::<Either::<Void, Void>, Void>) };
+static f = fn (e: E) -> usize { match e { ::A(n) => n } };
+static g = fn (e: E) -> usize { match e { ::A(n) => n, ::B(::X(_)) => 0, ::C(_) => 0 } };
+"#,
+        expect![[r#"
+            309..320: unreachable arm: the arms above match every value it matches
+            327..333: unreachable arm: the arms above match every value it matches
+        "#]],
+    );
+}
+
+#[test]
+fn a_generic_payload_that_only_holds_itself_needs_no_arm() {
+    // Every `K` holds a `K::<Void>`, every `Flip::<A, B>` a `Flip::<B, A>`:
+    // neither grows, and neither has a finite value.
+    check_diagnostics(
+        r#"
+type Void = enum {};
+type K = enum::<T> { X(T, K::<Void>) };
+type Flip = enum::<A, B> { Y(Flip::<B, A>) };
+type E = enum { A(usize), B(K::<usize>), C(Flip::<usize, bool>) };
+static f = fn (e: E) -> usize { match e { ::A(n) => n } };
+static g = fn (e: E) -> usize { match e { ::A(n) => n, ::B(::X(_, _)) => 0, ::C(_) => 0 } };
+"#,
+        expect![[r#"
+            289..303: unreachable arm: the arms above match every value it matches
+            310..316: unreachable arm: the arms above match every value it matches
+        "#]],
+    );
+}
+
+#[test]
+fn a_generic_payload_that_holds_a_larger_version_of_itself_needs_no_arm() {
+    // Every `K` holds a `K::<[Void; 1]>`, which holds a `[Void; 1]`.
+    check_diagnostics(
+        r#"
+type Void = enum {};
+type K = enum::<T> { X(T, K::<[Void; 1]>) };
+type E = enum { A(usize), B(K::<usize>) };
+static f = fn (e: E) -> usize { match e { ::A(n) => n } };
+static g = fn (e: E) -> usize { match e { ::A(n) => n, ::B(::X(_, _)) => 0 } };
+"#,
+        expect![[r#"
+            224..238: unreachable arm: the arms above match every value it matches
+        "#]],
+    );
+}
+
+#[test]
+fn a_type_that_names_itself_with_larger_arguments_still_needs_its_arms() {
+    // Asking whether `Nest::<usize>` has values must end, though it holds
+    // a `Nest::<Pair::<usize>>`, which holds a bigger one still; `::Nil`
+    // is one.
+    check_diagnostics(
+        r#"
+type Pair = struct::<T> { l: T, r: T };
+type Nest = enum::<T> { Nil, Cons(T, Nest::<Pair::<T>>) };
+type E = enum { A(usize), B(Nest::<usize>) };
+static f = fn (e: E) -> usize {
+    match e {
+        ::A(n) => n,
+    }
+};
+"#,
+        expect![[r#"
+            182..187: this `match` does not cover `E::B(_)`
+        "#]],
     );
 }

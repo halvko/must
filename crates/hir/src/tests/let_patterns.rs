@@ -30,8 +30,31 @@ static g = fn (n: usize) -> () {
 };
 "#,
         expect![[r#"
-            53..65: this pattern can fail to match; use `match`
-            128..129: this pattern can fail to match; use `match`
+            53..65: this pattern does not cover `NextChar::End`; use `match`
+            128..129: this pattern does not cover every possible `usize`; use `match`
+        "#]],
+    );
+}
+
+#[test]
+fn a_nested_pattern_counts_toward_exhaustiveness() {
+    // A slot dispatches like the arm does: the match must cover every value
+    // at every depth, and the message names the value it misses.
+    check_diagnostics(
+        r#"
+type S = enum { A(usize), B(usize) };
+type Only = enum { One(usize) };
+type T = enum { Wrap(S), Keep(Only), Nil };
+static f = fn (t: T) -> usize {
+    match t {
+        ::Wrap(::A(n)) => n,
+        ::Keep(::One(n)) => n,
+        ::Nil => 0,
+    }
+};
+"#,
+        expect![[r#"
+            152..157: this `match` does not cover `T::Wrap(S::B(_))`
         "#]],
     );
 }
@@ -54,7 +77,7 @@ static g = fn (s: Shape) -> usize {
 };
 "#,
         expect![[r#"
-            254..265: this pattern can fail to match; use `match`
+            254..265: this pattern does not cover `Shape::Point`; use `match`
         "#]],
     );
 }
@@ -76,8 +99,8 @@ static g = fn (c: Shape) -> str {
 };
 "#,
         expect![[r#"
-            92..102: this pattern can fail to match; use `match`
-            159..169: this pattern can fail to match; use `match`
+            92..102: this pattern does not cover `Shape::Circle(_)`; use `match`
+            159..169: this pattern does not cover `Shape::Circle(_)`; use `match`
         "#]],
     );
 }
@@ -128,7 +151,7 @@ static f = fn (c: Shape) -> str {
 };
 "#,
         expect![[r#"
-            92..107: this pattern can fail to match; use `match`
+            92..107: this pattern does not cover `Shape::Circle(_)`; use `match`
         "#]],
     );
 }

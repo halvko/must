@@ -489,14 +489,10 @@ static f = fn::<@a, T>(w: W::<T>.&::<@a>) -> T { w.t };
 }
 
 #[test]
-fn a_borrow_of_a_non_matchable_type_is_still_not_a_scrutinee() {
-    // The lens is lifted only for a referent this match can DISPATCH on —
-    // an enum or a scalar — so a `struct.&` (or a `str.&`)
-    // scrutinee reaches exactly the diagnostics it always did, naming the
-    // BORROW rather than what is behind it. Nothing here was widened by
-    // accident when literal patterns arrived. (`usize.&` used to sit in
-    // this test; it dispatches now — see
-    // `an_integer_pattern_projects_through_a_borrow`.)
+fn a_variant_pattern_on_a_borrowed_struct_names_the_struct() {
+    // A pattern that looks inside a borrowed value meets what is behind
+    // the borrow, so the message names the referent; a match of only `_`
+    // never looks inside at all.
     check_diagnostics(
         "type P = struct { x: usize };\n\
          static f = fn::<@a>(p: P.&::<@a>, s: str.&::<@a>) -> usize {\n\
@@ -504,8 +500,8 @@ fn a_borrow_of_a_non_matchable_type_is_still_not_a_scrutinee() {
          };\n\
          static g = fn::<@a>(s: str.&::<@a>) -> usize { match s { } };",
         expect![[r#"
-            101..110: a variant pattern needs an enum scrutinee; only `_` or a binding can match a `P.&::<@a>`
-            197..202: this `match` does not cover every possible `str.&::<@a>`; add a `_` arm
+            101..110: a variant pattern needs an enum; only `_` or a binding can match a `P`
+            197..202: this `match` does not cover every possible `str`; add a `_` arm
         "#]],
     );
 }

@@ -372,7 +372,7 @@ static f = fn (a: [usize; 2]) -> usize {
 };
 "#,
         expect![[r#"
-            93..100: a variant pattern needs an enum scrutinee; only `_` or a binding can match a `[usize; 2]`
+            93..100: a variant pattern needs an enum; only `_` or a binding can match a `[usize; 2]`
         "#]],
     );
 }

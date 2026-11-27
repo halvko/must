@@ -92,7 +92,7 @@ static f = fn (n: usize) -> usize {
 };
 "#,
         expect![[r#"
-            59..62: type mismatch: this `match` is on a `usize`, and `char` cannot match one
+            59..62: type mismatch: this pattern is on a `usize`, and `char` cannot match one
         "#]],
     );
 }
@@ -140,7 +140,7 @@ static f = fn (c: char) -> usize {
 };
 "#,
         expect![[r#"
-            94..97: unreachable arm: `'a'` is already covered by a previous arm
+            94..97: unreachable arm: the arms above match every value it matches
         "#]],
     );
 }
@@ -339,7 +339,7 @@ static f = fn (d: usize) -> usize {
 };
 "#,
         expect![[r#"
-            91..92: unreachable arm: `0` is already covered by a previous arm
+            91..92: unreachable arm: the arms above match every value it matches
         "#]],
     );
 }
@@ -365,8 +365,8 @@ static g = fn (s: str) -> usize {
 };
 "#,
         expect![[r#"
-            58..59: type mismatch: this `match` is on a `char`, and `{number}` cannot match one
-            147..148: type mismatch: this `match` is on a `str`, and `{number}` cannot match one
+            58..59: type mismatch: this pattern is on a `char`, and `{number}` cannot match one
+            147..148: type mismatch: this pattern is on a `str`, and `{number}` cannot match one
         "#]],
     );
 }
@@ -485,27 +485,18 @@ static annotated = fn (d: usize) -> usize {
 };
 "#,
         expect![[r#"
-            168..171: type mismatch: this `match` is on a `usize`, and `char` cannot match one
-            289..290: type mismatch: this `match` is on a `char`, and `{number}` cannot match one
-            420..423: type mismatch: this `match` is on a `usize`, and `char` cannot match one
+            168..171: type mismatch: this pattern is on a `usize`, and `char` cannot match one
+            289..290: type mismatch: this pattern is on a `char`, and `{number}` cannot match one
+            420..423: type mismatch: this pattern is on a `usize`, and `char` cannot match one
         "#]],
     );
 }
 
 #[test]
-fn the_lens_is_decided_when_the_match_is_checked() {
-    // A NAMED LIMIT, not a new one: the borrow lens is lifted from the
-    // referent as it resolves AT THE MATCH, so a scrutinee whose referent
-    // is still unknown there does not lift one — the pattern then meets
-    // the BORROW and is refused, with a message that renders the referent
-    // it later turned out to have. Pre-existing and universal to M13
-    // (enums show it too); integer patterns only make it commoner, since
-    // an integer scrutinee is so often pinned by a later use.
-    //
-    // Both scalars pinned, because the limit belongs to the lens and not
-    // to a pattern kind. The fix a user needs is to annotate or pin the
-    // scrutinee before the match; re-deciding the lift once the referent
-    // resolves is M13's own Re-evaluate entry.
+fn the_lens_is_decided_when_each_pattern_is_checked() {
+    // Each pattern looks through the borrow it meets as that pattern is
+    // checked, so a literal arm pins a still-unknown referent the way it
+    // pins an owned scrutinee.
     check_diagnostics(
         r#"
 static takes_usize = fn (n: usize) -> usize { n };
@@ -524,10 +515,16 @@ static g = fn (c) -> usize {
     };
     r + takes_char(c)
 };
+static h = fn (d) -> usize {
+    let r = match d.& {
+        0 => 1,
+        _ => 0,
+    };
+    r + takes_char(d)
+};
 "#,
         expect![[r#"
-            162..163: type mismatch: this `match` is on a `usize.&`, and `{number}` cannot match one
-            280..283: type mismatch: this `match` is on a `char.&`, and `char` cannot match one
+            449..450: type mismatch: expected `char`, found `{number}`
         "#]],
     );
 }
@@ -548,7 +545,7 @@ static f = fn::<@a>(d: usize.&::<@a>) -> usize {
 };
 "#,
         expect![[r#"
-            72..83: a variant pattern needs an enum scrutinee; `_`, a binding, or an integer literal can match a `usize`
+            72..83: a variant pattern needs an enum; `_`, a binding, or an integer literal can match a `usize`
         "#]],
     );
 }
@@ -594,7 +591,7 @@ static f = fn (n: i64) -> usize {
 };
 "#,
         expect![[r#"
-            43..45: this pattern can fail to match; use `match`
+            43..45: this pattern does not cover every possible `i64`; use `match`
         "#]],
     );
 }
@@ -616,7 +613,7 @@ static f = fn (n: i64) -> usize {
 };
 "#,
         expect![[r#"
-            73..75: unreachable arm: `0` is already covered by a previous arm
+            73..75: unreachable arm: the arms above match every value it matches
         "#]],
     );
 }
