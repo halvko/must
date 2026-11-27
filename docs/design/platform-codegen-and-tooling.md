@@ -130,11 +130,11 @@
   only one candidate is shape-viable, so the call is a permanent refusal and completion
   suppresses the name rather than offering a merged or shape-picked row. Two recorded
   divergences from what a call there would resolve to: that suppression, and a nested body
-  still being offered its enclosing bounds. A CONCRETE receiver's dot follows the opposite,
-  impl-directed rule (TR01): it offers the inherent members and the members of every trait
-  implemented for the receiver's type, from either side of the impl, labeled by the
-  requirement's name, and counts candidates per receiver shape, so each row is offered
-  exactly when the call its spelling writes resolves to that member.
+  still being offered its enclosing bounds. A CONCRETE receiver's dot follows G13's
+  per-shape rule instead: it offers the inherent members, the members of every trait
+  implemented for the receiver's type (from either side of the impl, labeled by the
+  requirement's name) and the builtin members, and each row is offered exactly when the call
+  its spelling writes resolves to that member.
 - **P16** Completion writes the borrow the compiler will not (G14). On an owned receiver the
   dot also offers members and requirements taking `Self.&` / `Self.&mut`, and accepting one
   rewrites the dot as `.&.` / `.&mut.`, so the user lands on the licensed borrow-receiver call

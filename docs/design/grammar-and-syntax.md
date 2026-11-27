@@ -61,11 +61,16 @@
   end.
 - **G13** Fields and members are separate namespaces, and the SYNTAX decides which one a name
   reaches: a bare dot always reads the field, and call syntax resolves to a dot-callable
-  member — inherent or trait-impl alike. A name carried by MORE THAN ONE carrier (an inherent
-  member, each trait-impl member, an fn-typed field, in any combination) is one call-site
-  ambiguity error naming every candidate's exact spelling, with a related location per
-  candidate — no fall-through: a trait impl may live in the trait's own chain, nowhere near
-  the type, so silent shadowing either way would be action at a distance. Three escapes exist:
+  member — inherent or trait-impl alike. A name carried by MORE THAN ONE carrier that takes
+  the call from the receiver's shape as written (an inherent member, each trait-impl member,
+  an fn-typed field, in any combination) is one call-site ambiguity error naming every
+  candidate's exact spelling, with a related location per candidate — no fall-through: a
+  trait impl may live in the trait's own chain, nowhere near the type, so silent shadowing
+  either way would be action at a distance. Counting by shape lets `x.f()` and `x.&.f()`
+  each resolve to a different carrier; a bound-directed call deliberately decides by name
+  alone (P15). A builtin member (`str`'s `next_char`) is reached only when no user carrier
+  takes the call from the shape: a user member shadows it rather than conflicting with it,
+  since a builtin has no declaration for the error to point at. Three escapes exist:
   the field's `(v.name)(...)`; the full named-Self form `Trait::<Self = Type>::member(...)`
   for a trait member (short forms stay available when unambiguous); `Type::member(value)` for
   an inherent member. `Type::m` where `m` names a member a trait provides for `Type` (not
