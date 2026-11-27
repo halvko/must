@@ -170,7 +170,7 @@ type Bar = struct { x: usize };
 static f = fn (v: Bar) { let Foo(struct { x }) = v; };
 "#,
         expect![[r#"
-            114..115: type mismatch: expected `Foo`, found `Bar`
+            94..111: type mismatch: expected `Foo`, found `Bar`
         "#]],
     );
 }

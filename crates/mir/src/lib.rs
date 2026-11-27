@@ -110,6 +110,16 @@ pub struct LocalData {
     /// behavior, if it is. Initialization and by-name reassignment are not
     /// pointer writes.
     pub read_only: Option<ReadOnly>,
+    /// A compiler temp a `match` decision tree reads a part of an owned
+    /// scrutinee into only to test it. It owns nothing: every arm takes its
+    /// values from the scrutinee itself, so the move check does not track
+    /// it.
+    pub test_only: bool,
+    /// For a compiler pointer that a pattern uses to reach into a borrowed
+    /// value: the place it points at. The loan check reads a place rooted
+    /// at its deref as that place, so a binder below it holds its loan on
+    /// the scrutinee; the pointer holds no loan of its own.
+    pub points_into: Option<Place>,
 }
 
 /// Why a local is read-only to writes through a pointer
@@ -621,6 +631,8 @@ fn plant_trap(body: &mut MirBody, trap: &CheckTrap) {
         binding: None,
         addressable: false,
         read_only: None,
+        test_only: false,
+        points_into: None,
     });
     let data = &mut body.blocks[trap.block];
     let origin = data

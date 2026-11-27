@@ -94,9 +94,8 @@ static f = fn (s: Shape) -> usize {
                               IDENT@97..98 "a"
                           COMMA@98..99 ","
                           WHITESPACE@99..100 " "
-                          BIND_PAT@100..101
-                            NAME@100..101
-                              HOLE@100..101 "_"
+                          WILDCARD_PAT@100..101
+                            HOLE@100..101 "_"
                           R_PAREN@101..102 ")"
                         WHITESPACE@102..103 " "
                         FAT_ARROW@103..105 "=>"
@@ -340,11 +339,9 @@ static f = fn (s: Shape) -> usize {
 }
 
 #[test]
-fn match_retired_bare_variant_pat_still_parses() {
-    // `Circle(r)` (no `::`, no qualifying enum) is the retired v1
-    // shorthand. It still parses as a `VARIANT_PAT` with no `COLON2` (the
-    // tree keeps the user's intent), and validation reports the honest
-    // "write `::Circle(...)`" error.
+fn match_arm_name_with_parens_is_a_newtype_pattern() {
+    // One pattern grammar: `Circle(r)` unwraps a newtype in an arm as in a
+    // `let`. A variant is always written with `::`.
     check(
         r#"
 static f = fn (s: Shape) -> usize {
@@ -402,7 +399,7 @@ static f = fn (s: Shape) -> usize {
                       L_BRACE@49..50 "{"
                       WHITESPACE@50..59 "\n        "
                       MATCH_ARM@59..74
-                        VARIANT_PAT@59..68
+                        NEWTYPE_PAT@59..68
                           NAME_REF@59..65
                             IDENT@59..65 "Circle"
                           L_PAREN@65..66 "("
@@ -432,36 +429,8 @@ static f = fn (s: Shape) -> usize {
                     WHITESPACE@96..97 "\n"
                     R_BRACE@97..98 "}"
               WHITESPACE@98..99 "\n"
-            error 59..68: write `::Circle(...)` to match a variant, or remove `(...)` to bind
         "#]],
     );
-}
-
-#[test]
-fn match_retired_bare_variant_pat_fix_inserts_colon2() {
-    // The retired `Circle(r)` shape's fix inserts `::` right before the
-    // variant name, turning it into the elided sigil spelling.
-    let parse = crate::parse(
-        r#"
-static f = fn (s: Shape) -> usize {
-    match s {
-        Circle(r) => r,
-        _ => 0,
-    }
-}
-"#,
-    );
-    let err = parse
-        .errors()
-        .iter()
-        .find(|e| e.message.starts_with("write `::Circle"))
-        .expect("expected the retired-bare-variant error");
-    let fix = err.fix.as_ref().expect("expected a fix");
-    assert_eq!(fix.label, "Insert `::`");
-    assert_eq!(fix.edits.len(), 1);
-    let edit = &fix.edits[0];
-    assert!(edit.range.is_empty(), "the fix is a pure insertion");
-    assert_eq!(edit.insert, "::");
 }
 
 #[test]

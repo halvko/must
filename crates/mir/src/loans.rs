@@ -690,9 +690,9 @@ impl<'a> BodyCheck<'a> {
     }
 
     /// The place a MIR place stands for, through the temp it may be rooted
-    /// at.
+    /// at and the compiler pointer that temp may hold.
     fn resolve(&self, place: &Place) -> Place {
-        match &self.aliases[cfg::local_index(place.local)] {
+        let place = match &self.aliases[cfg::local_index(place.local)] {
             Some(base) => {
                 let mut projection = base.projection.clone();
                 projection.extend(place.projection.iter().cloned());
@@ -702,6 +702,27 @@ impl<'a> BodyCheck<'a> {
                 }
             }
             None => place.clone(),
+        };
+        self.through_pointee(place)
+    }
+
+    /// `place` with a compiler pointer's deref at its root replaced by the
+    /// place the pointer points into (see [`crate::LocalData::points_into`]).
+    fn through_pointee(&self, place: Place) -> Place {
+        match (
+            &self.body.locals[place.local].points_into,
+            place.projection.first(),
+        ) {
+            (Some(pointee), Some(crate::ProjElem::Deref)) => {
+                let pointee = self.resolve(pointee);
+                let mut projection = pointee.projection;
+                projection.extend(place.projection[1..].iter().cloned());
+                Place {
+                    local: pointee.local,
+                    projection,
+                }
+            }
+            _ => place,
         }
     }
 
@@ -843,12 +864,19 @@ impl<'a> BodyCheck<'a> {
         for (block, data) in self.body.blocks.iter() {
             for (index, stmt) in data.statements.iter().enumerate() {
                 let StatementKind::Assign {
+                    dest,
                     value: ValueExpr::Borrow { mutable, place },
-                    ..
                 } = &stmt.kind
                 else {
                     continue;
                 };
+                // A pattern pointer is no loan of its own: every access
+                // through it stands for the place it points into, and is
+                // judged there.
+                if dest.projection.is_empty() && self.body.locals[dest.local].points_into.is_some()
+                {
+                    continue;
+                }
                 // A loan whose region nothing recorded cannot be judged
                 // live anywhere; inference records one for every borrow
                 // the language produces, so this is the broken-program

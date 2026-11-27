@@ -315,16 +315,11 @@ impl CheckCtx<'_> {
                     }
                 }
             }
-            PatData::Newtype { inner, .. } => {
-                let inner = *inner;
-                self.check_skipping_patterns(inner);
-            }
-            PatData::Array { elements } => {
-                for element in elements.clone() {
-                    self.check_skipping_patterns(element);
+            _ => {
+                for &sub in self.body.children(pat) {
+                    self.check_skipping_patterns(sub);
                 }
             }
-            _ => {}
         }
     }
 

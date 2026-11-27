@@ -2066,3 +2066,28 @@ static unassigned = fn() -> usize {
         "#]],
     );
 }
+
+/// The decision tree reads a part only to test it, and an arm takes its
+/// values from the scrutinee itself: a part the tree opened on one path
+/// and not on another is no value left behind on either.
+#[test]
+fn a_part_the_match_tests_on_some_paths_only_is_not_left_behind() {
+    check_linear(
+        r#"
+type In = enum { A(Res), B };
+type E = enum { P([In; 1], In), Z };
+static eat_in = fn(i: In) -> () {
+    match i { ::A(r) => r.drop(), ::B => {} }
+};
+static f = fn(e: E) -> () {
+    match e {
+        ::P([x], ::A(l)) => { eat_in(x); l.drop() },
+        ::P([::A(y)], ::B) => y.drop(),
+        ::P([::B], ::B) => {},
+        ::Z => {},
+    }
+};
+"#,
+        expect![""],
+    );
+}

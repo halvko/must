@@ -550,7 +550,8 @@ fn quick_fix_adds_missing_match_arms_attached_to_the_diagnostic() {
     assert_eq!(edits.len(), 1);
     assert_eq!(
         edits[0].new_text,
-        "\n        ::Point => panic(\"unhandled ::Point\"),"
+        r#"
+        Shape::Point => panic("unhandled Shape::Point"),"#
     );
 
     drop(client);
