@@ -645,14 +645,14 @@ impl<'db> Mono<'db> {
                 let refuse = |err| extern_refusal(&name, &site.blame(self.db), err);
                 let mut params = Vec::new();
                 for ty in &sig.params {
-                    match layout::slots(self.db, ty) {
+                    match layout::extern_slots(self.db, ty) {
                         Ok(count) => {
                             params.extend(std::iter::repeat_n(ValType::I64, count as usize))
                         }
                         Err(err) => return refuse(err),
                     }
                 }
-                let results = match layout::slots(self.db, &sig.ret) {
+                let results = match layout::extern_slots(self.db, &sig.ret) {
                     Ok(count) => vec![ValType::I64; count as usize],
                     Err(err) => return refuse(err),
                 };
@@ -776,12 +776,7 @@ impl<'db> Mono<'db> {
                                 ))
                             })?,
                         ProjElem::Index(_) => layout::element(self.db, &ty)?.0,
-                        ProjElem::Deref => {
-                            return Err(Unsupported::new(
-                                "a raw-pointer dereference (heap and pointer primitives \
-                                 are out of scope for this backend)",
-                            ));
-                        }
+                        ProjElem::Deref => layout::referent(&ty)?,
                     };
                 }
                 Ok(ty)
@@ -1043,6 +1038,9 @@ fn unify(
             unify(item, generics, a, b, out);
         }
         (Ty::RawPtr { pointee: a, .. }, Ty::RawPtr { pointee: b, .. }) => {
+            unify(item, generics, a, b, out);
+        }
+        (Ty::Borrow { referent: a, .. }, Ty::Borrow { referent: b, .. }) => {
             unify(item, generics, a, b, out);
         }
         (Ty::Fn(a), Ty::Fn(b)) if a.params.len() == b.params.len() => {

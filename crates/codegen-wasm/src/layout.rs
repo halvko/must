@@ -1,20 +1,24 @@
 //! Value layout: how a Must type occupies WebAssembly storage.
 //!
 //! **The slot model.** Every value is a flat sequence of `i64` *slots*.
-//! No linear memory, no shadow stack, no pointers: a record is its fields'
-//! slots end to end, an array is its elements' slots end to end, an enum
-//! is one tag slot followed by its payload columns. Function values occupy
-//! ZERO slots — monomorphization resolves every callee statically, so a fn
-//! value has nothing left to carry at runtime (that is what "dictionaries
-//! die into direct calls" means concretely).
+//! A record is its fields' slots end to end, an array is its elements'
+//! slots end to end, an enum is one tag slot followed by its payload
+//! columns. Function values occupy ZERO slots — monomorphization resolves
+//! every callee statically, so a fn value has nothing left to carry at
+//! runtime (that is what "dictionaries die into direct calls" means
+//! concretely). A safe borrow is ONE slot: the byte address of its
+//! referent in linear memory. A value lives in wasm locals unless its
+//! place is borrowed; then it lives in its function's shadow-stack frame
+//! (see `emit.rs`), laid out in exactly the same slots, 8 bytes apiece.
 //!
 //! **Uniform `i64` is deliberate, and unobservable.** Storage width is not
 //! semantics: what the language pins is the *operations* (`u8 + u8` traps
 //! outside `0..=255`, `i32 / i32` traps on `MIN / -1`), and those are
 //! right-sized in `emit.rs` regardless of how wide the slot holding them
 //! is. A `u8` lives zero-extended in an `i64` slot, an `i8`
-//! sign-extended. Nothing can observe the difference: no pointers, no
-//! `size_of`, no FFI in the supported subset.
+//! sign-extended. Nothing can observe the difference: safe code cannot
+//! turn a borrow into an integer, and there is no `size_of`, no raw
+//! pointer and no FFI in the supported subset.
 //!
 //! **Field order is MIR's canonical order — which for records means
 //! NAME-SORTED, not definition order (X14).** The definition-ordering
@@ -50,10 +54,26 @@ const MAX_TYPE_DEPTH: u32 = 64;
 
 /// How many `i64` slots a value of this type occupies.
 pub fn slots(db: &dyn Db, ty: &Ty) -> Layout<u32> {
-    slots_at(db, ty, 0)
+    slots_at(db, ty, 0, Side::Module)
 }
 
-fn slots_at(db: &dyn Db, ty: &Ty, depth: u32) -> Layout<u32> {
+/// [`slots`] for a type in an `extern` item's signature. A borrow anywhere
+/// in it is refused: the `extern` side would get a shadow-stack address it
+/// could keep past the call, or could hand back an address the loan check
+/// never saw.
+pub fn extern_slots(db: &dyn Db, ty: &Ty) -> Layout<u32> {
+    slots_at(db, ty, 0, Side::Extern)
+}
+
+/// Whether a type is laid out inside the module or in an `extern` item's
+/// signature.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Side {
+    Module,
+    Extern,
+}
+
+fn slots_at(db: &dyn Db, ty: &Ty, depth: u32, side: Side) -> Layout<u32> {
     if depth > MAX_TYPE_DEPTH {
         return Err(Unsupported::new("a recursive type"));
     }
@@ -69,33 +89,38 @@ fn slots_at(db: &dyn Db, ty: &Ty, depth: u32) -> Layout<u32> {
         Ty::Record(record) => {
             let mut total = 0;
             for (_, field) in &record.fields {
-                total += slots_at(db, field, depth + 1)?;
+                total += slots_at(db, field, depth + 1, side)?;
             }
             Ok(total)
         }
         Ty::Array { elem, len } => {
             let len = array_len(len)?;
-            let elem = slots_at(db, elem, depth + 1)?;
+            let elem = slots_at(db, elem, depth + 1, side)?;
             Ok(elem * len)
         }
         Ty::Named(_) => match nominal(db, ty)? {
             Nominal::Struct(fields) => {
                 let mut total = 0;
                 for (_, field) in &fields {
-                    total += slots_at(db, field, depth + 1)?;
+                    total += slots_at(db, field, depth + 1, side)?;
                 }
                 Ok(total)
             }
-            Nominal::Enum(variants) => Ok(enum_layout_at(db, &variants, depth)?.slots),
+            Nominal::Enum(variants) => Ok(enum_layout_at(db, &variants, depth, side)?.slots),
         },
         Ty::RawPtr { .. } => Err(Unsupported::new(
             "a raw pointer (heap and pointer primitives are out of scope for this backend)",
         )),
-        // Refused BY NAME rather than laid out like a raw pointer. The
-        // machine word is the same, but a borrow carries an aliasing
-        // contract this backend has no way to honor and no way to check —
-        // and the only thing worse than refusing is compiling it wrong.
-        Ty::Borrow { .. } => Err(Unsupported::new("a safe borrow (`.&` / `.&mut`)")),
+        // The referent's byte address. The aliasing contract is not this
+        // backend's to check: the static loan check is the fence (M14),
+        // and `mir::mir_checked` plants a trap wherever it refused.
+        Ty::Borrow { .. } => match side {
+            Side::Module => Ok(1),
+            Side::Extern => Err(Unsupported::new(
+                "a borrow (the callee could keep the address past the call, or \
+                 return one the loan check never saw)",
+            )),
+        },
         Ty::Param(param) => Err(Unsupported::new(format!(
             "a value of the unresolved type parameter `{}`",
             param.name
@@ -114,6 +139,23 @@ fn array_len(len: &ConstArgValue) -> Layout<u32> {
         }),
         other => Err(Unsupported::new(format!(
             "an array whose length `{}` is not a known number",
+            other.display()
+        ))),
+    }
+}
+
+/// What a `ProjElem::Deref` step lands on: a safe borrow's referent. A
+/// raw pointer stays refused — its validity is the interpreter's runtime
+/// check, which compiled code has no way to repeat.
+pub fn referent(ty: &Ty) -> Layout<Ty> {
+    match ty {
+        Ty::Borrow { referent, .. } => Ok((**referent).clone()),
+        Ty::RawPtr { .. } => Err(Unsupported::new(
+            "a raw-pointer dereference (heap and pointer primitives are out of scope \
+             for this backend)",
+        )),
+        other => Err(Unsupported::new(format!(
+            "dereferencing `{}`, which is not a borrow",
             other.display()
         ))),
     }
@@ -192,10 +234,15 @@ pub fn enum_layout(db: &dyn Db, ty: &Ty) -> Layout<EnumLayout> {
             ty.display()
         )));
     };
-    enum_layout_at(db, &variants, 0)
+    enum_layout_at(db, &variants, 0, Side::Module)
 }
 
-fn enum_layout_at(db: &dyn Db, variants: &[(String, Vec<Ty>)], depth: u32) -> Layout<EnumLayout> {
+fn enum_layout_at(
+    db: &dyn Db,
+    variants: &[(String, Vec<Ty>)],
+    depth: u32,
+    side: Side,
+) -> Layout<EnumLayout> {
     let arity = variants
         .iter()
         .map(|(_, payload)| payload.len())
@@ -208,7 +255,7 @@ fn enum_layout_at(db: &dyn Db, variants: &[(String, Vec<Ty>)], depth: u32) -> La
         let mut widest = 0;
         for (_, payload) in variants {
             if let Some(ty) = payload.get(position) {
-                widest = widest.max(slots_at(db, ty, depth + 1)?);
+                widest = widest.max(slots_at(db, ty, depth + 1, side)?);
             }
         }
         offset += widest;
@@ -265,7 +312,7 @@ pub fn field(db: &dyn Db, ty: &Ty, index: u32) -> Layout<FieldRead> {
             // has — the destination the read is bound to — rather than
             // guessing from the first variant that declares the position.
             Nominal::Enum(variants) => {
-                let layout = enum_layout_at(db, &variants, 0)?;
+                let layout = enum_layout_at(db, &variants, 0, Side::Module)?;
                 let offset = *layout.columns.get(position).ok_or_else(|| {
                     Unsupported::new(format!("payload element {position} of a value without one"))
                 })?;
@@ -397,7 +444,7 @@ fn eq_plan_into(db: &dyn Db, ty: &Ty, out: &mut Vec<EqSlot>, depth: u32) -> Layo
                         ty.display()
                     )));
                 }
-                let layout = enum_layout_at(db, &variants, depth)?;
+                let layout = enum_layout_at(db, &variants, depth, Side::Module)?;
                 for _ in 0..layout.slots {
                     out.push(EqSlot::Value);
                 }
@@ -440,4 +487,44 @@ pub fn substitute(ty: &Ty, item: &hir::ItemLoc, args: &[GenericArg]) -> Ty {
         return ty.clone();
     }
     hir::substitute_args(ty, item, args)
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use base_db::RootDatabase;
+    use hir::{ConstArgValue, IntKind, Region, Ty};
+
+    use super::*;
+
+    /// Inside the module a borrow is one slot; in an `extern` signature it
+    /// is refused, nested in a record or array as much as bare. Source
+    /// cannot write one there yet (a signature names its regions, and an
+    /// `extern` item cannot bind any), so this pins the layout rule.
+    #[test]
+    fn a_borrow_is_refused_in_an_extern_signature_at_any_depth() {
+        let db = RootDatabase::default();
+        let borrow = Ty::Borrow {
+            mutable: false,
+            region: Region::Erased,
+            referent: Arc::new(Ty::Int(IntKind::I64)),
+        };
+        let refused = Err(Unsupported::new(
+            "a borrow (the callee could keep the address past the call, or return one \
+             the loan check never saw)",
+        ));
+        for ty in [
+            borrow.clone(),
+            Ty::record(vec![("at".to_owned(), borrow.clone())]),
+            Ty::Array {
+                elem: Arc::new(borrow.clone()),
+                len: ConstArgValue::Int(2),
+            },
+        ] {
+            assert!(slots(&db, &ty).is_ok(), "{}", ty.display());
+            assert_eq!(extern_slots(&db, &ty), refused, "{}", ty.display());
+        }
+        assert_eq!(extern_slots(&db, &Ty::Int(IntKind::I64)), Ok(1));
+    }
 }

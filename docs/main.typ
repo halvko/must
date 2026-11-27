@@ -1806,10 +1806,8 @@ payload binding writes the value it was matched from. See
 `examples/match_projection.must`, which runs.
 
 Also not yet supported: regions on type declarations (`struct::<@a, T>`),
-implied bounds, elision in a *signature* (call sites already elide every
-region), and compiling a program that uses safe borrows to wasm — the
-backend refuses those by name rather than dropping the contract silently.
-See `examples/borrows.must`.
+implied bounds, and elision in a *signature* (call sites already elide every
+region).
 
 == Values that must be consumed
 
@@ -2650,10 +2648,11 @@ Every example whose `main` needs a heap-allocated buffer refuses for the
 same reason, though not always at the same call: `examples/stdin_lib.must`'s
 reader stops at `alloc_array` itself, while `examples/string_lib.must`'s
 `main` calls `s.len()` directly and stops there first, before ever reaching
-its own `alloc_array` call. A safe borrow is refused by name too, and
-deliberately not folded into the raw-pointer refusal: a borrow lowers to the
-same machine word, so this backend could emit something that runs while
-silently dropping the exclusivity contract. `read_line` has no wasm import
+its own `alloc_array` call. Safe borrows do compile: a borrowed local lives
+in its function's frame on a shadow stack in linear memory, a borrow is its
+address, and the loan checker's verdict is all the exclusivity there is to
+enforce, so `examples/borrows.must`, `examples/reborrow.must` and
+`examples/match_projection.must` run compiled. `read_line` has no wasm import
 yet either, so `examples/stdin.must` refuses by name — and so does
 `examples/chars.must`, which reads a line before it walks it. `next_char`
 has no wasm story either and refuses by name in its turn. Characters

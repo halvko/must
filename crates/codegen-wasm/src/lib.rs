@@ -4,7 +4,9 @@
 //! unwinder, no scheduler and no support library. What it does have is
 //! exactly what the three-layer platform model (P01) permits: platform
 //! *imports* for effects (`print`), data segments for string literals and
-//! const-baked statics, and `unreachable` for traps. The module IS a
+//! const-baked statics, a shadow stack for locals that are borrowed (a
+//! global and the memory past the read-only data; see `emit.rs`), and
+//! `unreachable` for traps. The module IS a
 //! platform instance: it exports `main`, and the host supplies the
 //! effects.
 //!
@@ -83,6 +85,10 @@ pub enum TrapKind {
     /// A block MIR marked unreachable was entered: a compiler bug if it
     /// ever fires.
     Internal,
+    /// The shadow stack outgrew the memory the engine would give it. The
+    /// interpreter's limit is a frame count instead, so the two sides give
+    /// up at different depths (see the harness's known gaps).
+    StackOverflow,
 }
 
 #[derive(Debug, Clone)]
@@ -118,16 +124,18 @@ impl CompileError {
     }
 }
 
-/// The module's string data: every literal, interned by content, laid out
-/// in one data segment. Two identical literals share bytes; nothing is
-/// ever written to this memory at runtime.
+/// The module's read-only data: every string literal, interned by content,
+/// and the baked value of every borrowed `static`, laid out in one data
+/// segment. Two identical literals share bytes; nothing is ever written to
+/// this memory at runtime.
 #[derive(Debug, Default)]
-pub struct Strings {
+pub struct ReadOnlyData {
     data: Vec<u8>,
     offsets: FxHashMap<String, u32>,
+    statics: FxHashMap<ItemLoc, u32>,
 }
 
-impl Strings {
+impl ReadOnlyData {
     /// Returns `(offset, length)` — the two slots a `str` value occupies.
     pub fn intern(&mut self, text: &str) -> (u32, u32) {
         let len = text.len() as u32;
@@ -138,6 +146,24 @@ impl Strings {
         self.data.extend_from_slice(text.as_bytes());
         self.offsets.insert(text.to_owned(), offset);
         (offset, len)
+    }
+
+    /// Where a borrowed static's value was placed, if it has been.
+    pub fn static_offset(&self, item: &ItemLoc) -> Option<u32> {
+        self.statics.get(item).copied()
+    }
+
+    /// Place a static's value — its slots, 8 bytes apiece, 8-aligned —
+    /// and answer its address.
+    pub fn place_static(&mut self, item: &ItemLoc, slots: &[i64]) -> u32 {
+        let offset = self.data.len().next_multiple_of(8);
+        self.data.resize(offset, 0);
+        for slot in slots {
+            self.data.extend_from_slice(&slot.to_le_bytes());
+        }
+        let offset = offset as u32;
+        self.statics.insert(item.clone(), offset);
+        offset
     }
 }
 
@@ -162,6 +188,8 @@ pub enum TrapKey {
     /// A `panic` whose message is computed at runtime.
     PanicRuntime,
     Unreachable,
+    /// The shadow stack outgrew the memory the engine would give it.
+    StackOverflow,
 }
 
 impl TrapKey {
@@ -204,6 +232,12 @@ impl TrapKey {
                 TrapKind::Internal,
                 "entered an unreachable block".to_owned(),
                 true,
+                String::new(),
+            ),
+            TrapKey::StackOverflow => (
+                TrapKind::StackOverflow,
+                "stack overflow".to_owned(),
+                false,
                 String::new(),
             ),
         };
@@ -405,6 +439,7 @@ pub fn compile(db: &dyn Db, entry: &ItemLoc) -> Result<Artifact, CompileError> {
     // `platform-codegen-and-tooling.md`) — not something a user-written
     // signature can spell today.
     let extern_imports = collect_extern_imports(&mut mono, &mut module)?;
+    let order = mono.order.clone();
     let str_eq_ty = module.func_type(
         vec![ValType::I64, ValType::I64, ValType::I64, ValType::I64],
         vec![ValType::I64],
@@ -414,18 +449,28 @@ pub fn compile(db: &dyn Db, entry: &ItemLoc) -> Result<Artifact, CompileError> {
     // Where a runtime-computed `panic` message lives when one fires.
     let panic_offset = module.global(ValType::I64, true, 0);
     let panic_len = module.global(ValType::I64, true, 0);
+    // The shadow stack exists only when some reachable body borrows a
+    // local. Its start is set once the read-only data's size is known.
+    let borrowed: Vec<Vec<bool>> = order
+        .iter()
+        .map(|key| {
+            let lowered = mir::mir_checked(db, key.func.value.item.to_id(db));
+            emit::borrowed_locals(&lowered.bodies[key.func.value.body])
+        })
+        .collect();
+    let needs_stack = borrowed.iter().flatten().any(|&b| b);
+    let stack_pointer = needs_stack.then(|| module.global(ValType::I64, true, 0));
 
-    let mut strings = Strings::default();
+    let mut rodata = ReadOnlyData::default();
     let mut traps = Traps::default();
     let mut func_indices = Vec::with_capacity(mono.order.len());
 
     // Two passes: every function index must exist before any body that
     // calls it is written.
-    let order = mono.order.clone();
     {
         let mut emitter = emit::Emitter {
             mono: &mut mono,
-            strings: &mut strings,
+            rodata: &mut rodata,
             traps: &mut traps,
             print,
             str_eq,
@@ -433,6 +478,8 @@ pub fn compile(db: &dyn Db, entry: &ItemLoc) -> Result<Artifact, CompileError> {
             panic_offset,
             panic_len,
             func_indices: &[],
+            stack_pointer,
+            borrowed: &borrowed,
             extern_imports: &extern_imports,
         };
         let mut signatures = Vec::with_capacity(order.len());
@@ -448,7 +495,7 @@ pub fn compile(db: &dyn Db, entry: &ItemLoc) -> Result<Artifact, CompileError> {
     let entry_results = {
         let mut emitter = emit::Emitter {
             mono: &mut mono,
-            strings: &mut strings,
+            rodata: &mut rodata,
             traps: &mut traps,
             print,
             str_eq,
@@ -456,11 +503,17 @@ pub fn compile(db: &dyn Db, entry: &ItemLoc) -> Result<Artifact, CompileError> {
             panic_offset,
             panic_len,
             func_indices: &func_indices,
+            stack_pointer,
+            borrowed: &borrowed,
             extern_imports: &extern_imports,
         };
         let mut bodies = Vec::with_capacity(order.len());
-        for key in &order {
-            bodies.push(emitter.emit(key).map_err(CompileError::Unsupported)?);
+        for (index, key) in order.iter().enumerate() {
+            bodies.push(
+                emitter
+                    .emit(key, index)
+                    .map_err(CompileError::Unsupported)?,
+            );
         }
         for (index, body) in func_indices.iter().zip(bodies) {
             module.set_body(*index, body);
@@ -474,12 +527,16 @@ pub fn compile(db: &dyn Db, entry: &ItemLoc) -> Result<Artifact, CompileError> {
 
     module.set_body(str_eq, emit::str_eq_body());
 
-    // One page holds 64KiB of string data; grow only if a program needs
-    // more. Nothing else ever touches memory.
-    let pages = (strings.data.len() as u32).div_ceil(65_536).max(1);
+    // One page holds 64KiB of read-only data; grow only if a program needs
+    // more. The shadow stack starts at the next 8-byte boundary past it,
+    // and its prologues grow memory as frames need it.
+    let pages = (rodata.data.len() as u32).div_ceil(65_536).max(1);
+    if let Some(sp) = stack_pointer {
+        module.set_global_init(sp, rodata.data.len().next_multiple_of(8) as i64);
+    }
     module.memory(pages);
-    if !strings.data.is_empty() {
-        module.data_segment(0, strings.data.clone());
+    if !rodata.data.is_empty() {
+        module.data_segment(0, rodata.data.clone());
     }
     module.export("memory", ExportKind::Memory, 0);
     module.export("trap_code", ExportKind::Global, trap_global);
@@ -509,6 +566,7 @@ fn encode_traps(entries: &[TrapInfo]) -> Vec<u8> {
             TrapKind::IndexOutOfBounds => 3,
             TrapKind::Diagnostic => 4,
             TrapKind::Internal => 5,
+            TrapKind::StackOverflow => 6,
         });
         out.push(u8::from(entry.exact));
         wasm::uleb(&mut out, entry.message.len() as u64);
@@ -569,6 +627,8 @@ mod tests {
         );
         assert_eq!(traps.intern_key(TrapKey::IndexDynamic { len: 3 }), 6);
         assert_eq!(traps.intern_key(TrapKey::IndexDynamic { len: 4 }), 10);
+        assert_eq!(traps.intern_key(TrapKey::StackOverflow), 11);
+        assert_eq!(traps.intern_key(TrapKey::StackOverflow), 11);
 
         let runtime_panic =
             "the message is computed at runtime; read it from the `panic_message` globals";
@@ -616,6 +676,7 @@ mod tests {
                     false,
                     "",
                 ),
+                (TrapKind::StackOverflow, "stack overflow", false, ""),
             ]
         );
     }
