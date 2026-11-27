@@ -1881,9 +1881,12 @@ static main = fn {
             Utf8Result::Ok EnumMember (Ok(str))
             add Function (unsafe fn::<T>(T.&raw, usize) -> T.&raw)
             alloc_array Function (fn::<T>(usize) -> AllocResult::<T>)
+            check_index Function (fn(usize))
             copy Function (unsafe fn::<T>(T.&raw, T.&raw, usize))
             dangling Function (fn::<T>() -> T.&raw)
             dealloc_array Function (unsafe fn::<T>(T.&raw, usize))
+            index Function (fn([T; N].&::<@a>, usize) -> T.&::<@a>)
+            index_mut Function (fn([T; N].&mut::<@a>, usize) -> T.&mut::<@a>)
             offset Function (unsafe fn::<T>(T.&raw, isize) -> T.&raw)
             print Function (fn(str))
             read_line Function (fn() -> ReadLineResult)
@@ -3115,9 +3118,12 @@ static main = fn {
             Utf8Result::Ok EnumMember (Ok(str))
             add Function (unsafe fn::<T>(T.&raw, usize) -> T.&raw)
             alloc_array Function (fn::<T>(usize) -> AllocResult::<T>)
+            check_index Function (fn(usize))
             copy Function (unsafe fn::<T>(T.&raw, T.&raw, usize))
             dangling Function (fn::<T>() -> T.&raw)
             dealloc_array Function (unsafe fn::<T>(T.&raw, usize))
+            index Function (fn([T; N].&::<@a>, usize) -> T.&::<@a>)
+            index_mut Function (fn([T; N].&mut::<@a>, usize) -> T.&mut::<@a>)
             offset Function (unsafe fn::<T>(T.&raw, isize) -> T.&raw)
             panic Function (fn(str) -> !)
             print Function (fn(str))
@@ -4380,9 +4386,12 @@ static f = fn (s: Shape) {
             Utf8Result::Ok EnumMember (Ok(str))
             add Function (unsafe fn::<T>(T.&raw, usize) -> T.&raw)
             alloc_array Function (fn::<T>(usize) -> AllocResult::<T>)
+            check_index Function (fn(usize))
             copy Function (unsafe fn::<T>(T.&raw, T.&raw, usize))
             dangling Function (fn::<T>() -> T.&raw)
             dealloc_array Function (unsafe fn::<T>(T.&raw, usize))
+            index Function (fn([T; N].&::<@a>, usize) -> T.&::<@a>)
+            index_mut Function (fn([T; N].&mut::<@a>, usize) -> T.&mut::<@a>)
             offset Function (unsafe fn::<T>(T.&raw, isize) -> T.&raw)
             panic Function (fn(str) -> !)
             print Function (fn(str))
@@ -4787,9 +4796,12 @@ fn completions_match_scrutinee_does_not_suppress_the_normal_set() {
             Utf8Result::Ok EnumMember (Ok(str))
             add Function (unsafe fn::<T>(T.&raw, usize) -> T.&raw)
             alloc_array Function (fn::<T>(usize) -> AllocResult::<T>)
+            check_index Function (fn(usize))
             copy Function (unsafe fn::<T>(T.&raw, T.&raw, usize))
             dangling Function (fn::<T>() -> T.&raw)
             dealloc_array Function (unsafe fn::<T>(T.&raw, usize))
+            index Function (fn([T; N].&::<@a>, usize) -> T.&::<@a>)
+            index_mut Function (fn([T; N].&mut::<@a>, usize) -> T.&mut::<@a>)
             offset Function (unsafe fn::<T>(T.&raw, isize) -> T.&raw)
             panic Function (fn(str) -> !)
             print Function (fn(str))
@@ -7393,4 +7405,28 @@ static main = fn { g(h, 1); };
 "#,
         );
     }
+}
+
+#[test]
+fn the_prelude_has_no_diagnostics() {
+    let host = AnalysisHost::new();
+    let analysis = host.snapshot();
+    let prelude = base_db::prelude_file(&analysis.db);
+    assert_eq!(analysis.diagnostics(prelude), Vec::new());
+}
+
+#[test]
+fn diagnostics_report_an_index_out_of_bounds_in_a_const_context() {
+    // `a[i]` calls the prelude's `index`, a const fn, so a const context
+    // may index, and an index out of range there is a compile error.
+    let src = r#"static pick = const fn (a: [usize; 3], i: usize) -> usize { a[i] };
+static bad: usize = pick([7, 8, 9], 3);"#;
+    let (analysis, file, _pos) = fixture(&format!("{src}$0"));
+    let diagnostics = analysis.diagnostics(file);
+    assert_eq!(diagnostics.len(), 1, "diagnostics: {diagnostics:?}");
+    assert_eq!(
+        diagnostics[0].message,
+        "constant evaluation panicked: index out of bounds: the length is 3 but the index is 3"
+    );
+    assert_eq!(&src[diagnostics[0].range], "a[i]");
 }

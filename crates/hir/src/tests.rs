@@ -8750,9 +8750,10 @@ fn every_builtin_answers_its_properties() {
     // dot-call via `InferenceResult::builtin_of_call`, unsafe_check's
     // named and dot-call arms alike — ends at `Builtin::const_legality`
     // / `Builtin::requires_unsafe`, and none of them names a builtin.
-    const ALL: [Builtin; 14] = [
+    const ALL: [Builtin; 15] = [
         Builtin::Print,
         Builtin::Panic,
+        Builtin::IndexOutOfBounds,
         Builtin::AllocArray,
         Builtin::DeallocArray,
         Builtin::Add,
@@ -8781,9 +8782,11 @@ fn every_builtin_answers_its_properties() {
             // Pure and safe: `panic` is the one effect const contexts
             // allow, `dangling` only names an address, and the two `str`
             // MEMBERS read what the receiver already holds.
-            Builtin::Panic | Builtin::Dangling | Builtin::NextChar | Builtin::StrLen => {
-                (ConstLegality::Legal, false)
-            }
+            Builtin::Panic
+            | Builtin::IndexOutOfBounds
+            | Builtin::Dangling
+            | Builtin::NextChar
+            | Builtin::StrLen => (ConstLegality::Legal, false),
             // Const-legal AND unsafe — the two properties are orthogonal:
             // pointer arithmetic and range reads and writes carry
             // preconditions nothing checks, but const evaluation detects
@@ -20131,5 +20134,26 @@ static e = fn (p: Nope) -> usize { p.*.w::<const { nope }> };
             19..23: unknown type `Nope`
             52..56: unresolved name `nope`
         "#]],
+    );
+}
+
+#[test]
+fn a_non_copyable_element_cannot_be_read_out_of_an_array() {
+    // `a[i]` is `index(a.&, i).*`, so reading an element out copies it out
+    // of a borrow, as `r.*` does: refused for a `usize.&mut` element. A
+    // place position projects instead, and copyable elements read fine.
+    check_diagnostics(
+        "static f = fn::<@a>(a: [usize.&mut::<@a>; 2]) -> () { let e = a[0]; };",
+        expect![[r#"
+            62..66: cannot move out of a borrow: `usize.&mut::<@a>` cannot be copied
+        "#]],
+    );
+    check_diagnostics(
+        "static f = fn::<@a>(a: [usize.&mut::<@a>; 2]) -> usize { a[0].* };",
+        expect![[r#""#]],
+    );
+    check_diagnostics(
+        "static f = fn (a: [struct { x: usize }; 2]) -> usize { a[1].x };",
+        expect![[r#""#]],
     );
 }
