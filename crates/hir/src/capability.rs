@@ -155,6 +155,25 @@ pub fn no_forget_reason(db: &dyn Db, ty: &Ty) -> Option<String> {
     Some(format!("{}, reached {}", root.sentence, path.join(", ")))
 }
 
+/// Why a value must be consumed: its type itself says so, or a rigid
+/// parameter in it might be such a type.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum MustConsume {
+    /// A declaration (or the built-in type) is the root.
+    Declared,
+    /// The rigid parameter at the root (see [`blaming_param`]).
+    Param(std::sync::Arc<str>),
+}
+
+/// Whether a value of `ty` must be consumed rather than skipped (by `_` or
+/// `..`), and why; `None` when it may be forgotten.
+pub fn must_consume(db: &dyn Db, ty: &Ty) -> Option<MustConsume> {
+    if has_forget(db, ty) {
+        return None;
+    }
+    Some(blaming_param(db, ty).map_or(MustConsume::Declared, MustConsume::Param))
+}
+
 /// The rigid PARAMETER at the root of `ty`'s obligation, when a binder is
 /// what put it there — directly (`t: T`) or through containment
 /// (`b: Box::<T>`, linear only because its payload might be). `None` when

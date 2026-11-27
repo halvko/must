@@ -241,18 +241,40 @@ fn fix_of(text: &str) -> Option<syntax::Fix> {
     diagnostics[0].fix.clone()
 }
 
-/// The program `text` becomes once the fix labelled `label` on its only
-/// diagnostic is applied.
-fn apply_fix(text: &str, label: &str) -> String {
-    let fix = fix_of(text).expect("diagnostic has a fix");
-    assert_eq!(fix.label, label);
-    let mut edits = fix.edits;
+/// The fixes on all of `text`'s diagnostics.
+fn fixes_of(text: &str) -> Vec<syntax::Fix> {
+    let db = RootDatabase::default();
+    let file = SourceFile::new(&db, "test.must".to_owned(), text.to_owned());
+    (crate::file_diagnostics(&db, file).into_iter())
+        .filter_map(|d| d.fix)
+        .collect()
+}
+
+/// `text` with `edits` applied.
+fn apply_edits(text: &str, mut edits: Vec<syntax::TextEdit>) -> String {
     edits.sort_by_key(|edit| std::cmp::Reverse(edit.range.start()));
     let mut fixed = text.to_owned();
     for edit in edits {
         fixed.replace_range(std::ops::Range::<usize>::from(edit.range), &edit.insert);
     }
     fixed
+}
+
+/// The program `text` becomes once the fix labelled `label` on its only
+/// diagnostic is applied.
+fn apply_fix(text: &str, label: &str) -> String {
+    let fix = fix_of(text).expect("diagnostic has a fix");
+    assert_eq!(fix.label, label);
+    apply_edits(text, fix.edits)
+}
+
+/// The program `text` becomes once the fix labelled `label`, on whichever
+/// of its diagnostics carries it, is applied.
+fn apply_fix_among(text: &str, label: &str) -> String {
+    let fix = (fixes_of(text).into_iter())
+        .find(|fix| fix.label == label)
+        .unwrap_or_else(|| panic!("no fix labelled {label:?} in {:?}", fixes_of(text)));
+    apply_edits(text, fix.edits)
 }
 
 // ---- `unsafe fn` — unsafety lives in the function type ------------------
