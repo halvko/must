@@ -169,7 +169,8 @@ pub struct CompletionItem {
     /// it in a space when it heads a `match` or `if`.
     pub(crate) whole_expr: bool,
     /// Edits elsewhere in the file that come with the candidate: a fresh
-    /// region's declaration in its binder ([`borrow_region_items`]).
+    /// region's declaration in its binder ([`borrow_region_items`]), or the
+    /// `use` items a missing member's stub needs.
     pub additional_edits: Vec<crate::TextEdit>,
 }
 
@@ -555,6 +556,11 @@ enum Context {
     /// would see. Reaching for that scope from the *cursor* instead would
     /// mean climbing out of a hole with no registered expression in it.
     MatchScrutinee { match_start: TextSize },
+    /// A member name being typed in a trait impl's body (`impl usize {
+    /// o˽ }`), nothing after it yet. Carries the impl's start (its `impl`
+    /// keyword), which sits before the cursor and so back-maps to the real
+    /// tree.
+    ImplMember { impl_start: TextSize },
 }
 
 pub(crate) fn completions(
@@ -729,6 +735,9 @@ pub(crate) fn completions(
             expected_ty,
             true,
         ),
+        Some(Context::ImplMember { impl_start }) => {
+            impl_member_items(db, file, impl_start, edit_range)
+        }
         None => Vec::new(),
     };
     if opens_block {
@@ -967,6 +976,23 @@ fn classify(parent: &SyntaxNode) -> Option<Context> {
         });
     }
 
+    // A member name alone in an impl body: the member has no `=` or `:`
+    // yet, so the whole member is still to be written.
+    if let Some(name) = ast::Name::cast(parent.clone())
+        && let Some(member) = name.syntax().parent().and_then(ast::Member::cast)
+        && let Some(element) = member.syntax().parent().and_then(ast::ImplElement::cast)
+        && member
+            .syntax()
+            .children_with_tokens()
+            .filter(|child| !child.kind().is_trivia())
+            .count()
+            == 1
+    {
+        return Some(Context::ImplMember {
+            impl_start: element.syntax().text_range().start(),
+        });
+    }
+
     let name_ref = ast::NameRef::cast(parent.clone())?;
     let grandparent = name_ref.syntax().parent()?;
 
@@ -1124,6 +1150,34 @@ fn after_braced_item(error: &SyntaxNode) -> Option<Context> {
         ceiling_open,
         same_line,
     })
+}
+
+/// The requirements a trait impl has not implemented yet, each inserting
+/// the stub's head, `name = fn(a: T) -> R ` (or `name = ` when it cannot
+/// be spelled), with the `use` items its names need. It stops before the
+/// body's `{`, which the user types so the editor pairs it.
+fn impl_member_items(
+    db: &RootDatabase,
+    file: SourceFile,
+    impl_start: TextSize,
+    edit_range: TextRange,
+) -> Vec<CompletionItem> {
+    hir::missing_member_stubs(db, file, impl_start)
+        .into_iter()
+        .map(|stub| {
+            let mut item = completion_item(
+                &stub.name,
+                CompletionItemKind::Function,
+                Provenance::Gold,
+                TYPE_TIER_NONE,
+                Some(stub.requirement.clone()),
+                edit_range,
+            );
+            item.text_edit.insert = InsertText::Plain(format!("{} ", stub.head));
+            item.additional_edits.extend(stub.imports);
+            item
+        })
+        .collect()
 }
 
 /// Whether `node` sits inside a `loop` body without crossing a fn-literal

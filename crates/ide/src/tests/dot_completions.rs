@@ -11,7 +11,11 @@ fn is_refused(item: &crate::CompletionItem) -> bool {
 /// Applies the `label` completion's edit to the fixture, its snippet
 /// spelling when it has one, and renders the line the cursor was on plus
 /// the item's filter text.
-fn check_completion_applied(fixture_text: &str, label: &str, expect: expect_test::Expect) {
+pub(super) fn check_completion_applied(
+    fixture_text: &str,
+    label: &str,
+    expect: expect_test::Expect,
+) {
     let (analysis, file, pos) = fixture(fixture_text);
     let items = analysis.completions(pos);
     let item = items

@@ -2125,3 +2125,227 @@ static f = fn {
         "#]],
     );
 }
+
+// ---- trait impl members ----
+
+/// Inside a trait impl's body, the members it still lacks are offered by
+/// name; the member already written is not.
+#[test]
+fn impl_body_offers_missing_members() {
+    check_completions(
+        r#"
+type Cmp = enum { Less, Equal, Greater };
+trait Ord = requires {
+    ord: fn::<@a>(Self.&::<@a>, Self.&::<@a>) -> Cmp;
+    min: fn::<@a>(Self.&::<@a>, Self.&::<@a>) -> Self.&::<@a>;
+    max: fn::<@a>(Self.&::<@a>, Self.&::<@a>) -> Self.&::<@a>;
+} with {
+    impl usize {
+        max = fn::<@a>(a: Self.&::<@a>, _b: Self.&::<@a>) -> Self.&::<@a> { a };
+        o$0
+    }
+};
+"#,
+        expect_test::expect![[r#"
+            min Function (fn::<@a>(Self.&::<@a>, Self.&::<@a>) -> Self.&::<@a>)
+            ord Function (fn::<@a>(Self.&::<@a>, Self.&::<@a>) -> Cmp)
+        "#]],
+    );
+}
+
+/// Accepting a missing member writes it up to its body and stops before
+/// the `{`, which the user types.
+#[test]
+fn impl_member_completion_stops_before_the_body() {
+    super::dot_completions::check_completion_applied(
+        r#"
+type Cmp = enum { Less, Equal, Greater };
+trait Ord = requires {
+    ord: fn::<@a>(Self.&::<@a>, Self.&::<@a>) -> Cmp;
+} with {
+    impl usize {
+        o$0
+    }
+};
+"#,
+        "ord",
+        expect_test::expect![[r#"
+            ord = fn::<@a>(a: Self.&::<@a>, b: Self.&::<@a>) -> Cmp
+            filter: ord
+        "#]],
+    );
+}
+
+/// A missing member of a trait from another module brings the `use` items
+/// its stub's names need as an edit at the top of the file.
+#[test]
+fn impl_member_completion_imports_what_the_stub_names() {
+    let mut db = crate::RootDatabase::default();
+    let files = base_db::fixture_files(
+        r#"
+//- a.must
+type Cmp = enum { Less, Equal, Greater };
+trait Ord = requires { ord: fn(Self, Self) -> Cmp; };
+//- b.must
+use a::Ord;
+type P = struct { x: usize } with {
+    impl Ord {
+        o
+    }
+};
+"#,
+    );
+    let library = base_db::new_library(&mut db, "", files);
+    let file = library[1];
+    let analysis = crate::Analysis::new(db);
+    let offset = analysis.file_text(file).find("o\n").expect("the cursor");
+    let items = analysis.completions(FilePosition {
+        file,
+        offset: TextSize::new(offset as u32 + 1),
+    });
+    let item = items
+        .iter()
+        .find(|c| c.label == "ord")
+        .unwrap_or_else(|| panic!("no completion labeled \"ord\": {items:?}"));
+    expect_test::expect![[r#"
+        (
+            Plain(
+                "ord = fn(a: Self, b: Self) -> Cmp ",
+            ),
+            [
+                TextEdit {
+                    range: 0..0,
+                    insert: "use a::Cmp;\n",
+                },
+            ],
+        )
+    "#]]
+    .assert_debug_eq(&(&item.text_edit.insert, &item.additional_edits));
+}
+
+/// A trait impl in a type's own chain offers its missing members.
+#[test]
+fn impl_member_completion_in_a_type_chain() {
+    check_has_completion(
+        r#"
+trait Show = requires { show: fn(Self) -> usize; };
+type P = struct { a: usize } with {
+    impl Show {
+        s$0
+    }
+};
+"#,
+        "show",
+    );
+}
+
+/// An inherent impl offers no trait's members.
+#[test]
+fn impl_member_completion_not_in_an_inherent_impl() {
+    check_no_completion(
+        r#"
+trait Show = requires { show: fn(Self) -> usize; };
+type P = struct { a: usize } with {
+    impl Self {
+        s$0
+    }
+};
+"#,
+        "show",
+    );
+}
+
+/// A member that already has its `=` gets no member completion.
+#[test]
+fn impl_member_completion_not_for_a_member_with_its_value() {
+    check_no_completion(
+        r#"
+trait Show = requires { show: fn(Self) -> usize; };
+type P = struct { a: usize } with {
+    impl Show {
+        s$0 = fn(x: Self) -> usize { 1 };
+    }
+};
+"#,
+        "show",
+    );
+}
+
+/// A member the impl already implements is not offered again.
+#[test]
+fn impl_member_completion_skips_an_implemented_member() {
+    check_no_completion(
+        r#"
+trait Show = requires { show: fn(Self) -> usize; size: fn(Self) -> usize; };
+type P = struct { a: usize } with {
+    impl Show {
+        show = fn(x: Self) -> usize { 1 };
+        s$0
+    }
+};
+"#,
+        "show",
+    );
+}
+
+/// A member's whole name typed, with no `=` yet, is still offered.
+#[test]
+fn impl_member_completion_offers_a_fully_typed_name() {
+    check_has_completion(
+        r#"
+trait Show = requires { show: fn(Self) -> usize; };
+type P = struct { a: usize } with {
+    impl Show {
+        show$0
+    }
+};
+"#,
+        "show",
+    );
+}
+
+/// A requirement the impl's file cannot spell (its own `Cmp` takes the
+/// name) is offered as `name = `, with nothing imported.
+#[test]
+fn impl_member_completion_writes_just_the_name_when_the_stub_cannot_be_spelled() {
+    let mut db = crate::RootDatabase::default();
+    let files = base_db::fixture_files(
+        r#"
+//- a.must
+type Cmp = enum { Less, Equal, Greater };
+trait Ord = requires { ord: fn(Self, Self) -> Cmp; };
+//- b.must
+use a::Ord;
+type Cmp = struct {};
+type P = struct { x: usize } with {
+    impl Ord {
+        o
+    }
+};
+"#,
+    );
+    let library = base_db::new_library(&mut db, "", files);
+    let file = library[1];
+    let analysis = crate::Analysis::new(db);
+    let offset = analysis.file_text(file).find("o\n").expect("the cursor");
+    let items = analysis.completions(FilePosition {
+        file,
+        offset: TextSize::new(offset as u32 + 1),
+    });
+    let item = items
+        .iter()
+        .find(|c| c.label == "ord")
+        .unwrap_or_else(|| panic!("no completion labeled \"ord\": {items:?}"));
+    expect_test::expect![[r#"
+        (
+            Plain(
+                "ord = ",
+            ),
+            [],
+            Some(
+                "fn(Self, Self) -> Cmp",
+            ),
+        )
+    "#]]
+    .assert_debug_eq(&(&item.text_edit.insert, &item.additional_edits, &item.detail));
+}
