@@ -116,3 +116,22 @@ type Counter = struct { n: usize } with {
     }
 };
 "#;
+
+fn apply_fix(text: &str, fix: &crate::Fix) -> String {
+    let mut edits: Vec<_> = fix.edits.iter().map(|it| it.edit.clone()).collect();
+    edits.sort_by_key(|edit| edit.range.start());
+    let mut fixed = text.to_owned();
+    for edit in edits.iter().rev() {
+        fixed.replace_range(std::ops::Range::<usize>::from(edit.range), &edit.insert);
+    }
+    fixed
+}
+
+fn diagnostic_messages(text: &str) -> Vec<String> {
+    let (analysis, file, _) = fixture(&format!("{}$0", text.replace("$0", "")));
+    analysis
+        .diagnostics(file)
+        .into_iter()
+        .map(|it| it.message)
+        .collect()
+}

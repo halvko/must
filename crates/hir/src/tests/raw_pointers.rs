@@ -178,6 +178,97 @@ fn deref_outside_unsafe_errors() {
 }
 
 #[test]
+fn an_operation_outside_unsafe_offers_the_block() {
+    // A block's tail is wrapped as it stands.
+    let fixed = apply_fix(
+        "static main = fn(p: usize.&raw) -> usize { p.* };",
+        "Wrap in `unsafe { }`",
+    );
+    assert!(fixed.contains("{ unsafe { p.* } }"), "fixed: {fixed}");
+    check_diagnostics(&fixed, expect![[r#""#]]);
+    // A write wraps its whole statement: wrapping the place alone would
+    // make it a value.
+    let fixed = apply_fix(
+        "static main = fn(p: struct { a: usize }.&raw) { p.*.a = 2; };",
+        "Wrap in `unsafe { }`",
+    );
+    assert!(
+        fixed.contains("{ unsafe { p.*.a = 2; } }"),
+        "fixed: {fixed}"
+    );
+    check_diagnostics(&fixed, expect![[r#""#]]);
+    // An operand is wrapped alone, not the expression around it.
+    let fixed = apply_fix(
+        "static main = fn(p: usize.&raw) -> usize { let x = p.* + 1; x };",
+        "Wrap in `unsafe { }`",
+    );
+    assert!(
+        fixed.contains("let x = unsafe { p.* } + 1;"),
+        "fixed: {fixed}"
+    );
+    check_diagnostics(&fixed, expect![[r#""#]]);
+    // A place read is wrapped whole, so only the field is copied out.
+    let fixed = apply_fix(
+        "static main = fn(p: struct { a: usize }.&raw) -> usize { p.*.a + 1 };",
+        "Wrap in `unsafe { }`",
+    );
+    assert!(fixed.contains("{ unsafe { p.*.a } + 1 }"), "fixed: {fixed}");
+    check_diagnostics(&fixed, expect![[r#""#]]);
+    // A call is wrapped as an expression; its statement keeps its `;`.
+    let fixed = apply_fix(
+        r#"
+static f = fn (p: usize.&raw) {
+    dealloc_array(p, 1);
+};
+"#,
+        "Wrap in `unsafe { }`",
+    );
+    assert!(
+        fixed.contains("    unsafe { dealloc_array(p, 1) };\n"),
+        "fixed: {fixed}"
+    );
+    check_diagnostics(&fixed, expect![[r#""#]]);
+}
+
+#[test]
+fn the_unsafe_wrap_never_swallows_the_branches_around_the_operation() {
+    // Wrapping the whole `if` would vouch for both branches too.
+    let fixed = apply_fix(
+        "static main = fn(p: usize.&raw) -> usize { if p.* == 0 { 1 } else { 2 } };",
+        "Wrap in `unsafe { }`",
+    );
+    assert!(
+        fixed.contains("{ if unsafe { p.* } == 0 { 1 } else { 2 } }"),
+        "fixed: {fixed}"
+    );
+    check_diagnostics(&fixed, expect![[r#""#]]);
+    let fixed = apply_fix(
+        "static main = fn(p: usize.&raw) -> usize { match p.* { 0 => 1, n => n } };",
+        "Wrap in `unsafe { }`",
+    );
+    assert!(
+        fixed.contains("{ match unsafe { p.* } { 0 => 1, n => n } }"),
+        "fixed: {fixed}"
+    );
+    check_diagnostics(&fixed, expect![[r#""#]]);
+}
+
+#[test]
+fn a_wrapped_write_is_closed_off_from_a_statement_that_would_continue_it() {
+    // `unsafe { ... }` ends in a brace, so a following `-x` or `(f)(x)`
+    // would continue it as an operand; a `;` keeps the two apart.
+    let fixed = apply_fix(
+        "static main = fn(p: usize.&raw, n: isize) { p.* = 2; -n; };",
+        "Wrap in `unsafe { }`",
+    );
+    assert!(
+        fixed.contains("{ unsafe { p.* = 2; }; -n; }"),
+        "fixed: {fixed}"
+    );
+    check_diagnostics(&fixed, expect![[r#""#]]);
+}
+
+#[test]
 fn deref_inside_unsafe_is_clean() {
     check_diagnostics(
         "static main = fn() -> usize { let mut x = 1; let p = x.&raw; unsafe { p.* } };",

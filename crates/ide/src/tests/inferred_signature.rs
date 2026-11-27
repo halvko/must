@@ -12,25 +12,6 @@ fn apply_assist(text: &str) -> Option<(String, String)> {
     Some((fix.label.clone(), apply_fix(&text.replace("$0", ""), &fix)))
 }
 
-fn apply_fix(text: &str, fix: &crate::Fix) -> String {
-    let mut edits: Vec<_> = fix.edits.iter().map(|it| it.edit.clone()).collect();
-    edits.sort_by_key(|edit| edit.range.start());
-    let mut fixed = text.to_owned();
-    for edit in edits.iter().rev() {
-        fixed.replace_range(std::ops::Range::<usize>::from(edit.range), &edit.insert);
-    }
-    fixed
-}
-
-fn diagnostic_messages(text: &str) -> Vec<String> {
-    let (analysis, file, _) = fixture(&format!("{}$0", text.replace("$0", "")));
-    analysis
-        .diagnostics(file)
-        .into_iter()
-        .map(|it| it.message)
-        .collect()
-}
-
 /// Asserts the assist at `$0` rewrites `before` into `after`, and that the
 /// result is fully typed: no assist is left to offer, and no diagnostic.
 fn check_assist(before: &str, label: &str, after: &str) {

@@ -515,6 +515,28 @@ fn a_callees_declared_bound_still_binds_an_elided_call() {
 }
 
 #[test]
+fn an_undeclared_outlives_offers_the_clause() {
+    let fixed = apply_fix(
+        "static f = fn::<@a, @b>(x: usize.&::<@b>) -> usize.&::<@a> { x.*.& };",
+        "Declare `@b: @a`",
+    );
+    assert!(fixed.contains("fn::<@a, @b: @a>("), "fixed: {fixed}");
+    check_diagnostics(&fixed, expect![[r#""#]]);
+    // After a bound the region already has.
+    let fixed = apply_fix(
+        "static f = fn::<@a, @c, @b: @c>(x: usize.&::<@b>, y: usize.&::<@c>) -> usize.&::<@a> {\n\
+             x.*.&\n\
+         };",
+        "Declare `@b: @a`",
+    );
+    assert!(
+        fixed.contains("fn::<@a, @c, @b: @c + @a>("),
+        "fixed: {fixed}"
+    );
+    check_diagnostics(&fixed, expect![[r#""#]]);
+}
+
+#[test]
 fn an_explicit_shared_reborrow_needs_the_parents_region_to_outlive_it() {
     // `x.*.&` is a WRITTEN reborrow, not a use-site coercion — it must
     // incur the same outlives edge the implicit path does. Without it
