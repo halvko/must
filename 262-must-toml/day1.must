@@ -1,0 +1,3 @@
+use util::twice;
+
+static main = fn () -> usize { twice(21) };
