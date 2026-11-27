@@ -254,7 +254,7 @@ static pick = fn (c: bool) -> usize {
 ```
 
 A name starting with `_` says the binding is unused on purpose, and the
-warning's fix renames `x` to `_x` (or `{ x }` to `{ x as _x }`, keeping the
+warning's fix renames `x` to `_x` (or `{ x }` to `{ x = _x }`, keeping the
 field). There is no warning for a value that must be consumed (losing it is
 already an error, see "Values that must be consumed"), for a local whose
 address is taken (a raw pointer can read it later), or anywhere in an item
@@ -450,11 +450,10 @@ static fib2 = fn (n: usize) -> usize {
 A parameter is a *pattern* against a declared type, not just a name — the
 pattern language `let` takes (see "Variable declarations"): a name,
 `mut name`, `_`, an array pattern, a named type's pattern peeling one layer
-of newtype, a record pattern (its fields only bind, with no sub-pattern
-in a field), or a variant pattern that cannot fail to match. A record
-pattern binds fields by name, optionally renaming with `as`, and a named
-type's pattern peels the newtype before the record pattern underneath
-sees it:
+of newtype, a record pattern, or a variant pattern that cannot fail to
+match. A record pattern binds fields by name or matches each against a
+pattern of its own (`hi = h`), and a named type's pattern peels the
+newtype before the record pattern underneath sees it:
 
 ```must
 type Span = struct { lo: usize, hi: usize };
@@ -469,13 +468,14 @@ static example = fn (struct { n, .. }: struct { n: usize, a: usize }) -> usize {
 ```
 
 A record pattern must account for every field — name it or end with
-`..` — and a named field binds under its own name unless renamed
-(`lo as l`); there is no nested field sub-pattern, so a bound field is
-projected with `.` like any other value. A field may take `mut` of its
-own (`struct { mut lo }`, before the field name even when the binding is
-renamed): that is the *binding* opting into assignment, exactly as
-`mut name` does, and says nothing about the record it was destructured
-from.
+`..`. A field written alone binds under its own name (`lo`); a field
+followed by `= pattern` is matched against that pattern instead, the
+mirror image of `struct { lo = 1 }` in construction: `lo = l` binds it as
+`l`, `lo = _` ignores it, and `lo = [a, b]` or `lo = ::Some(n)` takes it
+apart further. A field alone may take `mut` (`struct { mut lo }`); with a
+pattern the `mut` goes on that pattern's binding (`lo = mut l`). Either
+way it is the *binding* opting into assignment, exactly as `mut name`
+does, and says nothing about the record it was destructured from.
 
 Sketched, not implemented: a shorthand that folds the annotation into
 the pattern (`fn ({n: usize})`), an opt-in `...` that allows — and
@@ -762,7 +762,8 @@ The basic braced form. Patterns mirror construction and nest to any
 depth: a variant pattern `::Variant(patterns...)` whose payload slots are
 patterns themselves (a name, `_`, a literal, another variant, an array, a
 newtype), the payload-less `::Variant`, `_`, and a plain binding name that
-binds the whole scrutinee. Record fields are the one slot that only binds.
+binds the whole scrutinee. A record field takes a pattern after `=`
+(`struct { a = ::Some(n), b }`).
 A variant is written with a leading `::` sigil — "a variant of the
 scrutinee's enum, enum elided" — or fully qualified `Shape::Variant`; the
 two name the same thing (the qualified spelling is construction's mirror
@@ -820,7 +821,7 @@ nothing about the scrutinee and changes neither dispatch nor coverage.
 Assigning to a binding written without `mut` is the same error it is for
 a `let`.
 
-Patterns nest: each payload slot holds any pattern, the same ones a `let`
+Patterns nest: each payload slot and record field holds any pattern, the same ones a `let`
 takes (`::Bar([a, _, c])`, `::Wrap(::Some('x'))`, `::Wrap(Point(p))`). A
 slot that could fail to match just narrows its arm, and the next arm that
 matches runs instead.

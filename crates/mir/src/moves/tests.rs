@@ -1666,18 +1666,17 @@ static take = fn(_: Res) -> () {};
 }
 
 #[test]
-fn a_hole_binding_cannot_swallow_a_linear_and_says_so_without_a_name() {
-    // A hole in a binding position (here a record field renamed to `_`)
-    // binds nothing to quote, and quoting the empty string reads as a
-    // compiler bug — so the message names the position instead.
+fn a_record_field_matched_by_wildcard_cannot_swallow_a_linear() {
+    // `r = _` matches the field with `_`, which binds nothing, so the
+    // field is refused exactly as a `_` anywhere else is.
     check_linear(
         r#"
 static main = fn() -> () {
-    let struct { r as _ } = struct { r = make(1) };
+    let struct { r = _ } = struct { r = make(1) };
 };
 "#,
         expect![[r#"
-            361..416: the value swallowed by `_` is not consumed on this path; its type has no `forget` capability, so every path must consume it (the value swallowed by `_` is born here and must be consumed at 385..386)
+            384..385: `_` matches the value without binding it, and it must be consumed; give it a name so it has somewhere to go
         "#]],
     );
 }

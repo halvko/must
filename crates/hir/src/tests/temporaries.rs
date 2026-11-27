@@ -45,7 +45,7 @@ fn every_binding_reports_its_kind_and_display_name() {
 static mk = fn() -> usize { 5 };
 static main = fn() -> () {
     let struct { mut } = struct { x = 2 };
-    let struct { y as _ } = struct { y = 1 };
+    let struct { y = _ } = struct { y = 1 };
     let p = mk().&raw;
     unsafe { p.*; }
 };
@@ -65,7 +65,6 @@ static main = fn() -> () {
     }
     expect![[r#"
         Missing shows as "<missing>", written None
-        Hole shows as "_", written None
         Temporary shows as "<temporary>", written None
         Named("p") shows as "p", written Some("p")
     "#]]

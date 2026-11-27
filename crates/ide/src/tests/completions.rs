@@ -1842,7 +1842,7 @@ fn completions_record_pattern_rename_slot_offers_nothing() {
     // The `as`-rename target (`x as <cursor>`) is a brand-new binding name,
     // not a field selector — nothing to complete there.
     check_no_completion(
-        r#"static f = fn { let struct { x as $0 } = struct { x = 1 }; };"#,
+        r#"static f = fn { let struct { x = $0 } = struct { x = 1 }; };"#,
         "x",
     );
 }

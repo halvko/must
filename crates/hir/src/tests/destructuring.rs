@@ -24,10 +24,10 @@ fn let_record_destructure_binds_correct_types() {
 fn let_record_destructure_rename_binds_only_the_new_name() {
     // `x` is not bound under its own name; only the rename `a` is.
     check_diagnostics(
-        r#"static f = fn { let struct { x as a } = struct { x = 1 }; let b = a; let c = x; };"#,
+        r#"static f = fn { let struct { x = a } = struct { x = 1 }; let b = a; let c = x; };"#,
         expect![[r#"
-            53..54: cannot infer the type of this number: it has no defining use — add a type annotation
-            77..78: unresolved name `x`
+            52..53: cannot infer the type of this number: it has no defining use — add a type annotation
+            76..77: unresolved name `x`
         "#]],
     );
 }
@@ -244,11 +244,10 @@ fn record_pattern_field_offers_the_make_mut_fix() {
 }
 
 #[test]
-fn renamed_record_pattern_field_puts_mut_before_the_field_name() {
-    // `record_pat_field` is `mut? field (as rename)?`: the one `mut` goes
-    // before the FIELD name, not the bound rename, so the fix for `a`
-    // inserts before `x` — `struct { x as mut a }` would not parse.
-    let text = "static f = fn { let struct { x as a } = struct { x = 1 }; a = 2; };";
+fn a_record_field_pattern_takes_mut_on_its_own_binding() {
+    // `x = a`: the field name binds nothing, so the fix for `a` puts `mut`
+    // on `a` itself, `struct { x = mut a }`.
+    let text = "static f = fn { let struct { x = a } = struct { x = 1 }; a = 2; };";
     let db = RootDatabase::default();
     let file = SourceFile::new(&db, "test.must".to_owned(), text.to_owned());
     let diagnostics = crate::file_diagnostics(&db, file);
@@ -260,11 +259,10 @@ fn renamed_record_pattern_field_puts_mut_before_the_field_name() {
     assert_eq!(fix.label, "Make `a` mutable");
     assert_eq!(fix.edits.len(), 1);
     assert_eq!(fix.edits[0].insert, "mut ");
-    // Before `x` in `struct { x as a }` (offset 29): applying it yields
-    // `struct { mut x as a }`. The related note still points at `a`.
-    assert_eq!(u32::from(fix.edits[0].range.start()), 29);
+    // Before `a` (offset 33). The related note points at `a` too.
+    assert_eq!(u32::from(fix.edits[0].range.start()), 33);
     assert_eq!(diag.related.len(), 1, "related: {:?}", diag.related);
-    assert_eq!(u32::from(diag.related[0].range.start()), 34);
+    assert_eq!(u32::from(diag.related[0].range.start()), 33);
 }
 
 #[test]
