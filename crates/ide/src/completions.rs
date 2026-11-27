@@ -361,6 +361,10 @@ fn completion_item_at_tier(
 /// via [`fn_call_insert`], with `sig`'s receiver excluded from the written
 /// arity. All three call sites render identically; only the label,
 /// provenance and the tier candidate differ.
+///
+/// `escape` is a G13 escape's (qualifier, receiver argument): the row is
+/// labeled `Qualifier::label` and always writes the call
+/// `Qualifier::label($1, receiver)`, so it ranks by the call's return type.
 fn fn_shaped_item(
     label: impl Into<String>,
     provenance: Provenance,
@@ -368,12 +372,18 @@ fn fn_shaped_item(
     tier_candidate: Option<&hir::Ty>,
     expected: Option<&hir::Ty>,
     edit_range: TextRange,
+    escape: Option<(&str, &str)>,
 ) -> CompletionItem {
     let written_params = match sig {
         hir::Ty::Fn(f) => f.params.len().saturating_sub(1),
         _ => 0,
     };
-    let tier = type_tier(tier_candidate, expected);
+    let tier = match (escape, tier_candidate) {
+        // The row is a call, never the fn value, so it never takes tier 0
+        // (an exact match on the fn type).
+        (Some(_), Some(hir::Ty::Fn(f))) => type_tier(Some(&f.ret), expected).max(1),
+        _ => type_tier(tier_candidate, expected),
+    };
     let mut item = completion_item(
         label,
         CompletionItemKind::Function,
@@ -382,7 +392,13 @@ fn fn_shaped_item(
         Some(sig.display()),
         edit_range,
     );
-    item.text_edit.insert = fn_call_insert(&item.label, written_params, tier);
+    match escape {
+        Some((qualifier, receiver)) => {
+            item.label = format!("{qualifier}::{}", item.label);
+            item.text_edit.insert = call_insert(&item.label, written_params, Some(receiver));
+        }
+        None => item.text_edit.insert = fn_call_insert(&item.label, written_params, tier),
+    }
     item.whole_expr = true;
     item
 }
@@ -400,14 +416,21 @@ fn fn_call_insert(name: &str, written_params: usize, tier: u8) -> InsertText {
     if tier == 0 {
         return InsertText::Plain(name.to_owned());
     }
-    let plain = format!("{name}()");
+    call_insert(name, written_params, None)
+}
+
+/// `name($1)` / `name()`, or with `last` written as the final argument
+/// after the tab stop: `name($1, last)` / `name(last)`.
+fn call_insert(name: &str, written_params: usize, last: Option<&str>) -> InsertText {
+    let last = last.unwrap_or_default();
+    let plain = format!("{name}({last})");
     if written_params == 0 {
-        InsertText::Plain(plain)
-    } else {
-        InsertText::Snippet {
-            snippet: format!("{name}($1)"),
-            plain,
-        }
+        return InsertText::Plain(plain);
+    }
+    let sep = if last.is_empty() { "" } else { ", " };
+    InsertText::Snippet {
+        snippet: format!("{name}($1{sep}{last})"),
+        plain,
     }
 }
 
@@ -1883,11 +1906,13 @@ fn dispatch_ty(ty: &hir::Ty) -> &hir::Ty {
 /// A RIGID receiver has neither fields nor an impl to look in, and its
 /// bounds are the only thing that re-opens its dot (TR07) — so its offers
 /// come from [`hir::bound_dot_offers`], over the same enumeration
-/// bound-directed resolution picks from, narrowed by the same rule. Two
-/// divergences from what a call there would resolve to are deliberate and
-/// documented at that function: a nested body still gets offers for what
-/// the captured-dictionary reservation refuses, and a name carried by two
-/// bounds is offered by neither.
+/// bound-directed resolution picks from, narrowed by the same rule. One
+/// divergence is deliberate and documented there: a nested body still gets
+/// offers for what the captured-dictionary reservation refuses.
+///
+/// A concrete receiver also reaches the members of the traits implemented
+/// for its type ([`hir::concrete_dot_offers`]). On either receiver, a row
+/// whose dot-call would be ambiguous writes its G13 escape ([`escape_item`]).
 fn field_items(
     db: &RootDatabase,
     file: SourceFile,
@@ -1940,65 +1965,48 @@ fn field_items(
             item
         })
         .collect();
-    // Dot-callable inherent members of a named receiver, offered next to the
-    // fields they share the dot with. A borrow receiver's members hang off the
-    // REFERENT's declaration; which of them the dot offers, and which it
-    // offers refused, is `hir::dot_offer`'s.
-    let decl = match fields_of {
-        hir::Ty::Named(named) => Some(&named.decl),
-        _ => None,
-    };
-    if let Some(decl) = decl {
-        for member_id in hir::member_item_ids(db, decl.to_id(db)) {
-            let Some(position) = hir::member_self_position(db, member_id) else {
-                continue;
-            };
-            let Some(offer) = hir::dot_offer(&member_receiver, exclusive, position) else {
-                continue;
-            };
-            let sig = hir::signature(db, member_id);
-            // A member is fn-shaped, so it may satisfy the position when
-            // CALLED — the same ranking a top-level fn gets. The receiver
-            // does not count toward the written arity, so a
-            // nullary-through-the-dot member inserts `name()`.
-            let item = fn_shaped_item(
-                hir::item_loc(db, member_id).display_name().to_owned(),
-                Provenance::Item,
-                &sig,
-                Some(&sig),
-                expected,
-                edit_range,
-            );
-            let item = member_item(item, offer.reach, dot, &derefs);
-            items.push(if offer.refused { refuse(item) } else { item });
-        }
-    }
-    // A RIGID receiver's bounds — the whole of its dot. Which requirements
-    // survive resolution's narrowing and this receiver's shape is decided
-    // by `bound_dot_offers`, in hir, deliberately: were the filtering done
-    // here, the offered set and the callable set would start drifting on
-    // day one. This side renders what it is handed.
-    for offer in hir::bound_dot_offers(db, item, &member_receiver, exclusive) {
+    // Members, offered next to the fields: a CONCRETE receiver's inherent
+    // and trait-impl members, a RIGID one's bounds. hir decides which a call
+    // would resolve to and which it would refuse, so the offered set and the
+    // callable set can't drift; this side renders what it is handed.
+    let concrete = hir::concrete_dot_offers(db, file, &member_receiver, exclusive);
+    let bounds = hir::bound_dot_offers(db, item, &member_receiver, exclusive);
+    for offer in concrete.into_iter().chain(bounds) {
         let refused = offer.refused;
-        // A requirement is fn-shaped like a member, so it earns the same
-        // ranking and the same call-shaped insert (its receiver — `Self`
-        // — does not count toward the written arity either).
-        let item = fn_shaped_item(
-            offer.name,
-            Provenance::Item,
-            &offer.sig,
-            Some(&offer.sig),
-            expected,
-            edit_range,
-        );
-        let item = member_item(item, offer.reach, dot, &derefs);
+        // A member is fn-shaped, so it may satisfy the position when
+        // CALLED — the same ranking a top-level fn gets. The receiver does
+        // not count toward the written arity, so a nullary-through-the-dot
+        // member inserts `name()`.
+        let item = match &offer.escape {
+            Some(qualifier) => {
+                let receiver = real_root.text().slice(receiver_range).to_string();
+                let receiver = EscapeReceiver {
+                    text: &receiver,
+                    start: receiver_range.start(),
+                    derefs: deref.layers,
+                    reach: offer.reach,
+                };
+                escape_item(&offer, qualifier, receiver, expected, edit_range)
+            }
+            None => {
+                let item = fn_shaped_item(
+                    offer.name,
+                    Provenance::Item,
+                    &offer.sig,
+                    Some(&offer.sig),
+                    expected,
+                    edit_range,
+                    None,
+                );
+                member_item(item, offer.reach, dot, &derefs)
+            }
+        };
         items.push(if refused { refuse(item) } else { item });
     }
-    // BUILTIN members (`"...".next_char`), offered on the same dot. Ranked
-    // as a builtin, like the builtin *functions* in expression position —
-    // a user's own member of the same name shadows it in resolution, and
-    // sorting it below theirs here says the same thing.
-    for &builtin in hir::Builtin::members_of(ty) {
+    // BUILTIN members (`"...".next_char`), offered on the same dot unless a
+    // user member of the name shadows it there. Ranked as a builtin, like
+    // the builtin *functions* in expression position.
+    for builtin in hir::builtin_dot_members(db, file, ty) {
         let sig = hir::infer::builtin_type(db, builtin);
         // The receiver does not count toward the written arity here
         // either. `None` tier candidate: a builtin ranks by its band
@@ -2010,9 +2018,53 @@ fn field_items(
             None,
             expected,
             edit_range,
+            None,
         ));
     }
     items
+}
+
+/// The receiver a G13 escape passes as its last argument: its source
+/// text, where it starts, and how the dot row would have reached it.
+struct EscapeReceiver<'a> {
+    text: &'a str,
+    start: TextSize,
+    derefs: usize,
+    reach: hir::DotReach,
+}
+
+/// A dot member row whose dot-call would be ambiguous (G13), written as
+/// the escape `Qualifier::name($1, x)`: the receiver goes last, spelled as
+/// the dot reaches it (`x.*`, `x.&`). The edit takes back the receiver, so
+/// the filter text starts with it.
+fn escape_item(
+    offer: &hir::MemberDotOffer,
+    qualifier: &str,
+    receiver: EscapeReceiver<'_>,
+    expected: Option<&hir::Ty>,
+    edit_range: TextRange,
+) -> CompletionItem {
+    let mut argument = format!("{}{}", receiver.text, ".*".repeat(receiver.derefs));
+    if let hir::DotReach::WrittenBorrow { mutable } = receiver.reach {
+        argument.push_str(borrow_spelling(mutable));
+    }
+    let mut item = fn_shaped_item(
+        offer.name.clone(),
+        Provenance::Item,
+        &offer.sig,
+        Some(&offer.sig),
+        expected,
+        edit_range,
+        Some((qualifier, &argument)),
+    );
+    item.text_edit.range = TextRange::new(receiver.start, edit_range.end());
+    item.filter_text = format!("{}.{}", receiver.text, offer.name);
+    item
+}
+
+/// The written borrow of a receiver, `.&` or `.&mut`.
+fn borrow_spelling(mutable: bool) -> &'static str {
+    if mutable { ".&mut" } else { ".&" }
 }
 
 /// `item` as a call the checker refuses: sorted last (P16).
@@ -2067,9 +2119,9 @@ fn borrowed_member_item(
     let hir::DotReach::WrittenBorrow { mutable } = reach else {
         return item;
     };
-    let borrow = if mutable { ".&mut." } else { ".&." };
+    let borrow = format!("{}.", borrow_spelling(mutable));
     item.text_edit.range = TextRange::new(dot, item.text_edit.range.end());
-    item.text_edit.insert = item.text_edit.insert.prefixed(borrow);
+    item.text_edit.insert = item.text_edit.insert.prefixed(&borrow);
     item.filter_text = format!(".{}", item.label);
     item
 }

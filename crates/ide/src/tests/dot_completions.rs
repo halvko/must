@@ -18,22 +18,11 @@ fn check_completion_applied(fixture_text: &str, label: &str, expect: expect_test
         .iter()
         .find(|c| c.label == label)
         .unwrap_or_else(|| panic!("no completion labeled {label:?}: {items:?}"));
-    let insert = match &item.text_edit.insert {
-        crate::InsertText::Plain(text) => text,
-        crate::InsertText::Snippet { snippet, .. } => snippet,
-    };
-    let mut text = analysis.file_text(file).to_string();
-    let range = item.text_edit.range;
-    text.replace_range(usize::from(range.start())..usize::from(range.end()), insert);
-    let line_start = text[..usize::from(range.start())]
-        .rfind('\n')
-        .map_or(0, |i| i + 1);
-    let line_end = text[line_start..]
-        .find('\n')
-        .map_or(text.len(), |i| line_start + i);
     expect.assert_eq(&format!(
-        "{}\nfilter: {}\n",
-        text[line_start..line_end].trim(),
+        r#"{}
+filter: {}
+"#,
+        applied_line(&analysis, file, item),
         item.filter_text
     ));
 }
@@ -77,6 +66,119 @@ trait A = requires {
 };
 trait B = requires { push: fn(char, Self) -> (); };
 "#;
+
+const ORD_FIXTURE: &str = r#"
+type Cmp = enum { Less, Eq, Greater };
+trait Ord = requires {
+    ord: fn::<@a>(Self.&::<@a>, Self.&::<@a>) -> Cmp;
+} with {
+    impl usize {
+        ord = fn::<@a>(other: Self.&::<@a>, self: Self.&::<@a>) -> Cmp { Cmp::Eq };
+    }
+};
+"#;
+
+/// Applies the completion labeled `label`, with `argument` at its tab
+/// stop, and asserts the written code checks without errors.
+fn check_applied_checks_clean(text: &str, label: &str, argument: &str) {
+    let (analysis, file, pos) = fixture(text);
+    let items = analysis.completions(pos);
+    let item = items
+        .iter()
+        .find(|c| c.label == label)
+        .unwrap_or_else(|| panic!("no completion labeled {label:?}: {items:?}"));
+    let insert = match &item.text_edit.insert {
+        crate::InsertText::Plain(text) => text.clone(),
+        crate::InsertText::Snippet { snippet, .. } => snippet.replace("$1", argument),
+    };
+    let mut written = analysis.file_text(file).to_string();
+    let range = item.text_edit.range;
+    written.replace_range(
+        usize::from(range.start())..usize::from(range.end()),
+        &insert,
+    );
+    let mut host = AnalysisHost::new();
+    let written_file = host.create_file("test.must".to_owned(), written.clone());
+    let errors: Vec<_> = host
+        .snapshot()
+        .diagnostics(written_file)
+        .into_iter()
+        .filter(|d| d.severity == crate::Severity::Error)
+        .map(|d| d.message)
+        .collect();
+    assert!(
+        errors.is_empty(),
+        r#"{label:?} in
+{written}
+errors: {errors:?}"#
+    );
+}
+
+/// The analysis of a library of the fixture's files, and the position of
+/// `$0` in its first file.
+fn library_fixture(fixture_text: &str) -> (crate::Analysis, Vec<SourceFile>, FilePosition) {
+    let mut db = base_db::RootDatabase::default();
+    let files = base_db::fixture_files(fixture_text);
+    let cursor = files[0].1.find("$0").unwrap_or(0);
+    let files: Vec<_> = files
+        .into_iter()
+        .map(|(path, text)| (path, text.replace("$0", "")))
+        .collect();
+    let sources = base_db::new_library(&mut db, "", files);
+    let pos = FilePosition {
+        file: sources[0],
+        offset: TextSize::new(cursor as u32),
+    };
+    (crate::Analysis::new(db), sources, pos)
+}
+
+/// Completion labels at `$0` in the fixture's first file, in a library of
+/// the fixture's files.
+fn library_completion_labels(fixture_text: &str) -> Vec<String> {
+    let (analysis, _, pos) = library_fixture(fixture_text);
+    analysis
+        .completions(pos)
+        .into_iter()
+        .map(|c| c.label)
+        .collect()
+}
+
+/// The errors in the fixture's first file once the completion labeled
+/// `label` is applied there, with `argument` at its tab stop.
+fn library_applied_errors(fixture_text: &str, label: &str, argument: &str) -> Vec<String> {
+    let (analysis, sources, pos) = library_fixture(fixture_text);
+    let item = analysis
+        .completions(pos)
+        .into_iter()
+        .find(|c| c.label == label)
+        .unwrap_or_else(|| panic!("no completion labeled {label:?}"));
+    let insert = match &item.text_edit.insert {
+        crate::InsertText::Plain(text) => text.clone(),
+        crate::InsertText::Snippet { snippet, .. } => snippet.replace("$1", argument),
+    };
+    let mut written = analysis.file_text(sources[0]).to_string();
+    let range = item.text_edit.range;
+    written.replace_range(
+        usize::from(range.start())..usize::from(range.end()),
+        &insert,
+    );
+    let mut fixture = String::new();
+    for (k, (path, text)) in base_db::fixture_files(fixture_text).into_iter().enumerate() {
+        let text = if k == 0 { written.clone() } else { text };
+        fixture.push_str(&format!(
+            r#"//- {path}
+{text}
+"#
+        ));
+    }
+    let (analysis, sources, _) = library_fixture(&fixture);
+    analysis
+        .diagnostics(sources[0])
+        .into_iter()
+        .filter(|d| d.severity == crate::Severity::Error)
+        .map(|d| d.message)
+        .collect()
+}
 
 #[test]
 fn dot_completions_offer_members_next_to_fields() {
@@ -670,34 +772,46 @@ static f = fn::<T: D>(t: T) -> () { t.$0 };
 }
 
 #[test]
-fn a_name_two_bounds_carry_is_offered_by_neither() {
-    // A bound member call is decided by NAME before G14 is asked, so this
-    // `push` is refused permanently even though exactly one candidate fits
-    // the receiver's shape. Offering the shape-viable one would put a row
-    // in the list that cannot be accepted — so completion suppresses the
-    // name, which is resolution's own verdict (`narrow_by_name` returning
-    // two) read straight through.
-    //
-    // The suppression is per NAME, not per bound set: `grow`, which only
-    // `A` declares, is offered as usual.
-    let source = format!(
-        "{AMBIGUOUS_SHAPES_HEAD}\
-         static f = fn::<@a, T: A + B>(t: T.&mut::<@a>) -> () {{ t.$0 }};"
-    );
+fn a_name_two_bounds_carry_writes_its_escape() {
+    // A bound member call is decided by NAME before G14 is asked, so
+    // `t.push(c)` is ambiguous even though only `A::push` fits the
+    // receiver's shape. That row writes its G13 escape; `B::push` takes
+    // `Self` by value, which `t` can't give. `grow`, which only `A`
+    // declares, is offered as usual.
+    let source = [
+        AMBIGUOUS_SHAPES_HEAD,
+        r#"
+static f = fn::<@a, T: A + B>(t: T.&mut::<@a>) -> () { let y = t.$0; };
+"#,
+    ]
+    .concat();
     check_no_completion(&source, "push");
+    check_no_completion(&source, "B::push");
     check_has_completion(&source, "grow");
+    check_completion_applied(
+        &source,
+        "A::push",
+        expect_test::expect![[r#"
+            static f = fn::<@a, T: A + B>(t: T.&mut::<@a>) -> () { let y = A::push($1, t); };
+            filter: t.push
+        "#]],
+    );
+    check_applied_checks_clean(&source, "A::push", "'c'");
 }
 
 #[test]
-fn the_ambiguity_diagnostic_still_names_both_traits() {
-    // P15: ambiguity is name-only, so the suppressed completion above is
-    // only defensible while the diagnostic itself says which two traits
-    // collided and how to spell each — the message, not the list, is what
-    // tells the user what to write.
-    let (analysis, file, _) = fixture(&format!(
-        "{AMBIGUOUS_SHAPES_HEAD}\
-         static f = fn::<@a, T: A + B>(t: T.&mut::<@a>) -> () {{ t.push('x') }};$0"
-    ));
+fn the_ambiguity_diagnostic_names_both_traits() {
+    // P15: ambiguity is name-only, and the diagnostic names both traits
+    // with the escapes completion writes for them.
+    let (analysis, file, _) = fixture(
+        &[
+            AMBIGUOUS_SHAPES_HEAD,
+            r#"
+static f = fn::<@a, T: A + B>(t: T.&mut::<@a>) -> () { t.push('x') };$0
+"#,
+        ]
+        .concat(),
+    );
     let message = analysis
         .diagnostics(file)
         .into_iter()
@@ -712,11 +826,9 @@ fn the_ambiguity_diagnostic_still_names_both_traits() {
 }
 
 #[test]
-fn two_bounds_of_the_same_shape_do_not_double_a_row() {
-    // The same ruling, with the shapes IDENTICAL: resolution refuses just
-    // as permanently, and the list must not show two indistinguishable
-    // rows for a name that resolves to nothing. Counted, not just
-    // `check_no_completion` — one row and two rows are different bugs.
+fn two_bounds_of_the_same_shape_offer_one_escape_each() {
+    // With the shapes IDENTICAL the dot-call is just as ambiguous: each
+    // trait gets one escape row, and no bare `push` row resolves to nothing.
     let (analysis, _file, pos) = fixture(
         r#"
 trait A = requires { push: fn(char, Self) -> (); };
@@ -724,14 +836,14 @@ trait B = requires { push: fn(char, Self) -> (); };
 static f = fn::<T: A + B>(t: T) -> () { t.$0 };
 "#,
     );
-    assert_eq!(
-        analysis
-            .completions(pos)
-            .iter()
-            .filter(|item| item.label == "push")
-            .count(),
-        0,
-    );
+    let mut labels: Vec<_> = analysis
+        .completions(pos)
+        .into_iter()
+        .map(|item| item.label)
+        .filter(|label| label.ends_with("push"))
+        .collect();
+    labels.sort();
+    assert_eq!(labels, ["A::push", "B::push"]);
 }
 
 #[test]
@@ -752,5 +864,368 @@ static f = fn::<T: Show>(t: T) -> str {
 };
 "#,
         "show",
+    );
+}
+
+#[test]
+fn dot_completions_offer_trait_impl_members_inside_the_impl() {
+    // The trait's own chain implements it for `usize`, so a `usize.&`
+    // receiver in a sibling member's body reaches `ord` through that impl.
+    check_completion_applied(
+        r#"
+type Cmp = enum { Less, Eq, Greater };
+trait Ord = requires {
+    ord: fn::<@a>(Self.&::<@a>, Self.&::<@a>) -> Cmp;
+    min: fn::<@a>(Self.&::<@a>, Self.&::<@a>) -> Self.&::<@a>;
+} with {
+    impl usize {
+        ord = fn::<@a>(other: Self.&::<@a>, self: Self.&::<@a>) -> Cmp { Cmp::Eq };
+        min = fn::<@a>(other: Self.&::<@a>, self: Self.&::<@a>) -> Self.&::<@a> {
+            match self.$0
+        };
+    }
+};
+"#,
+        "ord",
+        expect_test::expect![[r#"
+            match self.ord($1)
+            filter: ord
+        "#]],
+    );
+}
+
+#[test]
+fn dot_completions_offer_trait_impl_members_on_builtin_receivers() {
+    check_completions(
+        &format!(
+            "{ORD_FIXTURE}{}",
+            r#"
+static g = fn::<@a>(x: usize.&::<@a>) -> () { let y = x.$0; };
+"#
+        ),
+        expect_test::expect![[r#"
+            ord Function (fn(usize.&::<@a>, usize.&::<@a>) -> Cmp)
+        "#]],
+    );
+    // An owned receiver reaches the borrow-taking member through a written
+    // borrow.
+    check_completion_applied(
+        &format!(
+            "{ORD_FIXTURE}{}",
+            r#"
+static g = fn (x: usize) -> () { let y = x.$0; };
+"#
+        ),
+        "ord",
+        expect_test::expect![[r#"
+            static g = fn (x: usize) -> () { let y = x.&.ord($1); };
+            filter: .ord
+        "#]],
+    );
+}
+
+#[test]
+fn dot_completions_name_a_type_side_trait_member_by_its_requirement() {
+    // `impl Ord` in a type's chain names its members `Ord::ord`; the dot
+    // reaches them as `ord`, through the trait, not as inherent members.
+    check_completions(
+        r#"
+type Cmp = enum { Less, Eq, Greater };
+trait Ord = requires {
+    ord: fn::<@a>(Self.&::<@a>, Self.&::<@a>) -> Cmp;
+};
+type P = struct { n: usize } with {
+    impl Ord {
+        ord = fn::<@a>(o: Self.&::<@a>, s: Self.&::<@a>) -> Cmp { Cmp::Eq };
+    }
+};
+static g = fn::<@a>(x: P.&::<@a>) -> () { let y = x.$0; };
+"#,
+        expect_test::expect![[r#"
+            *.n Field (usize)
+            ord Function (fn(P.&::<@a>, P.&::<@a>) -> Cmp)
+        "#]],
+    );
+}
+
+#[test]
+fn dot_completions_write_the_escape_for_a_name_two_impls_carry() {
+    // `x.ord(y)` is ambiguous between `Ord` and `Ord2`, so each row writes
+    // its escape.
+    let text = format!(
+        "{ORD_FIXTURE}{}",
+        r#"
+trait Ord2 = requires {
+    ord: fn::<@a>(Self.&::<@a>, Self.&::<@a>) -> Cmp;
+    other: fn::<@a>(Self.&::<@a>) -> ();
+} with {
+    impl usize {
+        ord = fn::<@a>(a: Self.&::<@a>, b: Self.&::<@a>) -> Cmp { Cmp::Eq };
+        other = fn::<@a>(a: Self.&::<@a>) -> () { () };
+    }
+};
+static g = fn::<@a>(x: usize.&::<@a>) -> () { let y = x.$0; };
+"#
+    );
+    check_no_completion(&text, "ord");
+    check_has_completion(&text, "other");
+    check_applied_checks_clean(&text, "Ord::ord", "x");
+    check_applied_checks_clean(&text, "Ord2::ord", "x");
+}
+
+#[test]
+fn dot_completions_judge_a_shared_name_per_spelling() {
+    // On an owned `x`, `x.ord()` resolves to `Ord2` (value `Self`) and
+    // `x.&.ord()` to `Ord` (borrowed `Self`): each spelling has one carrier,
+    // so both are offered.
+    let text = format!(
+        "{ORD_FIXTURE}{}",
+        r#"
+trait Ord2 = requires {
+    ord: fn(Self, Self) -> Cmp;
+} with {
+    impl usize {
+        ord = fn(a: Self, b: Self) -> Cmp { Cmp::Eq };
+    }
+};
+static g = fn (x: usize) -> () { let y = x.$0; };
+"#
+    );
+    check_completions_applied(
+        &text,
+        expect_test::expect![[r#"
+        fn(usize.&::<@a>, usize.&::<@a>) -> Cmp: static g = fn (x: usize) -> () { let y = x.&.ord($1); };
+        fn(usize, usize) -> Cmp: static g = fn (x: usize) -> () { let y = x.ord($1); };
+    "#]],
+    );
+}
+
+#[test]
+fn dot_completions_offer_a_name_only_one_member_takes_from_the_receiver() {
+    // `Zero::make` takes no `Self`, so `x.make()` can only mean `Mk::make`.
+    check_completions(
+        r#"
+trait Zero = requires {
+    make: fn() -> Self;
+} with {
+    impl usize {
+        make = fn() -> Self { 0 };
+    }
+};
+trait Mk = requires {
+    make: fn::<@a>(Self.&::<@a>) -> usize;
+} with {
+    impl usize {
+        make = fn::<@a>(s: Self.&::<@a>) -> usize { 0 };
+    }
+};
+static g = fn::<@a>(x: usize.&::<@a>) -> () { let y = x.$0; };
+"#,
+        expect_test::expect![[r#"
+            make Function (fn(usize.&::<@a>) -> usize)
+        "#]],
+    );
+}
+
+#[test]
+fn dot_completions_write_the_escape_for_a_name_an_inherent_and_a_trait_member_share() {
+    // `x.ord(y)` is ambiguous between the inherent `ord` and `Ord`'s, so
+    // each row writes the path-call that names its member (G13).
+    const TEXT: &str = r#"
+type Cmp = enum { Less, Eq, Greater };
+trait Ord = requires {
+    ord: fn::<@a>(Self.&::<@a>, Self.&::<@a>) -> Cmp;
+};
+type P = struct { n: usize } with {
+    impl Self {
+        ord = fn::<@a>(o: Self.&::<@a>, s: Self.&::<@a>) -> Cmp { Cmp::Eq };
+    }
+    impl Ord {
+        ord = fn::<@a>(o: Self.&::<@a>, s: Self.&::<@a>) -> Cmp { Cmp::Eq };
+    }
+};
+static g = fn::<@a>(x: P.&::<@a>) -> () { let y = x.$0; };
+"#;
+    check_completions(
+        TEXT,
+        expect_test::expect![[r#"
+            *.n Field (usize)
+            P::ord Function (fn(P.&::<@a>, P.&::<@a>) -> Cmp)
+            Ord::ord Function (fn(P.&::<@a>, P.&::<@a>) -> Cmp)
+        "#]],
+    );
+    check_completions_applied(
+        TEXT,
+        expect_test::expect![[r#"
+            usize: static g = fn::<@a>(x: P.&::<@a>) -> () { let y = x.*.n; };
+            fn(P.&::<@a>, P.&::<@a>) -> Cmp: static g = fn::<@a>(x: P.&::<@a>) -> () { let y = P::ord($1, x); };
+            fn(P.&::<@a>, P.&::<@a>) -> Cmp: static g = fn::<@a>(x: P.&::<@a>) -> () { let y = Ord::ord($1, x); };
+        "#]],
+    );
+    check_applied_checks_clean(TEXT, "P::ord", "x");
+    check_applied_checks_clean(TEXT, "Ord::ord", "x");
+}
+
+#[test]
+fn an_escape_row_ranks_by_what_its_call_returns() {
+    // The escape is always a call, so it ranks as one: a match on the call's
+    // `Cmp`, never the top band a position expecting the fn value would give
+    // the member itself.
+    const TEXT: &str = r#"
+type Cmp = enum { Less, Eq, Greater };
+trait Ord = requires { ord: fn(Self, Self) -> Cmp; };
+type P = struct { n: usize } with {
+    impl Self {
+        ord = fn(o: Self, s: Self) -> Cmp { Cmp::Eq };
+    }
+    impl Ord {
+        ord = fn(o: Self, s: Self) -> Cmp { Cmp::Eq };
+    }
+};
+static g = fn(x: P) -> EXPECTED { x.o$0 };
+"#;
+    let sort_text =
+        |expected: &str| completion_sort_text(&TEXT.replace("EXPECTED", expected), "Ord::ord");
+    assert_eq!(sort_text("fn(P, P) -> Cmp"), "2_20_ord");
+    assert_eq!(sort_text("Cmp"), "1_20_ord");
+}
+
+#[test]
+fn dot_completions_write_the_escape_with_the_receiver_as_the_dot_reaches_it() {
+    // The escape passes the receiver as the row would have reached it: an
+    // owned one borrowed, one behind two borrows dereferenced once.
+    const TEXT: &str = r#"
+type Cmp = enum { Less, Eq, Greater };
+trait Ord = requires {
+    ord: fn::<@a>(Self.&::<@a>, Self.&::<@a>) -> Cmp;
+};
+type P = struct { n: usize } with {
+    impl Self {
+        ord = fn::<@a>(o: Self.&::<@a>, s: Self.&::<@a>) -> Cmp { Cmp::Eq };
+    }
+    impl Ord {
+        ord = fn::<@a>(o: Self.&::<@a>, s: Self.&::<@a>) -> Cmp { Cmp::Eq };
+    }
+};
+static g = fn::<@a, @b>(RECEIVER) -> () { let y = x.$0; };
+"#;
+    let owned = TEXT.replace("RECEIVER", "x: P");
+    check_completion_applied(
+        &owned,
+        "Ord::ord",
+        expect_test::expect![[r#"
+            static g = fn::<@a, @b>(x: P) -> () { let y = Ord::ord($1, x.&); };
+            filter: x.ord
+        "#]],
+    );
+    check_applied_checks_clean(&owned, "Ord::ord", "x.&");
+    let layered = TEXT.replace("RECEIVER", "x: P.&::<@a>.&::<@b>");
+    check_completion_applied(
+        &layered,
+        "P::ord",
+        expect_test::expect![[r#"
+            static g = fn::<@a, @b>(x: P.&::<@a>.&::<@b>) -> () { let y = P::ord($1, x.*); };
+            filter: x.ord
+        "#]],
+    );
+    check_applied_checks_clean(&layered, "P::ord", "x.*");
+}
+
+#[test]
+fn dot_completions_write_the_escape_for_a_trait_member_a_fn_field_shares() {
+    // `x.ord(y)` on an owned `P` is ambiguous between `Ord`'s member and the
+    // fn-typed field: the field reads as written, the member writes its
+    // escape.
+    const TEXT: &str = r#"
+type Cmp = enum { Less, Eq, Greater };
+trait Ord = requires {
+    ord: fn(Self, Self) -> Cmp;
+};
+type P = struct { ord: fn(usize) -> Cmp } with {
+    impl Ord {
+        ord = fn(o: Self, s: Self) -> Cmp { Cmp::Eq };
+    }
+};
+static g = fn (x: P) -> () { let y = x.$0; };
+"#;
+    check_completions_applied(
+        TEXT,
+        expect_test::expect![[r#"
+            fn(usize) -> Cmp: static g = fn (x: P) -> () { let y = x.ord; };
+            fn(P, P) -> Cmp: static g = fn (x: P) -> () { let y = Ord::ord($1, x); };
+        "#]],
+    );
+}
+
+#[test]
+fn dot_completions_skip_a_trait_member_with_an_unwritten_signature() {
+    check_no_completion(
+        r#"
+type Cmp = enum { Less, Eq, Greater };
+trait Ord = requires {
+    ord: fn::<@a>(Self.&::<@a>, Self.&::<@a>) -> Cmp;
+} with {
+    impl usize {
+        ord = fn::<@a>(o: Self.&::<@a>, s: Self.&::<@a>) -> Nope { Cmp::Eq };
+    }
+};
+static g = fn::<@a>(x: usize.&::<@a>) -> () { let y = x.$0; };
+"#,
+        "ord",
+    );
+}
+
+#[test]
+fn dot_completions_spell_the_escape_by_the_name_the_file_imports() {
+    // `Ord` lives in `b.must`; `a.must` knows it only as `O`, so the escape
+    // is `O::ord`. Without the import it can't be named, and the row is left
+    // out rather than writing a path that doesn't resolve.
+    const FIXTURE: &str = r#"
+//- a.must
+IMPORT
+type Cmp = enum { Less, Eq, Greater };
+type P = struct { n: usize } with {
+    impl Self {
+        ord = fn::<@a>(o: Self.&::<@a>, s: Self.&::<@a>) -> usize { 0 };
+    }
+};
+static g = fn::<@a>(x: P.&::<@a>) -> () { let y = x.$0; };
+//- b.must
+use a::P;
+trait Ord = requires {
+    ord: fn::<@a>(Self.&::<@a>, Self.&::<@a>) -> usize;
+} with {
+    impl P {
+        ord = fn::<@a>(o: Self.&::<@a>, s: Self.&::<@a>) -> usize { 0 };
+    }
+};
+"#;
+    let imported = library_completion_labels(&FIXTURE.replace("IMPORT", "use b::{Ord as O};"));
+    assert!(imported.contains(&"O::ord".to_owned()), "{imported:?}");
+    assert!(imported.contains(&"P::ord".to_owned()), "{imported:?}");
+    let imported = FIXTURE.replace("IMPORT", "use b::{Ord as O};");
+    for label in ["O::ord", "P::ord"] {
+        let errors = library_applied_errors(&imported, label, "x");
+        assert!(errors.is_empty(), "{label}: {errors:?}");
+    }
+    // The ambiguity error spells the escape the same way.
+    let call = imported.replace("let y = x.$0;", "let y = x.ord(x);$0");
+    let (analysis, sources, _) = library_fixture(&call);
+    let message = (analysis.diagnostics(sources[0]).into_iter())
+        .map(|d| d.message)
+        .find(|m| m.contains("is ambiguous"))
+        .expect("the collision is diagnosed");
+    assert!(message.contains("`O::ord(value)`"), "{message}");
+    // The check sees the written code: a wrong argument is an error.
+    assert!(!library_applied_errors(&imported, "O::ord", "nope").is_empty());
+    let unimported = library_completion_labels(&FIXTURE.replace("IMPORT", ""));
+    // Ambiguous without the import, so the inherent member writes its own
+    // escape.
+    assert!(unimported.contains(&"P::ord".to_owned()), "{unimported:?}");
+    assert!(
+        !unimported
+            .iter()
+            .any(|l| l.ends_with("::ord") && l != "P::ord"),
+        "{unimported:?}"
     );
 }
