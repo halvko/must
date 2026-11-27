@@ -20,8 +20,8 @@ pub use rowan::{TextRange, TextSize};
 pub use syntax_kind::{KEYWORDS, SyntaxKind};
 pub use validation::{
     BoundHome, CAN_ONLY_ASSIGN_TO_A_VARIABLE, CAPABILITIES, Capability, ImplHome, MemberContext,
-    capability_named, impl_element_bare_head, impl_element_home, semantic_member_context,
-    type_param_bound_home,
+    capability_named, impl_element_bare_head, impl_element_home, item_impl_home,
+    semantic_member_context, type_param_bound_home, with_group_home,
 };
 
 /// The brace rule's wording. The grammar's recovery error and validation's
