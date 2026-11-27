@@ -807,13 +807,14 @@ pub(crate) struct BoundDotCandidate<'db> {
 ///
 /// Bound-directed resolution narrows it to the written name
 /// ([`narrow_by_name`]); completion runs the SAME narrowing over every name
-/// and offers what survives it and the receiver's shape. So a requirement
-/// that stops being visible here stops being callable and stops being
-/// offered in one edit.
+/// and offers each requirement the receiver's shape can call; a name carried
+/// by more than one gets its G13 escape. So a requirement that
+/// stops being visible here stops being callable and stops being offered
+/// in one edit.
 ///
-/// Two divergences between the offered set and the callable set are
-/// deliberate and recorded, both in [`bound_dot_offers`]: a nested body's
-/// reservation, and the shape-blind ambiguity refusal.
+/// One divergence between the offered set and the callable set is
+/// deliberate and recorded in [`bound_dot_offers`]: a nested body's
+/// reservation.
 ///
 /// A bound naming the same trait twice contributes once (the dedup is on
 /// the trait, not the spelling); an unresolvable bound contributes nothing
@@ -880,9 +881,8 @@ pub(crate) fn param_bound_candidates<'db>(
 /// ambiguity as a concrete receiver's — refused PERMANENTLY, with no shape
 /// consulted (a bound member call is decided by name before G14 is asked,
 /// so even a name with exactly one shape-viable candidate is refused).
-/// Completion asks the same question for every name it might offer, which
-/// is why an ambiguous name is suppressed rather than offered: an offer
-/// that cannot be accepted is a worse answer than no offer.
+/// Completion asks the same question for every name it might offer, and
+/// gives an ambiguous name's rows their escapes.
 pub(crate) fn narrow_by_name(
     candidates: &[BoundDotCandidate<'_>],
     name: &str,
@@ -909,6 +909,9 @@ pub struct MemberDotOffer {
     pub reach: crate::ty::DotReach,
     /// The call is refused for want of a `&mut` ([`crate::ty::DotOffer`]).
     pub refused: bool,
+    /// Set when the dot-call is ambiguous (G13): the type or trait name the
+    /// row's path-call escape is qualified by, `Qualifier::name(.., value)`.
+    pub escape: Option<String>,
 }
 
 /// What a receiver of type `receiver_ty` may be offered after the dot,
@@ -925,23 +928,15 @@ pub struct MemberDotOffer {
 /// `owner` is the body being edited — a param of any other binder cannot
 /// occur in it, and gets nothing rather than a guess.
 ///
-/// TWO recorded divergences from what a call at that dot would resolve to,
-/// each ruled deliberately:
+/// A name carried by TWO bounds is ambiguous on the name alone (P15), so
+/// each trait's row carries its G13 [`MemberDotOffer::escape`].
 ///
-/// - A name carried by TWO bounds is offered by NEITHER. Resolution refuses
-///   it permanently on the name alone (P15: shape never narrows a
-///   bound-directed ambiguity), so no row here could be accepted: not a
-///   merged one (it would still error on accept), and not a per-trait one
-///   (no qualified spelling fits a dot — the receiver is already written).
-///   This suppression asks resolution's rule ([`narrow_by_name`]) rather
-///   than restating it, so it stays correct if that rule ever changes.
-/// - Inside a NESTED body (a fn literal, a `const` block) the requirements
-///   are still offered, though a bound-directed call there is refused as
-///   reserved (`NestedBoundUse` — the captured-dictionary wall). That wall
-///   is a body-lowering fact, not a fact about the candidate set: teaching
-///   it to this item-tree-driven query would mean re-deriving nesting here,
-///   a second home for the wall. The refusal explains itself at the call,
-///   and the day the wall lifts these offers are already right.
+/// One recorded divergence from what a call at that dot would resolve to,
+/// ruled deliberately: inside a NESTED body (a fn literal, a `const`
+/// block) the requirements are still offered, though a bound-directed call
+/// there is refused as reserved (`NestedBoundUse`, the captured-dictionary
+/// wall). That wall is a body-lowering fact, not a fact about the candidate
+/// set; the refusal explains itself at the call.
 pub fn bound_dot_offers<'db>(
     db: &'db dyn Db,
     owner: crate::ItemId<'db>,
@@ -964,17 +959,29 @@ pub fn bound_dot_offers<'db>(
     let self_ty = Ty::Param(param.clone());
     let mut out: Vec<MemberDotOffer> = Vec::new();
     for candidate in &candidates {
-        // Resolution's narrowing, asked of this name: anything but a lone
-        // winner is unofferable — and the lone winner is the candidate
-        // resolution would pick, so a trait's second requirement of the
-        // same name never doubles a row either.
+        // Resolution's narrowing, asked of this name: one candidate per
+        // trait, so a trait's second requirement of the same name never
+        // doubles a row. More than one trait is ambiguous, and each row
+        // writes its escape; a trait the file can't name is left out.
         let narrowed = narrow_by_name(&candidates, candidate.name);
-        let [(trait_, member_index)] = narrowed.as_slice() else {
+        let Some((trait_, member_index)) = narrowed
+            .iter()
+            .find(|(trait_, _)| *trait_ == candidate.trait_)
+        else {
             continue;
         };
-        if (trait_, member_index) != (&candidate.trait_, &candidate.member_index) {
+        if *member_index != candidate.member_index {
             continue;
         }
+        let escape = if narrowed.len() > 1 {
+            // TODO: halvko/must#261: import a trait the file can't name.
+            let Some(qualifier) = escape_qualifier(db, owner_loc.file, trait_) else {
+                continue;
+            };
+            Some(qualifier)
+        } else {
+            None
+        };
         let requirements = item_tree::trait_requirements(db, trait_.to_id(db));
         let Some(req) = requirements.get(*member_index as usize) else {
             continue;
@@ -995,6 +1002,7 @@ pub fn bound_dot_offers<'db>(
             sig,
             reach: offer.reach,
             refused: offer.refused,
+            escape,
         });
     }
     out
@@ -1014,11 +1022,32 @@ pub fn builtin_dot_members(db: &dyn Db, file: SourceFile, receiver_ty: &Ty) -> V
         .collect()
 }
 
+/// The name `file` knows `decl` by, as a G13 escape spells it: its own
+/// name when in scope, else the first import alias in name order.
+// TODO: halvko/must#212: share the quick fixes' naming helper once it lands.
+pub(crate) fn escape_qualifier(db: &dyn Db, file: SourceFile, decl: &ItemLoc) -> Option<String> {
+    let mut names: Vec<&str> = Vec::new();
+    let scope = crate::scopes::file_scope(db, file);
+    for (name, resolution) in scope.iter() {
+        if let crate::scopes::Resolution::TypeItem(loc) | crate::scopes::Resolution::TraitItem(loc) =
+            resolution
+            && loc == *decl
+        {
+            names.push(name);
+        }
+    }
+    let own = decl.display_name();
+    if names.contains(&own) {
+        return Some(own.to_owned());
+    }
+    names.into_iter().min().map(str::to_owned)
+}
+
 /// The members a dot on a CONCRETE `receiver_ty` (owned, or the innermost
 /// borrow of [`crate::deref_receiver`]) can call: inherent and trait-impl.
-/// A row is left out when the call it writes would be refused: some member
-/// of that name doesn't lower, or another member (or an fn-typed field)
-/// also takes the receiver shape that row's spelling leaves.
+/// A name with a member that doesn't lower is left out. A row another member
+/// (or an fn-typed field) also takes carries its G13 [`MemberDotOffer::escape`];
+/// one whose type or trait the file can't name is left out.
 pub fn concrete_dot_offers(
     db: &dyn Db,
     file: SourceFile,
@@ -1055,11 +1084,12 @@ pub fn concrete_dot_offers(
         if candidates.broken(db).is_some() {
             continue;
         }
-        let members = candidates
-            .inherent
-            .iter()
-            .chain(candidates.traits.iter().filter_map(|c| c.member.found()));
-        for member in members {
+        // Each member with the trait its escape would be qualified by; an
+        // inherent member (`None`) is qualified by its own type.
+        let inherent = (candidates.inherent.iter()).map(|m| (m, None));
+        let traits =
+            (candidates.traits.iter()).filter_map(|c| Some((c.member.found()?, Some(&c.trait_))));
+        for (member, qualified_by) in inherent.chain(traits) {
             let id = member.to_id(db);
             let Some(offer) = crate::ty::member_self_position(db, id)
                 .and_then(|position| crate::ty::dot_offer(receiver_ty, exclusive, position))
@@ -1072,15 +1102,28 @@ pub fn concrete_dot_offers(
                 crate::ty::DotReach::Direct => shape,
                 crate::ty::DotReach::WrittenBorrow { mutable } => ReceiverShape::Borrow { mutable },
             };
+            // Another carrier also takes this call, so the dot-call is
+            // ambiguous and the row writes its escape; a member the file
+            // can't name is left out (TODO: halvko/must#261: import it).
             let own = usize::from(crate::ty::member_takes(db, id, written));
-            if candidates.carriers(db, written) > own {
-                continue;
-            }
+            let escape = if candidates.carriers(db, written) > own {
+                let Some(qualifier) = qualified_by
+                    .cloned()
+                    .or_else(|| member.owner())
+                    .and_then(|decl| escape_qualifier(db, file, &decl))
+                else {
+                    continue;
+                };
+                Some(qualifier)
+            } else {
+                None
+            };
             out.push(MemberDotOffer {
                 name: name.clone(),
                 sig: crate::ty::signature(db, id),
                 reach: offer.reach,
                 refused: offer.refused,
+                escape,
             });
         }
     }

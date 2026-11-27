@@ -127,14 +127,17 @@
   home, and the completion view asks resolution's selection rule rather than restating it, so
   what `w.` offers follows what `w.push(x)` resolves to. A name carried by two bounds is
   decided by name alone: receiver shape never narrows a bound-directed ambiguity, even when
-  only one candidate is shape-viable, so the call is a permanent refusal and completion
-  suppresses the name rather than offering a merged or shape-picked row. Two recorded
-  divergences from what a call there would resolve to: that suppression, and a nested body
-  still being offered its enclosing bounds. A CONCRETE receiver's dot follows G13's
-  per-shape rule instead: it offers the inherent members, the members of every trait
-  implemented for the receiver's type (from either side of the impl, labeled by the
-  requirement's name) and the builtin members, and each row is offered exactly when the call
-  its spelling writes resolves to that member.
+  only one candidate is shape-viable. A CONCRETE receiver's dot follows G13's per-shape rule
+  instead: it offers the inherent members, the members of every trait implemented for the
+  receiver's type (from either side of the impl, labeled by the requirement's name) and the
+  builtin members. On either receiver each row writes a call that resolves to its member.
+  Where the dot-call would be ambiguous under that receiver's rule, the member is still
+  offered, labeled by its path and ranked as any member, and writes the G13 path-call escape
+  with the receiver as the last argument (`Ord::ord($1, x.&)`), so every reachable member
+  stays one accept away. The path uses the name the file knows the trait or type by, an
+  import's alias included, and the ambiguity error spells its escapes the same way; a member
+  whose trait or type the file can't name is not offered. One recorded divergence from what
+  a call there would resolve to: a nested body is still offered its enclosing bounds.
 - **P16** Completion writes the borrow the compiler will not (G14). On an owned receiver the
   dot also offers members and requirements taking `Self.&` / `Self.&mut`, and accepting one
   rewrites the dot as `.&.` / `.&mut.`, so the user lands on the licensed borrow-receiver call
@@ -148,9 +151,7 @@
   because of its type's borrow layers or the place it is read from (an immutable root, a
   `static`, a shared or raw step). Examples: `.&mut.add()` on an immutable root, `add()` on
   `Counter.&`, `*.add()` on `Counter.&mut.&`, and `s.*.c.add()` with `c: Counter.&mut` and
-  `s: S.&`. The exception is a call that would not resolve to the row's member at all: a
-  concrete-receiver name another member or an fn-typed field also takes at that shape is
-  not offered (P15).
+  `s: S.&`.
 - **P17** Completion writes turbofishes the grammar requires, whole or up to `::<`. After a
   type's `.`, or a partial head such as `&` (a trigger character) or `&m`, a borrow pointer
   completes whole (`&::<@a>`, `&mut::<@a>`; a region is required everywhere), one candidate

@@ -180,6 +180,16 @@ impl ItemLoc {
         )
     }
 
+    /// The item a member location belongs to; `None` for a top-level one.
+    pub fn owner(&self) -> Option<ItemLoc> {
+        self.member.as_ref()?;
+        Some(ItemLoc::top_level(
+            self.file,
+            self.name.clone(),
+            self.disambiguator,
+        ))
+    }
+
     /// Always succeeds (interning): an `ItemLoc` held across an edit that
     /// deleted the item yields an id whose queries all answer the empty/
     /// error case — total, never a panic.

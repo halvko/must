@@ -6135,15 +6135,21 @@ impl<'db> InferCtx<'db> {
                 // MORE THAN ONE candidate: refuse, naming every escape.
                 if carriers > 1 {
                     let mut candidates: Vec<MemberCandidate> = Vec::new();
+                    // Spelled as completion writes the escapes: by the
+                    // names this file knows the declarations by.
+                    let qualifier =
+                        |decl: &ItemLoc| crate::traits::escape_qualifier(self.db, self.file, decl);
                     if let Some(def) = &inherent_carrier {
+                        let type_name = def.owner().and_then(|decl| qualifier(&decl));
                         candidates.push(MemberCandidate::Inherent {
-                            type_name: recv_ty.display(),
+                            type_name: type_name.unwrap_or_else(|| recv_ty.display()),
                             def: def.clone(),
                         });
                     }
                     for candidate in &trait_carriers {
                         candidates.push(MemberCandidate::Trait {
-                            trait_name: candidate.trait_.display_name().to_owned(),
+                            trait_name: qualifier(&candidate.trait_)
+                                .unwrap_or_else(|| candidate.trait_.display_name().to_owned()),
                             type_name: recv_ty.display(),
                             // A dot-call's receiver sits at the
                             // requirement's `Self` parameter, so the short
@@ -7161,7 +7167,8 @@ impl<'db> InferCtx<'db> {
                 let candidates = candidates
                     .iter()
                     .map(|(trait_, _)| MemberCandidate::Trait {
-                        trait_name: trait_.display_name().to_owned(),
+                        trait_name: crate::traits::escape_qualifier(self.db, self.file, trait_)
+                            .unwrap_or_else(|| trait_.display_name().to_owned()),
                         type_name: receiver_ty.display(),
                         short: true,
                         def: Some(trait_.clone()),
