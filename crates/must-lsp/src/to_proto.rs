@@ -5,6 +5,12 @@ use ide::LineIndex;
 use line_index::WideEncoding;
 use syntax::{TextRange, TextSize};
 
+/// The URI of the file `name` in the directory of `uri`'s file.
+pub(crate) fn sibling_uri(uri: &lsp_types::Uri, name: &str) -> Option<lsp_types::Uri> {
+    let (dir, _) = uri.as_str().rsplit_once('/')?;
+    format!("{dir}/{name}").parse().ok()
+}
+
 pub(crate) fn position(line_index: &LineIndex, offset: TextSize) -> lsp_types::Position {
     let line_col = line_index.line_col(offset);
     // Clients default to UTF-16 column units.

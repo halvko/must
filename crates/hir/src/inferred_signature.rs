@@ -85,6 +85,7 @@ impl InferredSignature {
         syntax::Fix {
             label: self.label.to_owned(),
             edits: self.parts.iter().map(SignaturePart::edit).collect(),
+            new_files: Vec::new(),
         }
     }
 }

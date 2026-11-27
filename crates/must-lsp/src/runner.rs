@@ -1,6 +1,7 @@
 //! `must run file.must -e 'expr'`: evaluate an expression in a file's
-//! scope with run-mode semantics. The same MIR and machine the editor's
-//! const eval uses — only the driver differs.
+//! scope with run-mode semantics, the file loaded with its library. The
+//! same MIR and machine the editor's const eval uses — only the driver
+//! differs.
 //!
 //! Programs run even when they don't typecheck: execution proceeds until it
 //! reaches a trap, then crashes with the diagnostic the editor would show,
@@ -11,7 +12,10 @@ use std::io::{IsTerminal, Write};
 use base_db::{RootDatabase, SourceFile};
 use eval::{EvalErrorKind, Machine, NoteAnchor, RunMode, Value};
 use line_index::WideEncoding;
+use syntax::TextSize;
 use syntax::ast::AstNode;
+
+use crate::project::Sources;
 
 /// The entry expression is wrapped in a synthetic item appended to the file:
 /// running *is* evaluating that item's root body, just at `const_depth` 0.
@@ -19,12 +23,13 @@ const ENTRY_NAME: &str = "__must_entry";
 
 /// Read, evaluate, print. Returns the process exit code.
 pub fn run(path: &str, expr: &str) -> i32 {
-    let text = match std::fs::read_to_string(path) {
-        Ok(text) => text,
-        Err(err) => {
-            eprintln!("error: cannot read `{path}`: {err}");
+    let program = match load(path, expr) {
+        Ok(program) => Ok(program),
+        Err(LoadError::Source(message)) => {
+            eprintln!("{message}");
             return 2;
         }
+        Err(LoadError::Prepare(err)) => Err(String::from(err)),
     };
     let stdout = std::io::stdout();
     // Real, locked, line-buffered stdin — `read_line`'s source in `run`
@@ -34,7 +39,7 @@ pub fn run(path: &str, expr: &str) -> i32 {
     // ordinary case) passes through untouched and silent.
     let stdin = std::io::stdin();
     let input = TtyHintReader::new(stdin.lock());
-    match evaluate(text, path, expr, stdout.lock(), input) {
+    match program.and_then(|program| evaluate_program(&program, stdout.lock(), input)) {
         Ok(Some(value)) => {
             println!("{value}");
             0
@@ -177,6 +182,47 @@ impl From<PrepareError> for String {
     }
 }
 
+/// A program loaded from disk, ready to run: the file named, its library,
+/// and the entry expression injected into the file.
+pub struct Program {
+    pub db: RootDatabase,
+    pub sources: Sources,
+    pub prepared: Prepared,
+}
+
+/// Why [`load`] produced nothing to run.
+pub enum LoadError {
+    /// A file could not be read, or its `must.toml` is refused, so there is
+    /// no program to look at; rendered.
+    Source(String),
+    Prepare(PrepareError),
+}
+
+/// Load the file at `path`, with its library when a `must.toml` sits at or
+/// above it, and inject `expr` as its entry item.
+pub fn load(path: &str, expr: &str) -> Result<Program, LoadError> {
+    let mut db = RootDatabase::default();
+    let mut sources = Sources::default();
+    let mut injection = None;
+    let file = sources
+        .load(&mut db, path, |text| {
+            let injected = Injection::new(text, expr);
+            let full = injected.full.clone();
+            injection = Some(injected);
+            full
+        })
+        .map_err(LoadError::Source)?;
+    let injection = injection.expect("the named file is edited once");
+    let prepared = injection
+        .validate(&db, file, path)
+        .map_err(LoadError::Prepare)?;
+    Ok(Program {
+        db,
+        sources,
+        prepared,
+    })
+}
+
 /// Inject `expr` as the entry item of `text` and validate the injection.
 /// Errors come back fully rendered for the user.
 pub fn prepare(
@@ -185,77 +231,132 @@ pub fn prepare(
     path: &str,
     expr: &str,
 ) -> Result<Prepared, PrepareError> {
-    let original_len = text.len();
-    // Lengthened so the file never spells it: the entry never collides
-    // with (and is never reported as a duplicate of) a user item.
-    let mut entry_name = ENTRY_NAME.to_owned();
-    while text.contains(&entry_name) {
-        entry_name.push('_');
-    }
-    let entry_prefix = format!("static {entry_name} = (");
-    let entry_item = format!("{entry_prefix}{expr});");
-    let full = format!("{text}\n{entry_item}\n");
-    // The appended item's own span, down to where its expression starts.
-    // Broken user code can cascade a parse error onto the generated prefix
-    // or to the end of the file; only errors inside the expression itself
-    // are the entry's.
-    let entry_start = original_len + 1;
-    let expr_start = entry_start + entry_prefix.len();
-    let entry_end = entry_start + entry_item.len();
-    let file = SourceFile::new(db, path.to_owned(), full);
+    let injection = Injection::new(text, expr);
+    let file = SourceFile::new(db, path.to_owned(), injection.full.clone());
+    injection.validate(db, file, path)
+}
 
-    // Finding no item named `entry_name` means the end of the user's file
-    // ate the injected item (an unterminated string swallows everything
-    // after it), and the honest report is the file's own syntax error, not
-    // a complaint about the entry expression.
-    let entry = hir::file_item_ids(db, file)
-        .iter()
-        .copied()
-        .find(|item| *item.name(db) == entry_name);
-    let Some(entry) = entry else {
-        let parse = base_db::parse(db, file);
-        if let Some(err) = parse
-            .errors()
+/// A file's text with an entry item appended.
+struct Injection {
+    full: String,
+    entry_name: String,
+    original_len: usize,
+    expr_start: usize,
+    entry_end: usize,
+}
+
+impl Injection {
+    fn new(text: &str, expr: &str) -> Injection {
+        let original_len = text.len();
+        // Lengthened so the file never spells it: the entry never collides
+        // with (and is never reported as a duplicate of) a user item.
+        let mut entry_name = ENTRY_NAME.to_owned();
+        while text.contains(&entry_name) {
+            entry_name.push('_');
+        }
+        let entry_prefix = format!("static {entry_name} = (");
+        let entry_item = format!("{entry_prefix}{expr});");
+        let full = format!("{text}\n{entry_item}\n");
+        // The appended item's own span, down to where its expression
+        // starts. Broken user code can cascade a parse error onto the
+        // generated prefix or to the end of the file; only errors inside
+        // the expression itself are the entry's.
+        let entry_start = original_len + 1;
+        Injection {
+            full,
+            entry_name,
+            original_len,
+            expr_start: entry_start + entry_prefix.len(),
+            entry_end: entry_start + entry_item.len(),
+        }
+    }
+
+    /// The entry item in `file`, whose text is [`Injection::full`], or why
+    /// there is none to run: the entry expression does not parse, or the
+    /// file's own syntax error swallowed it.
+    fn validate(
+        &self,
+        db: &RootDatabase,
+        file: SourceFile,
+        path: &str,
+    ) -> Result<Prepared, PrepareError> {
+        let Injection {
+            entry_name,
+            original_len,
+            expr_start,
+            entry_end,
+            ..
+        } = self;
+        let (original_len, expr_start, entry_end) = (*original_len, *expr_start, *entry_end);
+        // Finding no item named `entry_name` means the end of the user's file
+        // ate the injected item (an unterminated string swallows everything
+        // after it), and the honest report is the file's own syntax error, not
+        // a complaint about the entry expression.
+        let entry = hir::file_item_ids(db, file)
             .iter()
-            .rev()
-            .find(|err| usize::from(err.range.start()) <= original_len)
-        {
-            let line_col = base_db::line_index(db, file).line_col(err.range.start());
-            return Err(PrepareError::FileSyntax(format!(
-                "error: cannot evaluate the entry expression: \
-                 the file has a syntax error that swallows the end of the file\n  \
-                 --> {path}:{}:{}: {}",
-                line_col.line + 1,
-                line_col.col + 1,
+            .copied()
+            .find(|item| *item.name(db) == *entry_name);
+        let Some(entry) = entry else {
+            let parse = base_db::parse(db, file);
+            if let Some(err) = parse
+                .errors()
+                .iter()
+                .rev()
+                .find(|err| usize::from(err.range.start()) <= original_len)
+            {
+                let line_col = base_db::line_index(db, file).line_col(err.range.start());
+                return Err(PrepareError::FileSyntax(format!(
+                    "error: cannot evaluate the entry expression: \
+                     the file has a syntax error that swallows the end of the file\n  \
+                     --> {path}:{}:{}: {}",
+                    line_col.line + 1,
+                    line_col.col + 1,
+                    err.message
+                )));
+            }
+            return Err(PrepareError::Entry(
+                "error: invalid entry expression".to_owned(),
+            ));
+        };
+
+        // The program may be arbitrarily broken — that's the point — but the
+        // *entry expression* must at least parse, or running it means nothing.
+        if let Some(err) = base_db::parse(db, file).errors().iter().find(|err| {
+            usize::from(err.range.start()) >= expr_start
+                && usize::from(err.range.end()) <= entry_end
+        }) {
+            return Err(PrepareError::Entry(format!(
+                "error: invalid entry expression: {}",
                 err.message
             )));
         }
-        return Err(PrepareError::Entry(
-            "error: invalid entry expression".to_owned(),
-        ));
-    };
 
-    // The program may be arbitrarily broken — that's the point — but the
-    // *entry expression* must at least parse, or running it means nothing.
-    if let Some(err) = base_db::parse(db, file).errors().iter().find(|err| {
-        usize::from(err.range.start()) >= expr_start && usize::from(err.range.end()) <= entry_end
-    }) {
-        return Err(PrepareError::Entry(format!(
-            "error: invalid entry expression: {}",
-            err.message
-        )));
+        Ok(Prepared {
+            file,
+            entry: hir::item_loc(db, entry),
+            original_len,
+        })
     }
-
-    Ok(Prepared {
-        file,
-        entry: hir::item_loc(db, entry),
-        original_len,
-    })
 }
 
-/// Map an eval origin to a 1-based (line, column) in the user's part of the
-/// file, columns in UTF-16 code units — the DAP's units. `None` for
-/// synthetic (injected-entry) or unmappable positions.
+/// Whether `offset` in `at` is in the entry item appended to `file`, past
+/// the `original_len` bytes the user wrote.
+fn in_entry(file: SourceFile, original_len: usize, at: SourceFile, offset: TextSize) -> bool {
+    at == file && usize::from(offset) > original_len
+}
+
+impl Prepared {
+    /// Whether `offset` in `at` is in the injected entry item rather than in
+    /// text the user wrote.
+    pub fn in_entry(&self, at: SourceFile, offset: TextSize) -> bool {
+        in_entry(self.file, self.original_len, at, offset)
+    }
+}
+
+/// Map an eval origin to a 1-based (line, column) in its own file, columns
+/// in UTF-16 code units — the DAP's units. `None` for unmappable positions
+/// and for those in the entry item appended to `file` after its first
+/// `original_len` bytes.
 pub fn source_position(
     db: &RootDatabase,
     file: SourceFile,
@@ -264,10 +365,10 @@ pub fn source_position(
 ) -> Option<(u32, u32)> {
     let (loc, expr) = origin;
     let range = expr_range(db, loc.to_id(db), *expr)?;
-    if usize::from(range.start()) > original_len {
+    if in_entry(file, original_len, loc.file, range.start()) {
         return None;
     }
-    let line_index = base_db::line_index(db, file);
+    let line_index = base_db::line_index(db, loc.file);
     let line_col = line_index.line_col(range.start());
     let wide = line_index
         .to_wide(WideEncoding::Utf16, line_col)
@@ -275,10 +376,9 @@ pub fn source_position(
     Some((wide.line + 1, wide.col + 1))
 }
 
-/// Evaluate `expr` in `text`'s file scope, writing `print` output to `out`
-/// and feeding `read_line` from `input`. `Ok(Some(_))` is a non-unit result
-/// rendered for display; errors come back rendered with a `path:line:col`
-/// location when one is known.
+/// Evaluate `expr` in `text`'s file scope, the file loaded by itself,
+/// writing `print` output to `out` and feeding `read_line` from `input`.
+/// See [`evaluate_program`].
 pub fn evaluate(
     text: String,
     path: &str,
@@ -287,14 +387,29 @@ pub fn evaluate(
     input: impl std::io::BufRead,
 ) -> Result<Option<String>, String> {
     let db = RootDatabase::default();
-    let Prepared {
-        file,
-        entry,
-        original_len,
-    } = prepare(&db, &text, path, expr)?;
+    let prepared = prepare(&db, &text, path, expr)?;
+    let mut sources = Sources::default();
+    sources.insert(prepared.file, path.to_owned(), text);
+    let program = Program {
+        db,
+        sources,
+        prepared,
+    };
+    evaluate_program(&program, out, input)
+}
 
-    let mut machine = Machine::new(&db, RunMode { out, input });
-    match machine.eval_root(&entry) {
+/// Run `program`'s entry, writing `print` output to `out` and feeding
+/// `read_line` from `input`. `Ok(Some(_))` is a non-unit result rendered for
+/// display; errors come back rendered with a `path:line:col` location when
+/// one is known.
+pub fn evaluate_program(
+    program: &Program,
+    out: impl Write,
+    input: impl std::io::BufRead,
+) -> Result<Option<String>, String> {
+    let db = &program.db;
+    let mut machine = Machine::new(db, RunMode { out, input });
+    match machine.eval_root(&program.prepared.entry) {
         Ok(Value::Unit) => Ok(None),
         Ok(value) => Ok(Some(value.display())),
         Err(err) => {
@@ -313,23 +428,14 @@ pub fn evaluate(
                 EvalErrorKind::Uninstantiated => "error",
             };
             let mut rendered = format!("{prefix}: {}", err.message);
-            if let Some(location) =
-                locate(&db, file, path, original_len, err.origin, NoteAnchor::Expr)
-            {
+            if let Some(location) = locate(program, err.origin, NoteAnchor::Expr) {
                 rendered.push_str(&format!("\n  --> {location}"));
             }
             // Secondary provenance ("allocated here" on a double free):
             // one located line per note.
             for note in &err.notes {
                 rendered.push_str(&format!("\n  note: {}", note.message));
-                if let Some(location) = locate(
-                    &db,
-                    file,
-                    path,
-                    original_len,
-                    note.origin.clone(),
-                    note.anchor,
-                ) {
+                if let Some(location) = locate(program, note.origin.clone(), note.anchor) {
                     rendered.push_str(&format!("\n  --> {location}"));
                 }
             }
@@ -338,16 +444,15 @@ pub fn evaluate(
     }
 }
 
+/// `path:line:col` of an eval origin, in whichever of the program's files
+/// it is.
 fn locate(
-    db: &RootDatabase,
-    file: SourceFile,
-    path: &str,
-    original_len: usize,
+    program: &Program,
     origin: Option<(hir::ItemLoc, hir::ExprId)>,
     anchor: NoteAnchor,
 ) -> Option<String> {
+    let db = &program.db;
     let (loc, expr) = origin?;
-    // Single-file world: the origin's file is the one we run.
     let item = loc.to_id(db);
     let range = match anchor {
         NoteAnchor::Expr => expr_range(db, item, expr)?,
@@ -355,10 +460,11 @@ fn locate(
     };
     // The synthetic entry line isn't part of the user's file; a location
     // there would point past its end.
-    if usize::from(range.start()) > original_len {
+    if program.prepared.in_entry(loc.file, range.start()) {
         return Some("entry expression".to_owned());
     }
-    let line_col = base_db::line_index(db, file).line_col(range.start());
+    let line_col = base_db::line_index(db, loc.file).line_col(range.start());
+    let path = program.sources.display(loc.file)?;
     Some(format!("{path}:{}:{}", line_col.line + 1, line_col.col + 1))
 }
 

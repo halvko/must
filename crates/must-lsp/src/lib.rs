@@ -15,6 +15,7 @@ pub mod compile;
 pub mod dap;
 mod from_proto;
 mod pool;
+pub mod project;
 pub mod runner;
 mod to_proto;
 
@@ -26,12 +27,13 @@ use base_db::SourceFile;
 use ide::{AnalysisHost, cancellable};
 use lsp_server::{Connection, ErrorCode, Message, Notification, Request, RequestId, Response};
 use lsp_types::notification::{
-    DidChangeTextDocument, DidCloseTextDocument, DidOpenTextDocument, Notification as _,
-    PublishDiagnostics,
+    DidChangeTextDocument, DidChangeWatchedFiles, DidCloseTextDocument, DidCreateFiles,
+    DidDeleteFiles, DidOpenTextDocument, Notification as _, PublishDiagnostics,
 };
 use lsp_types::request::{
     CodeActionRequest, CodeLensRequest, Completion, ExecuteCommand, GotoDefinition, HoverRequest,
-    InlayHintRequest, Request as _, SemanticTokensFullRequest, SemanticTokensRefresh,
+    InlayHintRequest, RegisterCapability, Request as _, SemanticTokensFullRequest,
+    SemanticTokensRefresh,
 };
 
 /// The workspace command behind the ▶ run code lens: arguments are
@@ -85,7 +87,32 @@ pub fn server_capabilities() -> lsp_types::ServerCapabilities {
                 },
             ),
         ),
+        // The client's own file operations, the standalone quick fix's
+        // `must.toml` among them, reach the server even where it cannot
+        // watch files (see `GlobalState::watch_manifests`).
+        workspace: Some(lsp_types::WorkspaceServerCapabilities {
+            file_operations: Some(lsp_types::WorkspaceFileOperationsServerCapabilities {
+                did_create: Some(manifest_operations()),
+                did_delete: Some(manifest_operations()),
+                ..Default::default()
+            }),
+            ..Default::default()
+        }),
         ..Default::default()
+    }
+}
+
+/// The file operations on a `must.toml` the server wants to hear about.
+fn manifest_operations() -> lsp_types::FileOperationRegistrationOptions {
+    lsp_types::FileOperationRegistrationOptions {
+        filters: vec![lsp_types::FileOperationFilter {
+            scheme: Some("file".to_owned()),
+            pattern: lsp_types::FileOperationPattern {
+                glob: format!("**/{}", project::MANIFEST),
+                matches: Some(lsp_types::FileOperationPatternKind::File),
+                options: None,
+            },
+        }],
     }
 }
 
@@ -101,6 +128,7 @@ pub fn run(connection: Connection) -> ServerResult<()> {
     {
         state.host.set_big_inference_group(expressions);
     }
+    state.watch_manifests(&init.capabilities);
     tracing::info!("initialized");
     state.main_loop(&connection)
 }
@@ -185,6 +213,9 @@ struct GlobalState {
     /// gates every would-be snippet insertion — see
     /// `to_proto::completion_item`.
     snippet_support: bool,
+    /// Client applies workspace edits that create files: the quick fix that
+    /// creates a `must.toml` is offered only then.
+    create_files: bool,
     /// Counter for ids of server→client requests (own namespace).
     outgoing_requests: i32,
 }
@@ -217,6 +248,8 @@ struct Snapshot {
     files: Arc<FileMaps>,
     /// See `GlobalState::snippet_support`.
     snippet_support: bool,
+    /// See `GlobalState::create_files`.
+    create_files: bool,
 }
 
 impl Snapshot {
@@ -250,6 +283,16 @@ impl GlobalState {
                 .and_then(|c| c.completion_item.as_ref())
                 .and_then(|ci| ci.snippet_support)
                 .unwrap_or(false),
+            create_files: client
+                .workspace
+                .as_ref()
+                .and_then(|w| w.workspace_edit.as_ref())
+                .is_some_and(|edit| {
+                    edit.document_changes == Some(true)
+                        && (edit.resource_operations.as_ref()).is_some_and(|ops| {
+                            ops.contains(&lsp_types::ResourceOperationKind::Create)
+                        })
+                }),
             outgoing_requests: 0,
         }
     }
@@ -259,6 +302,7 @@ impl GlobalState {
             analysis: self.host.snapshot(),
             files: Arc::clone(&self.files),
             snippet_support: self.snippet_support,
+            create_files: self.create_files,
         }
     }
 
@@ -460,7 +504,7 @@ impl GlobalState {
                     serde_json::from_value(notification.params)?;
                 let doc = params.text_document;
                 let file = self.open_file(doc.uri.clone(), doc.text);
-                self.publish_diagnostics(doc.uri, file, doc.version);
+                self.publish_diagnostics(doc.uri, file, Some(doc.version));
                 // The refresh covers both ways the initial pull goes
                 // missing: Zed pulls *before* `didOpen` (answered
                 // `ContentModified` above), and for reopened buffers it
@@ -487,7 +531,22 @@ impl GlobalState {
                     return Ok(());
                 };
                 self.host.set_file_text(file, change.text);
-                self.publish_diagnostics(uri, file, version);
+                self.publish_diagnostics(uri, file, Some(version));
+            }
+            // Only `must.toml` is watched or asked about: whichever came or
+            // went, every open document may have changed sides.
+            DidChangeWatchedFiles::METHOD | DidCreateFiles::METHOD | DidDeleteFiles::METHOD => {
+                let open: Vec<(lsp_types::Uri, SourceFile)> = (self.files.by_uri.iter())
+                    .filter_map(|(uri, state)| match state {
+                        FileState::Open(file) => Some((uri.clone(), *file)),
+                        FileState::Closed(_) => None,
+                    })
+                    .collect();
+                for (uri, file) in open {
+                    if self.refresh_membership(&uri, file) {
+                        self.publish_diagnostics(uri, file, None);
+                    }
+                }
             }
             DidCloseTextDocument::METHOD => {
                 let params: lsp_types::DidCloseTextDocumentParams =
@@ -510,6 +569,41 @@ impl GlobalState {
             _ => {}
         }
         Ok(())
+    }
+
+    /// Asks the client to report every `must.toml` created or deleted, so
+    /// open documents learn when they stop or start being standalone (see
+    /// [`GlobalState::refresh_membership`]). A client that cannot watch
+    /// files hears only of its own file operations (`server_capabilities`)
+    /// and re-checks the rest on open.
+    fn watch_manifests(&mut self, client: &lsp_types::ClientCapabilities) {
+        let dynamic = (client.workspace.as_ref())
+            .and_then(|w| w.did_change_watched_files.as_ref())
+            .and_then(|watched| watched.dynamic_registration)
+            .unwrap_or(false);
+        if !dynamic {
+            return;
+        }
+        let options = lsp_types::DidChangeWatchedFilesRegistrationOptions {
+            watchers: vec![lsp_types::FileSystemWatcher {
+                glob_pattern: lsp_types::GlobPattern::String(format!("**/{}", project::MANIFEST)),
+                kind: Some(lsp_types::WatchKind::Create | lsp_types::WatchKind::Delete),
+            }],
+        };
+        let registration = lsp_types::Registration {
+            id: "must-toml".to_owned(),
+            method: DidChangeWatchedFiles::METHOD.to_owned(),
+            register_options: serde_json::to_value(options).ok(),
+        };
+        self.outgoing_requests += 1;
+        let req = Request::new(
+            RequestId::from(format!("must-lsp/{}", self.outgoing_requests)),
+            RegisterCapability::METHOD.to_owned(),
+            lsp_types::RegistrationParams {
+                registrations: vec![registration],
+            },
+        );
+        let _ = self.sender.send(req.into());
     }
 
     /// Ask the client to re-pull semantic tokens for visible editors (a
@@ -564,11 +658,13 @@ impl GlobalState {
                 // the same way round as `close_file` below.
                 let file = state.source_file();
                 self.host.set_file_text(file, text);
+                self.refresh_membership(&uri, file);
                 self.files_mut().by_uri.insert(uri, FileState::Open(file));
                 file
             }
             None => {
                 let file = self.host.create_file(uri.to_string(), text);
+                self.refresh_membership(&uri, file);
                 let maps = self.files_mut();
                 maps.by_uri.insert(uri.clone(), FileState::Open(file));
                 // The only place an input is minted is the only place the
@@ -579,6 +675,23 @@ impl GlobalState {
                 file
             }
         }
+    }
+
+    /// Marks `file` standalone while no `must.toml` sits at or above it,
+    /// and returns whether that changed. Called on open and whenever a
+    /// `must.toml` comes or goes: the client's own file operations, and
+    /// what [`GlobalState::watch_manifests`] watches.
+    // TODO: halvko/must#149: a file under a `must.toml` should be loaded
+    // with its library; it stays loaded by itself (`Membership::Unknown`).
+    fn refresh_membership(&mut self, uri: &lsp_types::Uri, file: SourceFile) -> bool {
+        let standalone =
+            from_proto::file_path(uri).is_some_and(|path| project::find_root(&path).is_none());
+        let membership = if standalone {
+            base_db::Membership::Standalone
+        } else {
+            base_db::Membership::Unknown
+        };
+        self.host.set_membership(file, membership)
     }
 
     /// Gives the buffer back: empties the document's text and parks its
@@ -632,7 +745,7 @@ impl GlobalState {
     /// off the main loop the answer can land after the client has typed on,
     /// and the version is what lets the client drop squiggles computed for
     /// text it no longer has.
-    fn publish_diagnostics(&mut self, uri: lsp_types::Uri, file: SourceFile, version: i32) {
+    fn publish_diagnostics(&mut self, uri: lsp_types::Uri, file: SourceFile, version: Option<i32>) {
         let generation = self.bump_generation(&uri);
         let generations = Arc::clone(&self.diagnostics_generation);
         let snapshot = self.snapshot();
@@ -665,7 +778,7 @@ impl GlobalState {
             if generations.get(&uri) != Some(&generation) {
                 return;
             }
-            let _ = sender.send(diagnostics_notification(uri, diagnostics, Some(version)).into());
+            let _ = sender.send(diagnostics_notification(uri, diagnostics, version).into());
         });
     }
 
@@ -759,26 +872,9 @@ impl Snapshot {
 
         let mut actions = Vec::new();
         for (fix, diagnostic) in offers {
-            // Each edit names its target file; resolve every one through
-            // its own URI and line index. An edit whose file the client
-            // doesn't have open drops the whole action — applying half a
-            // fix is worse than offering none.
-            let mut changes: HashMap<lsp_types::Uri, Vec<lsp_types::TextEdit>> = HashMap::new();
-            let mut all_resolved = true;
-            for file_edit in &fix.edits {
-                let Some(target_uri) = self.uri_for(file_edit.file) else {
-                    all_resolved = false;
-                    break;
-                };
-                let target_index = self.analysis.line_index(file_edit.file);
-                changes
-                    .entry(target_uri)
-                    .or_default()
-                    .push(to_proto::text_edit(target_index, &file_edit.edit));
-            }
-            if !all_resolved {
+            let Some(edit) = self.workspace_edit(&fix) else {
                 continue;
-            }
+            };
             actions.push(lsp_types::CodeActionOrCommand::CodeAction(
                 lsp_types::CodeAction {
                     title: fix.label,
@@ -789,15 +885,69 @@ impl Snapshot {
                     }),
                     diagnostics: diagnostic
                         .map(|diagnostic| vec![to_proto::diagnostic(self, line_index, diagnostic)]),
-                    edit: Some(lsp_types::WorkspaceEdit {
-                        changes: Some(changes),
-                        ..Default::default()
-                    }),
+                    edit: Some(edit),
                     ..Default::default()
                 },
             ));
         }
         Some(actions)
+    }
+
+    /// `fix` as the client applies it. Each edit names its target file;
+    /// resolve every one through its own URI and line index. `None` drops
+    /// the whole action, since applying half a fix is worse than offering
+    /// none: an edit whose file the client doesn't have, or a file to create
+    /// that the client can't.
+    fn workspace_edit(&self, fix: &ide::Fix) -> Option<lsp_types::WorkspaceEdit> {
+        let mut changes: HashMap<lsp_types::Uri, Vec<lsp_types::TextEdit>> = HashMap::new();
+        for file_edit in &fix.edits {
+            let target_uri = self.uri_for(file_edit.file)?;
+            let target_index = self.analysis.line_index(file_edit.file);
+            changes
+                .entry(target_uri)
+                .or_default()
+                .push(to_proto::text_edit(target_index, &file_edit.edit));
+        }
+        if fix.new_files.is_empty() {
+            return Some(lsp_types::WorkspaceEdit {
+                changes: Some(changes),
+                ..Default::default()
+            });
+        }
+        // Creating a file takes `documentChanges`, where text edits are
+        // ordered operations too: the files first, then the edits.
+        if !self.create_files {
+            return None;
+        }
+        let mut operations = Vec::new();
+        for new_file in &fix.new_files {
+            let uri = to_proto::sibling_uri(&self.uri_for(new_file.beside)?, &new_file.name)?;
+            operations.push(lsp_types::DocumentChangeOperation::Op(
+                lsp_types::ResourceOp::Create(lsp_types::CreateFile {
+                    uri,
+                    options: Some(lsp_types::CreateFileOptions {
+                        overwrite: Some(false),
+                        ignore_if_exists: Some(true),
+                    }),
+                    annotation_id: None,
+                }),
+            ));
+        }
+        for (uri, edits) in changes {
+            operations.push(lsp_types::DocumentChangeOperation::Edit(
+                lsp_types::TextDocumentEdit {
+                    text_document: lsp_types::OptionalVersionedTextDocumentIdentifier {
+                        uri,
+                        version: None,
+                    },
+                    edits: edits.into_iter().map(lsp_types::OneOf::Left).collect(),
+                },
+            ));
+        }
+        Some(lsp_types::WorkspaceEdit {
+            document_changes: Some(lsp_types::DocumentChanges::Operations(operations)),
+            ..Default::default()
+        })
     }
 
     fn semantic_tokens(
@@ -1236,7 +1386,13 @@ mod tests {
             state.files.by_uri[&doc].source_file() == file,
             "reopening minted a second input for the same document"
         );
-        assert_eq!(state.host.snapshot().diagnostics(file).len(), 1);
+        // `/a.must` has no `must.toml` above it: besides its error, it gets
+        // the standalone hint.
+        let diagnostics = state.host.snapshot().diagnostics(file);
+        let errors = diagnostics
+            .iter()
+            .filter(|d| d.severity == ide::Severity::Error);
+        assert_eq!(errors.count(), 1);
     }
 
     #[test]
@@ -1379,5 +1535,54 @@ mod tests {
             state.files.by_file[&state.files.by_uri[&b].source_file()],
             b
         );
+    }
+
+    #[test]
+    fn a_file_follows_its_manifest_coming_and_going() {
+        let (mut state, _client) = server();
+        let dir = std::env::temp_dir().join(format!("must-lsp-manifest-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let doc = uri(&format!("file://{}/main.must", dir.display()));
+        let messages = |state: &GlobalState| -> Vec<String> {
+            let file = state.files.by_uri[&doc].source_file();
+            let diagnostics = state.host.snapshot().diagnostics(file);
+            diagnostics.into_iter().map(|d| d.message).collect()
+        };
+
+        open(&mut state, &doc, "static main = fn {};");
+        assert_eq!(
+            messages(&state),
+            ["standalone file, not in a project (no `must.toml` above it)"]
+        );
+        let manifest = dir.join(project::MANIFEST);
+        std::fs::write(&manifest, "").unwrap();
+        let manifest_event = |typ| lsp_types::DidChangeWatchedFilesParams {
+            changes: vec![lsp_types::FileEvent {
+                uri: uri(&format!("file://{}", manifest.display())),
+                typ,
+            }],
+        };
+        // The client's own file operation (the quick fix applied) does it.
+        notify::<DidCreateFiles>(
+            &mut state,
+            lsp_types::CreateFilesParams {
+                files: vec![lsp_types::FileCreate {
+                    uri: format!("file://{}", manifest.display()),
+                }],
+            },
+        );
+        assert_eq!(messages(&state), Vec::<String>::new());
+        // So does a watcher's report.
+        std::fs::remove_file(&manifest).unwrap();
+        notify::<DidChangeWatchedFiles>(
+            &mut state,
+            manifest_event(lsp_types::FileChangeType::DELETED),
+        );
+        assert_eq!(
+            messages(&state),
+            ["standalone file, not in a project (no `must.toml` above it)"]
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

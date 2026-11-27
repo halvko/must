@@ -73,6 +73,7 @@ pub fn tokenize(text: &str) -> (Vec<Token>, Vec<SyntaxError>) {
                         insert,
                     })
                     .collect(),
+                new_files: Vec::new(),
             });
             errors.push(SyntaxError {
                 message,

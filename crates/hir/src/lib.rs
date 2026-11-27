@@ -512,6 +512,7 @@ fn import_hints(
         [declaration] => Some(syntax::Fix {
             label: format!("Import `{name}` from `{}`", declaration.module),
             edits: vec![use_items_edit([(declaration.module.as_str(), name)])],
+            new_files: Vec::new(),
         }),
         _ => None,
     };
@@ -1464,6 +1465,7 @@ pub fn file_diagnostics(db: &dyn Db, file: SourceFile) -> Vec<Diagnostic> {
                             range: colon.text_range(),
                             insert: " =".to_owned(),
                         }],
+                        new_files: Vec::new(),
                     }),
                 InferenceDiagnostic::TypeMismatch {
                     expected,
@@ -1578,6 +1580,7 @@ pub fn file_diagnostics(db: &dyn Db, file: SourceFile) -> Vec<Diagnostic> {
                                 range: TextRange::empty(fn_lit.syntax().text_range().start()),
                                 insert: "const ".to_owned(),
                             }],
+                            new_files: Vec::new(),
                         })
                 }
                 _ => None,
@@ -1896,6 +1899,7 @@ pub fn range_diagnostics(db: &dyn Db, file: SourceFile) -> Vec<Diagnostic> {
                     range: TextRange::empty(brace.text_range().end()),
                     insert: split.separator().to_owned(),
                 }],
+                new_files: Vec::new(),
             }),
             related: Vec::new(),
         });
@@ -1912,16 +1916,29 @@ pub fn range_diagnostics(db: &dyn Db, file: SourceFile) -> Vec<Diagnostic> {
         .collect();
     let imports = library::file_imports(db, file);
     for (use_item, error) in root.use_items().zip(&imports.paths) {
-        let message = match error {
-            Some(library::PathError::NoModule { path }) if file.library(db).is_some() => {
-                format!("no module `{path}` in this library to import from")
-            }
+        let Some(library::PathError::NoModule { path }) = error else {
+            continue;
+        };
+        let (message, fix) = match file.membership(db) {
+            base_db::Membership::Library(_) => (
+                format!("no module `{path}` in this library to import from"),
+                None,
+            ),
+            // No library to import from: the fix makes the file's
+            // directory one.
+            base_db::Membership::Standalone => (
+                format!(
+                    "this file isn't in a project (no `must.toml` above it), \
+                     so it cannot import from `{path}`"
+                ),
+                Some(create_manifest_fix()),
+            ),
             // Loaded without its library: the library may well have
             // `path`, but nothing loaded it.
-            Some(library::PathError::NoModule { path }) => {
-                format!("this file is loaded on its own, so it cannot import from `{path}`")
-            }
-            Some(library::PathError::Broken) | None => continue,
+            base_db::Membership::Unknown => (
+                format!("this file is loaded on its own, so it cannot import from `{path}`"),
+                None,
+            ),
         };
         let mut segments = use_item.segments().map(|s| s.syntax().text_range());
         let first = segments.next().expect("a path error has a path");
@@ -1929,7 +1946,7 @@ pub fn range_diagnostics(db: &dyn Db, file: SourceFile) -> Vec<Diagnostic> {
             range: first.cover(segments.last().unwrap_or(first)),
             severity: Severity::Error,
             message,
-            fix: None,
+            fix,
             related: Vec::new(),
         });
     }
@@ -2331,6 +2348,16 @@ pub fn range_diagnostics(db: &dyn Db, file: SourceFile) -> Vec<Diagnostic> {
     diagnostics
 }
 
+/// The fix for a standalone file: an empty `must.toml` beside it makes its
+/// directory a library.
+pub fn create_manifest_fix() -> syntax::Fix {
+    syntax::Fix {
+        label: "Create `must.toml` here, making this directory a project".to_owned(),
+        edits: Vec::new(),
+        new_files: vec!["must.toml".to_owned()],
+    }
+}
+
 /// "Insert `{text}` before `.{name}`", at a field access's or dot-call's
 /// own `dot`, so the rest of the chain keeps its layout.
 fn insert_before_dot(dot: &syntax::SyntaxToken, text: &str, name: &str) -> syntax::Fix {
@@ -2340,6 +2367,7 @@ fn insert_before_dot(dot: &syntax::SyntaxToken, text: &str, name: &str) -> synta
             range: TextRange::empty(dot.text_range().start()),
             insert: text.to_owned(),
         }],
+        new_files: Vec::new(),
     }
 }
 
@@ -2359,6 +2387,7 @@ fn read_through_fix(found: ast::Expr) -> Option<syntax::Fix> {
                 ),
                 insert: String::new(),
             }],
+            new_files: Vec::new(),
         });
     }
     let postfix = matches!(
@@ -2396,6 +2425,7 @@ fn read_through(node: &syntax::SyntaxNode, insert: String) -> syntax::Fix {
             range: TextRange::empty(node.text_range().end()),
             insert,
         }],
+        new_files: Vec::new(),
     }
 }
 
@@ -2706,6 +2736,7 @@ fn members_fix(
                 range: semicolon.text_range(),
                 insert: format!(" {{{}\n{indent}}}", syntax::indented_lines(&indent, stubs)),
             }],
+            new_files: Vec::new(),
         });
     };
     let anchor = std::iter::successors(r_brace.prev_token(), |token| token.prev_token())
@@ -4140,6 +4171,7 @@ fn variant_position_error(
                                 ),
                                 insert: String::new(),
                             }],
+                            new_files: Vec::new(),
                         });
                         Some(NameError {
                             message: format!(

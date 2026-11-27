@@ -1,8 +1,13 @@
 //! `must check file.must ...`: batch diagnostics as text. The same
 //! `ide::Analysis` the editor drives — only the presentation differs: text
-//! with source snippets instead of published LSP diagnostics.
+//! with source snippets instead of published LSP diagnostics. Each file is
+//! checked with its whole library, when a `must.toml` sits at or above it:
+//! every error in the library is reported, the named files' first.
 
-use ide::{AnalysisHost, LineIndex, Severity};
+use base_db::{RootDatabase, SourceFile};
+use ide::{LineIndex, Severity};
+
+use crate::project::Sources;
 
 /// Check every file, print rendered diagnostics, return the exit code:
 /// 0 clean (warnings allowed), 1 with errors, 2 on usage/IO problems.
@@ -11,25 +16,31 @@ pub fn check(paths: &[String]) -> i32 {
         eprintln!("usage: must check <file.must>...");
         return 2;
     }
-    let mut host = AnalysisHost::new();
+    let mut db = RootDatabase::default();
+    let mut sources = Sources::default();
     let mut files = Vec::new();
     for path in paths {
-        match std::fs::read_to_string(path) {
-            Ok(text) => {
-                let file = host.create_file(path.clone(), text.clone());
-                files.push((path.clone(), text, file));
-            }
-            Err(err) => {
-                eprintln!("error: cannot read `{path}`: {err}");
+        match sources.load(&mut db, path, str::to_owned) {
+            Ok(file) => files.push(file),
+            Err(message) => {
+                eprintln!("{message}");
                 return 2;
             }
         }
     }
-    let analysis = host.snapshot();
+    let mut checked: Vec<SourceFile> = files.clone();
+    for &file in &files {
+        for other in library_files(&db, file) {
+            if !checked.contains(&other) {
+                checked.push(other);
+            }
+        }
+    }
+    let analysis = ide::Analysis::new(db);
     let mut errors = 0;
     let mut warnings = 0;
-    for (path, text, file) in &files {
-        let rendered = render(path, text, &analysis.diagnostics(*file));
+    for &file in &checked {
+        let rendered = render(&analysis, &sources, file, &analysis.diagnostics(file));
         errors += rendered.errors;
         warnings += rendered.warnings;
         print!("{}", rendered.text);
@@ -45,6 +56,15 @@ pub fn check(paths: &[String]) -> i32 {
     if errors > 0 { 1 } else { 0 }
 }
 
+/// Every module of `file`'s library, `file` first; just `file` when it
+/// stands alone.
+pub fn library_files(db: &RootDatabase, file: SourceFile) -> Vec<SourceFile> {
+    let mut files = vec![file];
+    let library = hir::library::library_of(db, file);
+    files.extend(library.files(db).into_iter().filter(|&other| other != file));
+    files
+}
+
 pub struct Rendered {
     pub text: String,
     pub errors: usize,
@@ -53,11 +73,18 @@ pub struct Rendered {
 
 /// Render one file's diagnostics rustc-style: severity + message, location,
 /// the offending source line with a caret span, then the related locations
-/// as notes. Info-severity diagnostics are skipped — they are companions
-/// synthesized for editors that render related information poorly; in text
-/// the notes already carry that content.
-pub fn render(path: &str, text: &str, diagnostics: &[ide::Diagnostic]) -> Rendered {
-    let line_index = LineIndex::new(text);
+/// as notes, each in its own file. Info-severity diagnostics are skipped —
+/// they are companions synthesized for editors that render related
+/// information poorly; in text the notes already carry that content.
+pub fn render(
+    analysis: &ide::Analysis,
+    sources: &Sources,
+    file: SourceFile,
+    diagnostics: &[ide::Diagnostic],
+) -> Rendered {
+    let path = sources.display(file).expect("a rendered file was loaded");
+    let text = sources.text(file).expect("a rendered file was loaded");
+    let line_index = analysis.line_index(file);
     let mut out = String::new();
     let mut errors = 0;
     let mut warnings = 0;
@@ -80,15 +107,22 @@ pub fn render(path: &str, text: &str, diagnostics: &[ide::Diagnostic]) -> Render
             start.line + 1,
             start.col + 1
         ));
-        out.push_str(&snippet(text, &line_index, start.line, diag.range));
+        out.push_str(&snippet(text, line_index, start.line, diag.range));
         if let Some(fix) = &diag.fix {
             out.push_str(&format!("   = help: {}\n", fix.label));
         }
         for related in &diag.related {
-            // Single-file world: every related location is in this file.
-            let pos = line_index.line_col(related.range.start());
+            // A location in a file no tool loaded (the prelude) has no
+            // text to point into.
+            let Some(related_path) = sources.display(related.file) else {
+                out.push_str(&format!("   = note: {}\n", related.message));
+                continue;
+            };
+            let pos = analysis
+                .line_index(related.file)
+                .line_col(related.range.start());
             out.push_str(&format!(
-                "   = note: {} ({path}:{}:{})\n",
+                "   = note: {} ({related_path}:{}:{})\n",
                 related.message,
                 pos.line + 1,
                 pos.col + 1
@@ -128,12 +162,17 @@ fn snippet(text: &str, line_index: &LineIndex, line: u32, range: syntax::TextRan
 mod tests {
     use expect_test::expect;
 
-    fn check_render(text: &str, expect: expect_test::Expect) {
+    fn render(text: &str) -> super::Rendered {
         let mut host = ide::AnalysisHost::new();
         let file = host.create_file("test.must".to_owned(), text.to_owned());
+        let mut sources = crate::project::Sources::default();
+        sources.insert(file, "test.must".to_owned(), text.to_owned());
         let analysis = host.snapshot();
-        let rendered = super::render("test.must", text, &analysis.diagnostics(file));
-        expect.assert_eq(&rendered.text);
+        super::render(&analysis, &sources, file, &analysis.diagnostics(file))
+    }
+
+    fn check_render(text: &str, expect: expect_test::Expect) {
+        expect.assert_eq(&render(text).text);
     }
 
     #[test]
@@ -211,10 +250,7 @@ static f = fn (n: usize) -> () {
     fn renders_dead_code_warning_distinctly_from_errors() {
         // A hole-named item is a warning, not an error: rendered with the
         // "warning" severity word and counted separately in the summary.
-        let mut host = ide::AnalysisHost::new();
-        let file = host.create_file("test.must".to_owned(), "static _ = true;".to_owned());
-        let analysis = host.snapshot();
-        let rendered = super::render("test.must", "static _ = true;", &analysis.diagnostics(file));
+        let rendered = render("static _ = true;");
         expect_test::expect![[r#"
             warning: this item binds nothing and its value cannot be used
               --> test.must:1:8
