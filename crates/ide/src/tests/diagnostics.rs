@@ -67,14 +67,14 @@ fn an_unused_binding_is_renamed_with_a_leading_underscore() {
 /// In `{ b }` one name both selects the field and binds it, so the
 /// rename keeps the field: `{ b as _b }`.
 #[test]
-fn an_unused_shorthand_field_binding_is_renamed_with_as() {
+fn an_unused_shorthand_field_binding_gets_a_pattern_of_its_own() {
     let (label, fixed) = apply_only_fix(
         "static f = fn (r: struct { a: usize, b: usize }) -> usize { let struct { a, mut b } = r; a };",
     );
     assert_eq!(label, "Rename to `_b`");
     assert_eq!(
         fixed,
-        "static f = fn (r: struct { a: usize, b: usize }) -> usize { let struct { a, mut b as _b } = r; a };"
+        "static f = fn (r: struct { a: usize, b: usize }) -> usize { let struct { a, b = mut _b } = r; a };"
     );
 }
 

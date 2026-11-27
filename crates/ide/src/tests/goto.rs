@@ -294,7 +294,7 @@ fn goto_record_destructure_rename_use_lands_on_the_rename() {
     check_goto(
         r#"
 static f = fn {
-    let struct { x as alpha } = struct { x = 1 };
+    let struct { x = alpha } = struct { x = 1 };
     print(alpha$0);
 }
 "#,

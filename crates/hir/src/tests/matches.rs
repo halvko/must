@@ -1218,3 +1218,64 @@ static f = fn (e: E) -> usize {
         "#]],
     );
 }
+
+// A record field meets a pattern of its own (`a = ::Some(n)`), and
+// exhaustiveness and reachability look through it like any other part.
+#[test]
+fn record_field_patterns_narrow_their_arm() {
+    check_diagnostics(
+        r#"
+type Opt = enum { Some(usize), None };
+static f = fn (r: struct { a: Opt, b: usize }) -> usize {
+    match r {
+        struct { a = ::Some(n), b } => n + b,
+    }
+};
+static g = fn (r: struct { a: Opt, b: usize }) -> usize {
+    match r {
+        struct { a = ::Some(n), .. } => n,
+        struct { a = ::None, b = 0 } => 0,
+        struct { b, .. } => b,
+        struct { a, b } => b,
+    }
+};
+static h = fn (struct { a = ::Some(n), b }: struct { a: Opt, b: usize }) -> usize { n + b };
+static k = fn (r: struct { a: usize, b: usize }) -> usize {
+    let struct { a = mut x, b = _ } = r;
+    x = x + 1;
+    x
+};
+"#,
+        expect![[r#"
+            102..107: this `match` does not cover `struct { a = Opt::None, .. }`
+            364..379: unreachable arm: the arms above match every value it matches
+            410..437: this pattern does not cover `struct { a = Opt::None, .. }`; use `match`
+        "#]],
+    );
+}
+
+// `mut` marks a binding, and `x = pattern` binds nothing under `x`.
+#[test]
+fn mut_on_a_record_field_with_a_pattern_moves_to_its_binding() {
+    let text =
+        "static f = fn (r: struct { x: usize }) -> usize { let struct { mut x = y } = r; y };";
+    let db = RootDatabase::default();
+    let file = SourceFile::new(&db, "test.must".to_owned(), text.to_owned());
+    let diagnostics = crate::file_diagnostics(&db, file);
+    let diag = diagnostics
+        .iter()
+        .find(|d| d.message.starts_with("`mut` marks a binding"))
+        .unwrap_or_else(|| panic!("no `mut` diagnostic in {diagnostics:?}"));
+    let fix = diag.fix.as_ref().expect("diagnostic has a fix");
+    assert_eq!(fix.label, "Move `mut` to the binding");
+    let mut fixed = text.to_owned();
+    let mut edits = fix.edits.clone();
+    edits.sort_by_key(|e| std::cmp::Reverse(e.range.start()));
+    for edit in edits {
+        fixed.replace_range(std::ops::Range::<usize>::from(edit.range), &edit.insert);
+    }
+    assert_eq!(
+        fixed,
+        "static f = fn (r: struct { x: usize }) -> usize { let struct { x = mut y } = r; y };"
+    );
+}

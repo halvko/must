@@ -578,7 +578,7 @@ fn in_file(file: SourceFile, fix: syntax::Fix) -> Fix {
 
 /// "Prefix with `_`" for an unused binding: renames `x` to `_x`, or, where
 /// one name both selects a record field and binds it (`{ x }`), keeps the
-/// field and renames the binding (`{ x as _x }`).
+/// field and binds it under the new name (`{ x = _x }`).
 fn prefix_underscore_fix(
     db: &RootDatabase,
     file: SourceFile,
@@ -593,20 +593,29 @@ fn prefix_underscore_fix(
     let shorthand = node
         .parent()
         .and_then(syntax::ast::RecordPatField::cast)
-        .is_some_and(|field| field.as_token().is_none());
-    let edit = if shorthand {
-        TextEdit {
-            range: TextRange::empty(range.end()),
-            insert: format!(" as _{name}"),
-        }
-    } else {
-        TextEdit {
+        .filter(|field| field.is_shorthand());
+    let edits = match shorthand {
+        // `mut x` becomes `x = mut _x`: the `mut` moves to the binding.
+        Some(field) => vec![match field.mut_token() {
+            Some(mut_token) => TextEdit {
+                range: TextRange::new(mut_token.text_range().start(), range.end()),
+                insert: format!("{name} = mut _{name}"),
+            },
+            None => TextEdit {
+                range: TextRange::empty(range.end()),
+                insert: format!(" = _{name}"),
+            },
+        }],
+        None => vec![TextEdit {
             range,
             insert: format!("_{name}"),
-        }
+        }],
     };
     Some(Fix {
         label: format!("Rename to `_{name}`"),
-        edits: vec![FileEdit { file, edit }],
+        edits: edits
+            .into_iter()
+            .map(|edit| FileEdit { file, edit })
+            .collect(),
     })
 }

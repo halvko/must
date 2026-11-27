@@ -63,13 +63,10 @@ function patternRules(names, bound, named) {
       '}',
     ),
 
-    // With a rename the first name selects a field and binds nothing.
-    [names.record_pat_field]: $ => seq(
-      optional('mut'),
-      choice(
-        field('name', bound($)),
-        seq(field('name', $._name), 'as', field('rename', bound($))),
-      ),
+    // With `= pattern` the name selects a field and binds nothing.
+    [names.record_pat_field]: $ => choice(
+      seq(optional('mut'), field('name', bound($))),
+      seq(field('name', $._name), '=', field('pattern', $[names.nested])),
     ),
 
     [names.newtype_pat]: $ => prec(1, seq(

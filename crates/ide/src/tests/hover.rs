@@ -456,7 +456,7 @@ fn hover_record_destructured_binding_use() {
 #[test]
 fn hover_record_destructure_rename_shows_the_new_name() {
     check_hover(
-        r#"static f = fn { let struct { x as alpha }: struct { x: usize } = struct { x = 1 }; let b = alpha$0; };"#,
+        r#"static f = fn { let struct { x = alpha }: struct { x: usize } = struct { x = 1 }; let b = alpha$0; };"#,
         "```must\nalpha: usize\n```",
     );
 }

@@ -300,12 +300,12 @@ fn a_destructuring_let_without_an_initializer_is_refused() {
 type Point = struct { x: usize, y: usize };
 static main = fn () -> () {
     let struct { x, y };
-    let Point(struct { x as a, y as b }): Point;
+    let Point(struct { x = a, y = b }): Point;
 };
 "#,
         expect![[r#"
             81..96: a destructuring `let` needs a value: only a single name can be declared without one
-            106..138: a destructuring `let` needs a value: only a single name can be declared without one
+            106..136: a destructuring `let` needs a value: only a single name can be declared without one
         "#]],
     );
 }

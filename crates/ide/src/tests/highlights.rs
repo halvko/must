@@ -704,8 +704,8 @@ static rep = const fn::<const N: usize>(v: usize) -> [usize; N] { [v; N] };
 fn highlights_leave_a_renamed_pattern_field_name_plain() {
     check_highlights(
         r#"
-static f = fn (struct { y as z }: struct { y: usize }) -> usize {
-    let struct { y as w } = struct { y = z };
+static f = fn (struct { y = z }: struct { y: usize }) -> usize {
+    let struct { y = w } = struct { y = z };
     w
 };
 "#,
@@ -715,21 +715,21 @@ static f = fn (struct { y as z }: struct { y: usize }) -> usize {
             10..11 "=" Operator
             12..14 "fn" Keyword
             16..22 "struct" Keyword
-            27..29 "as" Keyword
-            30..31 "z" Parameter.declaration
-            35..41 "struct" Keyword
-            47..52 "usize" Type.defaultLibrary
-            56..58 "->" Operator
-            59..64 "usize" Type.defaultLibrary
-            71..74 "let" Keyword
-            75..81 "struct" Keyword
-            86..88 "as" Keyword
-            89..90 "w" Variable.declaration
-            93..94 "=" Operator
-            95..101 "struct" Keyword
-            106..107 "=" Operator
-            108..109 "z" Parameter
-            117..118 "w" Variable
+            27..28 "=" Operator
+            29..30 "z" Parameter.declaration
+            34..40 "struct" Keyword
+            46..51 "usize" Type.defaultLibrary
+            55..57 "->" Operator
+            58..63 "usize" Type.defaultLibrary
+            70..73 "let" Keyword
+            74..80 "struct" Keyword
+            85..86 "=" Operator
+            87..88 "w" Variable.declaration
+            91..92 "=" Operator
+            93..99 "struct" Keyword
+            104..105 "=" Operator
+            106..107 "z" Parameter
+            115..116 "w" Variable
         "#]],
     );
 }
