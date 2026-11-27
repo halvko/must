@@ -177,28 +177,34 @@ fn string_literal(text: &str) -> Option<String> {
     None
 }
 
-#[test]
-fn every_error_traps() {
-    let mut corpus = Vec::new();
-    let examples = concat!(env!("CARGO_MANIFEST_DIR"), "/../../examples");
-    let mut paths: Vec<_> = std::fs::read_dir(examples)
+/// The contents of every `.{ext}` file in `dir`, a directory relative to
+/// this crate, in name order.
+fn sources(dir: &str, ext: &str) -> Vec<String> {
+    let dir = format!("{}/{dir}", env!("CARGO_MANIFEST_DIR"));
+    let mut paths: Vec<_> = std::fs::read_dir(dir)
         .unwrap()
         .map(|entry| entry.unwrap().path())
-        .filter(|path| path.extension().is_some_and(|ext| ext == "must"))
+        .filter(|path| path.extension().is_some_and(|e| e == ext))
         .collect();
     paths.sort();
-    for path in paths {
-        corpus.push(std::fs::read_to_string(path).unwrap());
+    paths
+        .iter()
+        .map(|path| std::fs::read_to_string(path).unwrap())
+        .collect()
+}
+
+#[test]
+fn every_error_traps() {
+    let mut corpus = sources("../../examples", "must");
+    for (tests, helper) in [
+        ("../hir/src/tests", "check_diagnostics("),
+        ("../syntax/src/tests", "check_errors("),
+        ("src/tests", "check_loans("),
+    ] {
+        for source in sources(tests, "rs") {
+            corpus.extend(programs(&source, helper));
+        }
     }
-    corpus.extend(programs(
-        include_str!("../../hir/src/tests.rs"),
-        "check_diagnostics(",
-    ));
-    corpus.extend(programs(
-        include_str!("../../syntax/src/tests.rs"),
-        "check_errors(",
-    ));
-    corpus.extend(programs(include_str!("tests.rs"), "check_loans("));
     // Each program builds its own database, so the corpus splits cleanly
     // across threads.
     let threads = std::thread::available_parallelism().map_or(1, |n| n.get());

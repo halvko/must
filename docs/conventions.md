@@ -39,6 +39,15 @@ here; they live in `docs/design/`.
 
 ## Tests
 
+- A crate whose tests live in `src/tests/` keeps one file per topic
+  there, and the module root (`tests/mod.rs` or `tests.rs`) holds only
+  the helpers and fixtures two or more topics share; a fixture one topic
+  uses lives in that topic's file. A new test goes in the file for what
+  it checks, beside the tests it relates to. When it checks a feature
+  through a cross-cutting mechanism (joins, poison, recovery), the
+  feature's file wins; a mechanism's file holds only the tests no feature
+  file owns. When no file fits, the test starts one and the module root
+  declares it.
 - A multi-line test program is a raw string, `r#"..."#`, opening on its
   own line with the program at column zero and indented by brace depth. No
   `"...\n\` line continuations: they hide every `"` behind a backslash and
