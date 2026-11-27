@@ -42,6 +42,17 @@ pub struct Diagnostic {
 pub struct Fix {
     pub label: String,
     pub edits: Vec<FileEdit>,
+    /// Files the fix creates, applied before `edits`.
+    pub new_files: Vec<NewFile>,
+}
+
+/// An empty file a [`Fix`] creates, named relative to the directory of an
+/// existing file. It is left alone if it exists.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NewFile {
+    /// The file whose directory gets the new file.
+    pub beside: SourceFile,
+    pub name: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -110,6 +121,18 @@ impl AnalysisHost {
         file.set_text(&mut self.db).to(text);
     }
 
+    /// Says where `file` belongs (see [`base_db::Membership`]), and returns
+    /// whether that changed. Setting what it already is bumps no revision,
+    /// so in-flight queries go on.
+    pub fn set_membership(&mut self, file: SourceFile, membership: base_db::Membership) -> bool {
+        use salsa::Setter as _;
+        let changed = file.membership(&self.db) != membership;
+        if changed {
+            file.set_membership(&mut self.db).to(membership);
+        }
+        changed
+    }
+
     /// Empties the text of a document the client has closed. The handle stays
     /// valid and reads as an empty file until [`AnalysisHost::set_file_text`]
     /// gives it content again.
@@ -172,6 +195,7 @@ impl Analysis {
                 related: d.related,
             })
             .collect();
+        diagnostics.extend(standalone_hint(&self.db, file));
         // MIR is a diagnostic producer like any other analysis (it finds
         // what only the CFG can see — unsupported captures, the loan
         // liveness half of the borrow checker, and the path-sensitive half
@@ -564,6 +588,27 @@ pub fn cancellable<T>(f: impl FnOnce() -> T) -> Option<T> {
 #[cfg(test)]
 mod tests;
 
+/// The hint a standalone file (no `must.toml` above it) gets on its first
+/// line, so being outside a project shows before any `use` fails. It offers
+/// the same fix as a `use` there.
+fn standalone_hint(db: &RootDatabase, file: SourceFile) -> Option<Diagnostic> {
+    if file.membership(db) != base_db::Membership::Standalone {
+        return None;
+    }
+    // The first word of the first line: low-key, and narrow enough to leave
+    // whatever else is diagnosed there visible.
+    let first_line = file.text(db).lines().next().unwrap_or("");
+    let word = first_line.split_whitespace().next().unwrap_or("");
+    let start = TextSize::of(&first_line[..first_line.len() - first_line.trim_start().len()]);
+    Some(Diagnostic {
+        range: TextRange::at(start, TextSize::of(word)),
+        severity: Severity::Info,
+        message: "standalone file, not in a project (no `must.toml` above it)".to_owned(),
+        fix: Some(in_file(file, hir::create_manifest_fix())),
+        related: Vec::new(),
+    })
+}
+
 /// A syntax-level fix, whose edits are all in `file`.
 fn in_file(file: SourceFile, fix: syntax::Fix) -> Fix {
     Fix {
@@ -572,6 +617,9 @@ fn in_file(file: SourceFile, fix: syntax::Fix) -> Fix {
             .edits
             .into_iter()
             .map(|edit| FileEdit { file, edit })
+            .collect(),
+        new_files: (fix.new_files.into_iter())
+            .map(|name| NewFile { beside: file, name })
             .collect(),
     }
 }
@@ -608,5 +656,6 @@ fn prefix_underscore_fix(
     Some(Fix {
         label: format!("Rename to `_{name}`"),
         edits: vec![FileEdit { file, edit }],
+        new_files: Vec::new(),
     })
 }

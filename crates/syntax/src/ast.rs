@@ -856,6 +856,7 @@ impl Name {
                 range: crate::TextRange::empty(slot),
                 insert: "mut ".to_owned(),
             }],
+            new_files: Vec::new(),
         })
     }
 }

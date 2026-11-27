@@ -535,6 +535,7 @@ fn reject_element_outside_group(
                 insert: " }".to_owned(),
             }))
             .collect(),
+            new_files: Vec::new(),
         }),
     });
 }
@@ -591,6 +592,7 @@ fn require_impl_head(impl_element: &ast::ImplElement, errors: &mut Vec<SyntaxErr
                 range: TextRange::empty(impl_token.text_range().end()),
                 insert: format!(" {head}"),
             }],
+            new_files: Vec::new(),
         });
     errors.push(SyntaxError {
         message: "expected a name after `impl`".to_owned(),
@@ -1036,6 +1038,7 @@ fn require_mut_names_a_binding(
                 range: TextRange::new(mut_token.text_range().start(), hole.text_range().start()),
                 insert: String::new(),
             }],
+            new_files: Vec::new(),
         }),
     });
 }
@@ -1079,6 +1082,7 @@ fn reject_type_item_annotation(type_item: &ast::TypeItem, errors: &mut Vec<Synta
                 range,
                 insert: String::new(),
             }],
+            new_files: Vec::new(),
         }),
     });
 }
@@ -1104,6 +1108,7 @@ fn validate_trait_item(trait_item: &ast::TraitItem, errors: &mut Vec<SyntaxError
                     range,
                     insert: String::new(),
                 }],
+                new_files: Vec::new(),
             }),
         });
     }
@@ -1378,6 +1383,7 @@ fn reject_unqualified_bare_variant_pat(
                 range: TextRange::empty(name_ref.syntax().text_range().start()),
                 insert: "::".to_owned(),
             }],
+            new_files: Vec::new(),
         }),
     });
 }
@@ -1465,6 +1471,7 @@ fn reject_bare_angle_generic_args(
                 range: TextRange::empty(name_ref.syntax().text_range().end()),
                 insert: "::".to_owned(),
             }],
+            new_files: Vec::new(),
         }),
     });
 }
@@ -1501,6 +1508,7 @@ fn rewrite_to_postfix_fix(node: TextRange, operand: TextRange, suffix: &str) -> 
                 insert: suffix.to_owned(),
             },
         ],
+        new_files: Vec::new(),
     }
 }
 
@@ -1628,6 +1636,7 @@ fn reject_region_arg_on_borrow_expr(borrow: &ast::BorrowExpr, errors: &mut Vec<S
                 range,
                 insert: String::new(),
             }],
+            new_files: Vec::new(),
         }),
     });
 }
@@ -1778,6 +1787,7 @@ fn require_regions_first(list: &ast::GenericParamList, errors: &mut Vec<SyntaxEr
                     let fix = Some(Fix {
                         label: format!("Move `{name}` before `{earlier}`"),
                         edits,
+                        new_files: Vec::new(),
                     });
                     errors.push(SyntaxError {
                         message: format!(
@@ -1856,6 +1866,7 @@ fn validate_extern_static(item: &ast::StaticItem, errors: &mut Vec<SyntaxError>)
                 range: keyword.text_range(),
                 insert: "static".to_owned(),
             }],
+            new_files: Vec::new(),
         });
         errors.push(SyntaxError {
             message: EXTERN_ONLY_ON_STATIC.to_owned(),
@@ -1875,6 +1886,7 @@ fn validate_extern_static(item: &ast::StaticItem, errors: &mut Vec<SyntaxError>)
                     range: TextRange::empty(marker.text_range().start()),
                     insert: "unsafe ".to_owned(),
                 }],
+                new_files: Vec::new(),
             }),
         });
     }
@@ -1906,6 +1918,7 @@ fn validate_extern_static(item: &ast::StaticItem, errors: &mut Vec<SyntaxError>)
                     ),
                     insert: String::new(),
                 }],
+                new_files: Vec::new(),
             }),
         });
     }
@@ -1969,6 +1982,7 @@ fn validate_extern_annotation(ty: &ast::Type, errors: &mut Vec<SyntaxError>) {
                             range: TextRange::empty(end),
                             insert: " -> ()".to_owned(),
                         }],
+                        new_files: Vec::new(),
                     }),
                 });
             }
@@ -2081,6 +2095,7 @@ fn reject_fn_type_param_pattern(param: &ast::Param, errors: &mut Vec<SyntaxError
             range: TextRange::new(start, ty.syntax().text_range().start()),
             insert: String::new(),
         }],
+        new_files: Vec::new(),
     });
     errors.push(SyntaxError {
         message: FN_TYPE_PARAM_IS_BARE.to_owned(),
@@ -2134,6 +2149,7 @@ fn validate_item_head(head: &ast::ItemHead, errors: &mut Vec<SyntaxError>) {
                     range: remove,
                     insert: String::new(),
                 }],
+                new_files: Vec::new(),
             }),
         });
     }
@@ -2173,6 +2189,7 @@ fn reject_misordered_head(
                 range: head.syntax().text_range(),
                 insert: ordered,
             }],
+            new_files: Vec::new(),
         }),
     });
 }
@@ -2216,6 +2233,7 @@ fn require_block(expr: &ast::Expr, rule: &str, errors: &mut Vec<SyntaxError>) {
                     insert: " }".to_owned(),
                 },
             ],
+            new_files: Vec::new(),
         }),
     });
 }

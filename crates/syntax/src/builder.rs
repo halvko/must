@@ -204,6 +204,7 @@ impl Builder<'_> {
                 range: fix_at,
                 insert,
             }],
+            new_files: Vec::new(),
         });
         self.push_error(SyntaxError {
             message,
@@ -242,6 +243,7 @@ impl Builder<'_> {
                     range,
                     insert: joined,
                 }],
+                new_files: Vec::new(),
             }),
         });
     }

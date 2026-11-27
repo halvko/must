@@ -729,3 +729,50 @@ fn a_stale_loan_refusal_carries_its_companions() {
     // The holder's use is its own read, in `a.*`.
     assert_eq!(&src[errors[0].related[1].range], "a");
 }
+
+#[test]
+fn a_standalone_file_gets_a_hint_and_cannot_import() {
+    // No `must.toml` above it: a hint on the first word of the first line,
+    // and an error at each `use`, both offering to create the manifest.
+    let mut host = AnalysisHost::new();
+    // The text starts right after `r#"`, not on its own line: the hint sits
+    // on the first line, and this one is indented to check the hint skips
+    // the indent.
+    let text = r#"  use util::{a, b};
+static main = fn {};
+"#;
+    let file = host.create_file("main.must".to_owned(), text.to_owned());
+    host.set_membership(file, base_db::Membership::Standalone);
+    let rendered: String = (host.snapshot().diagnostics(file).iter())
+        .map(|d| {
+            let fix = d.fix.as_ref().expect("both offer the manifest");
+            assert!(fix.edits.is_empty());
+            let new_files: Vec<_> = (fix.new_files.iter())
+                .map(|f| (f.beside, f.name.as_str()))
+                .collect();
+            assert_eq!(new_files, [(file, "must.toml")]);
+            format!(
+                "{:?} {:?} '{}': {} [{}]\n",
+                d.severity, d.range, &text[d.range], d.message, fix.label
+            )
+        })
+        .collect();
+    expect_test::expect![[r#"
+        Info 2..5 'use': standalone file, not in a project (no `must.toml` above it) [Create `must.toml` here, making this directory a project]
+        Error 6..10 'util': this file isn't in a project (no `must.toml` above it), so it cannot import from `util` [Create `must.toml` here, making this directory a project]
+    "#]].assert_eq(&rendered);
+
+    // A file loaded by itself without looking for its library keeps saying
+    // just that, with nothing to create.
+    host.set_membership(file, base_db::Membership::Unknown);
+    let messages: Vec<_> = (host.snapshot().diagnostics(file).into_iter())
+        .map(|d| (d.message, d.fix))
+        .collect();
+    assert_eq!(
+        messages,
+        [(
+            "this file is loaded on its own, so it cannot import from `util`".to_owned(),
+            None
+        )]
+    );
+}

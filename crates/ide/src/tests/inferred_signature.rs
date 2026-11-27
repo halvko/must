@@ -404,6 +404,7 @@ static main = fn { g(h, 1); };
                     edit: edit.clone(),
                 })
                 .collect(),
+            new_files: Vec::new(),
         };
         assert_eq!(
             apply_fix(text, &fix),

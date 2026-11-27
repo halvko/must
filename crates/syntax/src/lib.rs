@@ -52,6 +52,9 @@ pub struct Fix {
     /// Shown to the user, e.g. as a quick-fix title.
     pub label: String,
     pub edits: Vec<TextEdit>,
+    /// Empty files the fix creates beside the fixed file, by name, before
+    /// its edits; one that exists is left alone.
+    pub new_files: Vec<String>,
 }
 
 /// Replace `range` with `insert`; an empty range is a pure insertion.
@@ -110,6 +113,7 @@ pub fn insert_lines_fix(
     Fix {
         label: label.to_owned(),
         edits: vec![TextEdit { range, insert }],
+        new_files: Vec::new(),
     }
 }
 

@@ -19,10 +19,35 @@ pub struct SourceFile {
     pub path: String,
     #[returns(ref)]
     pub text: String,
-    /// The library the file belongs to, whose files it can import from; a
-    /// file in no library is a library by itself.
     #[default]
-    pub library: Option<Library>,
+    pub membership: Membership,
+}
+
+/// Where a file belongs. The nearest `must.toml` at or above a file marks
+/// its library's root; a file with none above it is standalone.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, salsa::Update)]
+pub enum Membership {
+    /// Loaded by itself without looking for its library (tests, the
+    /// editor), so it may well have one.
+    // TODO: halvko/must#149: the editor loads only open buffers, each as
+    // `Unknown`; it should load each file's library.
+    #[default]
+    Unknown,
+    /// No `must.toml` above it: a library of one file, which has nothing to
+    /// import.
+    Standalone,
+    /// One of the files of `Library`.
+    Library(Library),
+}
+
+impl SourceFile {
+    /// The library the file is one of, if it was loaded as one.
+    pub fn library(self, db: &dyn Db) -> Option<Library> {
+        match self.membership(db) {
+            Membership::Library(library) => Some(library),
+            Membership::Unknown | Membership::Standalone => None,
+        }
+    }
 }
 
 /// The files of one directory tree. Each file is a module; a `use` path
@@ -45,12 +70,20 @@ pub fn new_library(db: &mut dyn Db, root: &str, files: Vec<(String, String)>) ->
         .into_iter()
         .map(|(path, text)| {
             let file = SourceFile::new(db, path, text);
-            file.set_library(db).to(Some(library));
+            file.set_membership(db).to(Membership::Library(library));
             file
         })
         .collect();
     library.set_files(db).to(files.clone());
     files
+}
+
+/// Creates a standalone file: one with no `must.toml` above it.
+pub fn new_standalone(db: &mut dyn Db, path: String, text: String) -> SourceFile {
+    use salsa::Setter as _;
+    let file = SourceFile::new(db, path, text);
+    file.set_membership(db).to(Membership::Standalone);
+    file
 }
 
 /// The file the compiler-provided declarations belong to: one per
